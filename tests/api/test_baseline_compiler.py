@@ -373,3 +373,61 @@ def test_an_untouched_control_does_what_the_charts_baseline_does() -> None:
 def test_unreadable_input_is_not_covered_rather_than_an_error() -> None:
     assert not baseline.covers("", _CHART)
     assert not baseline.covers(baseline.compile(PRESET, {}), "")
+
+
+# Lines in a chart's CONTROLS region that the parser used to misread. Each is a real rule to OPA (the
+# engine tests run them), and each was dropped by the re-render while `covers()` held, so a save
+# stopped the rule enforcing without anyone switching it off.
+_SHELL_HEAD = 'blocks["deny_shell_execution"] { shell_injection_detected }'
+_PII_HEAD = 'blocks["pii_detection"] { pii_detected }'
+_NEWSLETTER = 'input.tool_name == "send_newsletter"'
+#: Rego lets one head carry several bodies; these begin like the compiler's never-fires placeholder.
+PLACEHOLDER_LOOKALIKES = {
+    "placeholder, then a second body": _CHART.replace(_SHELL_HEAD, _SHELL_HEAD + '\nblocks[id] { false; id := "__never__" } '
+                                                     f'{{ {_NEWSLETTER}; id := "no_newsletter" }}', 1),
+    "placeholder-shaped first body": _CHART.replace(_SHELL_HEAD, _SHELL_HEAD + '\nblocks[id] {false; id := 1} '
+                                                    f'{{ {_NEWSLETTER}; id := "no_newsletter" }}', 1),
+}
+#: `_HEAD_RE`'s guard is greedy, so these read as one pii_detection head.
+HEADS_CARRYING_A_SECOND_RULE = {
+    "second head on the line": _CHART.replace(_PII_HEAD, f'{_PII_HEAD} blocks["no_newsletter"] {{ {_NEWSLETTER} }}', 1),
+    "second body on the line": _CHART.replace(_PII_HEAD, f"{_PII_HEAD} {{ {_NEWSLETTER} }}", 1),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PLACEHOLDER_LOOKALIKES))
+def test_a_line_that_only_begins_like_the_placeholder_is_not_covered(name: str) -> None:
+    """The placeholder was recognised by its first characters, so these were skipped as generated,
+    `_render` dropped them, and a module compiled with nothing changed covered the chart."""
+    chart = PLACEHOLDER_LOOKALIKES[name]
+    assert chart != _CHART, "fixture: anchor moved"
+    with pytest.raises(ValueError, match="unparsable line"):
+        baseline.parse_heads(baseline._split_region(chart)[1])
+    for effects in ({}, {"pii_detection": "off"}):
+        assert not baseline.covers(baseline.compile(PRESET, effects), chart), effects
+
+
+@pytest.mark.parametrize("name", sorted(HEADS_CARRYING_A_SECOND_RULE))
+def test_a_head_line_carrying_a_second_rule_is_not_covered(name: str) -> None:
+    """With pii_detection Off the re-render dropped the whole line, the second rule with it."""
+    chart = HEADS_CARRYING_A_SECOND_RULE[name]
+    assert chart != _CHART, "fixture: anchor moved"
+    with pytest.raises(ValueError, match="unparsable line"):
+        baseline.parse_heads(baseline._split_region(chart)[1])
+    for effects in ({}, {"pii_detection": "off"}, {"pii_detection": "monitor"}):
+        assert not baseline.covers(baseline.compile(PRESET, effects), chart), effects
+
+
+def test_the_compilers_own_placeholders_still_read_back() -> None:
+    """The other direction: the exact lines `_render` writes are skipped, so an all-Monitor or all-Off
+    module (one or three placeholders) still parses and covers, and a guard with braces inside a
+    string or an object literal is still one body."""
+    ids = baseline.control_ids(PRESET)
+    for effect in ("monitor", "off"):
+        compiled = baseline.compile(PRESET, {cid: effect for cid in ids})
+        region = baseline._split_region(compiled)[1]
+        assert any(line in baseline._NEVER_FIRES_LINES for line in region.splitlines()), effect
+        baseline.parse_heads(region)
+        assert baseline.covers(compiled, _CHART), effect
+    for guard in (' input.x == {"a": 1} ', ' input.x == "}" ', " `{` == input.x "):
+        assert baseline._one_body(guard), guard

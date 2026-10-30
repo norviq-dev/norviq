@@ -4,9 +4,14 @@
 // Baseline controls — the shipped detectors, each set to Off / Monitor / Enforce for one namespace.
 //
 // A preset used to be all-or-nothing, which meant the only way to stop a noisy control dropping
-// legitimate traffic was to turn the whole baseline off. Every control ships on Monitor: it evaluates
-// and records a non-compliant call without interrupting it, and the operator promotes the ones they
-// want to Enforce once they can see what that would cost.
+// legitimate traffic was to turn the whole baseline off. Each control's default is what the chart's
+// strict baseline does with it (20 of 21 at Enforce — mcp_definition_drift and
+// mcp_definition_never_scanned hold the call for approval, llm06_excessive_agency blocks destructive
+// tools and holds elevated ones — and scope_violation_dangerous_tool at Monitor), and that baseline
+// enforces from install (0.2.6). This panel is the per-control way off: Monitor records a call without
+// interrupting it, Off stops the control evaluating. Once saved, the panel's effects replace the
+// chart's copy of the baseline in this namespace (when it is the same strict preset), so they govern
+// whichever mode the chart was installed in.
 //
 // The rows carry HEADINGS ONLY. Each control used to render its description and, where it had one, a
 // paragraph of false-positive caveat — twenty-one rows of prose, which is what made the panel
@@ -307,11 +312,28 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
             `consequenceOf` uses it on every row. For `scope_violation_dangerous_tool` the intro said
             Enforce blocks the call while that row's own consequence text, three inches below, read
             "recorded, call proceeds" — two contradictory sentences on one screen, the louder one
-            wrong. The intro now defers to the row, which is the thing that actually knows. */}
-        The shipped detectors, one row each. <b>Monitor</b> evaluates the call, records it as
-        non-compliant and lets it through. <b>Enforce</b> acts on it — each row says exactly how,
-        because a few hold the call for approval rather than blocking it. Nothing is enforced until you
-        say so.
+            wrong. The intro now defers to the row, which is the thing that actually knows.
+
+            It also ended "Nothing is enforced until you say so". From 0.2.6 the chart's baseline
+            refuses calls from install and 20 rows arrive at Enforce, so that was the opposite of the
+            truth on the panel that turns them off. Nor is "the rows are what happens" true: the rows
+            are what THIS PANEL says, and what is refused also depends on the chart's
+            enforcementMode (until a save) and on the namespace's own mode. Both are named here. */}
+        The shipped detectors, one row each. A row nobody has changed shows its default, which is what
+        the chart&apos;s baseline does with that control — most arrive at <b>Enforce</b>.{" "}
+        <b>Enforce</b> acts on the call — each row says exactly how, because a few hold the call for
+        approval rather than blocking it. <b>Monitor</b> evaluates the call, records it as non-compliant
+        and lets it through. <b>Off</b> stops the control evaluating.
+        <div data-testid="baseline-intro-posture" style={{ marginTop: 6 }}>
+          Whether a call is refused also depends on two settings outside this panel. Until you save
+          here, the chart&apos;s baseline decides: it refuses by default, only records if the chart was
+          installed with <code>baselineClusterPolicy.enforcementMode=audit</code>, and is absent from a
+          namespace the chart does not list in <code>policyQuotaNamespaces</code>. Once you save, these
+          rows decide in its place in either install mode — saving under an audit install starts
+          refusing what is at Enforce — as long as the chart&apos;s baseline is the shipped strict preset
+          (its default); on any other it keeps applying beside them. A namespace set to <b>Monitor</b> in Target Settings records
+          every call and refuses none, whatever these rows say.
+        </div>
       </div>
 
       {controls.loading && <div data-testid="baseline-loading" style={{ fontSize: 13, color: "var(--text-muted)" }}>Loading controls…</div>}

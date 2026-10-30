@@ -84,6 +84,28 @@ async def _stored_effects(session: AsyncSession, namespace: str) -> dict[str, st
     return {row.control_id: row.effect for row in rows}
 
 
+#: How strict each effect is, so a save in flight can hold the stricter of a control's old and new one.
+_STRICTNESS = {"off": 0, "monitor": 1, "deny": 2}
+
+
+def _known_only(preset: str, stored: dict[str, str]) -> dict[str, str]:
+    """Stored rows the preset can still compile; a row for a removed control is replaced by the save."""
+    known = set(baseline_lib.control_ids(preset))
+    return {cid: eff for cid, eff in stored.items() if cid in known and eff in _STRICTNESS}
+
+
+async def _stored_module(loader, namespace: str) -> str | None:
+    """The namespace's stored `__controls__` text, when it is one this router wrote as it writes it."""
+    load = getattr(loader, "load_from_db", None)
+    if load is None:  # the router's unit-test double
+        return None
+    current = await load(namespace, _CONTROLS_KEY)
+    if (not current or current.get("enforcement_mode") != "block"
+            or int(current.get("priority", 0)) != _CONTROLS_PRIORITY):
+        return None
+    return str(current["rego"])
+
+
 async def _materialize(request: Request, namespace: str, preset: str, effects: dict[str, str]) -> str:
     """Recompile the namespace's baseline and write it through the normal loader path."""
     return await _write_controls(request.app.state.loader, namespace, preset, effects)
@@ -149,10 +171,7 @@ async def rematerialize_controls(loader, namespaces: list[str] | None = None) ->
                     stored = {str(r["control_id"]): str(r["effect"]) for r in (await conn.execute(text(
                         "SELECT control_id, effect FROM namespace_baseline_controls WHERE namespace = :ns"),
                         {"ns": namespace})).mappings().all()}
-                wanted = baseline_lib.compile(preset, stored)
-                current = await loader.load_from_db(namespace, _CONTROLS_KEY)
-                if (current and current["rego"] == wanted and current.get("enforcement_mode") == "block"
-                        and int(current.get("priority", 0)) == _CONTROLS_PRIORITY):
+                if await _stored_module(loader, namespace) == baseline_lib.compile(preset, stored):
                     continue
                 await _write_controls(loader, namespace, preset, stored, saved_by="baseline-controls:startup")
                 rewritten += 1
@@ -244,7 +263,23 @@ async def set_controls(
 
     # Rows and module under one lock, so the startup re-render can never interleave a module compiled
     # from the rows this request is replacing (_controls_lock).
-    async with _controls_lock(request.app.state.loader, namespace):
+    loader = request.app.state.loader
+    async with _controls_lock(loader, namespace):
+        # The rows (what GET shows) and the module (what the engine enforces, in place of the chart's
+        # baseline) are two writes, and either can fail. They were written rows first: measured with the
+        # module write failing after deny_shell_execution had been Off, GET showed Enforce while the old
+        # Off module kept replacing the chart (allow/default_allow) until the next API start. So the
+        # module is never left weaker than the rows on either side of the save: first a module at the
+        # STRICTER of the old and new effect for every control, then the rows, then the module the rows
+        # describe. A failure at any step leaves the engine at least as strict as GET (fail closed); the
+        # request still answers 500, and the next save or API start re-renders from the rows.
+        stored = _known_only(body.preset, await _stored_effects(session, namespace))
+        before = baseline_lib.normalize_effects(body.preset, stored)
+        interim = {cid: max(before[cid], eff, key=_STRICTNESS.__getitem__) for cid, eff in resolved.items()}
+        rego = baseline_lib.compile(body.preset, interim)
+        if await _stored_module(loader, namespace) != rego:
+            await _materialize(request, namespace, body.preset, interim)
+
         await session.execute(
             sql_delete(NamespaceBaselineControl).where(NamespaceBaselineControl.namespace == namespace)
         )
@@ -269,7 +304,8 @@ async def set_controls(
             )
         await session.commit()
 
-        rego = await _materialize(request, namespace, body.preset, resolved)
+        if interim != resolved:  # the save relaxed something: only now, with the rows saying so
+            rego = await _materialize(request, namespace, body.preset, resolved)
     promoted = sorted(cid for cid, eff in resolved.items() if eff == "deny")
     disabled = sorted(cid for cid, eff in resolved.items() if eff == "off")
     log.info(

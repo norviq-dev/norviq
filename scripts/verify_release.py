@@ -55,6 +55,25 @@ VERIFY_PASSWORD = "verify-release-not-a-real-secret-9137"
 # Every kubectl/helm call in this repo needs it on macOS; harmless on Linux runners.
 ENV_EXTRA = {"GODEBUG": "netdns=go"}
 
+# What a STOCK install answers for the gate's identity (TENANT, class chatbot, no class policy). From
+# 0.2.6 the chart's namespace baseline enforces: the strict preset as authored, enforcementMode block,
+# every control at its shipped default (20 act on the call, scope_violation_dangerous_tool records), so
+# execute_sql is refused by strict_default_block. Through 0.2.5 the baseline ran in audit and the same
+# call read audit + policy_audit_would_block:strict_default_block. (tool, params, decision, rule_id)
+# tests/release/test_verify_release_expectations.py runs these through the real resolver, so a default
+# the gate does not follow fails there rather than on release day.
+STOCK_PROBES = [
+    ("search_kb", {"q": "refund policy"}, "allow", "default_allow"),
+    ("execute_sql", {"query": "SELECT * FROM users"}, "block", "strict_default_block"),
+]
+# The per-control way off and back, for the same execute_sql call: (effects PUT to /baseline/controls,
+# decision, rule_id). Monitor must RECORD under the bare rule id (the saved controls replace the chart's
+# copy; a chart that kept deciding would still block), and the default must block again.
+CONTROL_ROUND_TRIP = [
+    ({"strict_default_block": "monitor"}, "audit", "strict_default_block"),
+    ({}, "block", "strict_default_block"),
+]
+
 results: list[tuple[str, bool, str]] = []
 
 
@@ -266,24 +285,18 @@ def check_enforcement(ctx: str) -> str:
 
         identity = {"namespace": TENANT, "agent_class": "chatbot",
                     "spiffe_id": f"spiffe://norviq/ns/{TENANT}/sa/chatbot", "workload": "chatbot"}
-        # A STOCK install ships all 14 baseline controls on `monitor`, so a high-risk tool is
-        # RECORDED, not refused: `audit` + `policy_audit_would_block:strict_default_block`. This
-        # check asserted `block`, which was the contract BEFORE the allow-by-default work, and it
-        # failed the release gate on correct behaviour.
-        #
-        # Relaxing it to `audit` alone would be worse than the stale expectation, because this gate
-        # exists to prove the artifact ENFORCES — and "the control fired but nothing was stopped" is
-        # exactly the false assurance this product's own findings are about. So both halves are
-        # checked: the shipped default RECORDS, and the same call BLOCKS once the operator promotes
-        # the control. That is the monitor -> promote story the product actually ships.
+        # A STOCK install refuses a high-risk tool name (STOCK_PROBES): the namespace baseline enforces
+        # from 0.2.6. This gate exists to prove the artifact ENFORCES, so the default is checked as a
+        # block, and then the per-control way off is checked to reach the engine and come back
+        # (CONTROL_ROUND_TRIP): a gate that only ever saw the block could not tell an artifact whose
+        # console switch does nothing from one that works, and during 0.2.6 it did nothing (Off and
+        # Monitor still came back block / deny_shell_execution) until saved controls replaced the
+        # chart's copy.
         def _evaluate(tool: str, params: dict) -> dict:
             return _api(port, "/api/v1/evaluate", token,
                         {"tool_name": tool, "tool_params": params, "agent_identity": identity})
 
-        for tool, params, want, want_rule in [
-            ("search_kb", {"q": "refund policy"}, "allow", "default_allow"),
-            ("execute_sql", {"query": "SELECT * FROM users"}, "audit", "strict_default_block"),
-        ]:
+        for tool, params, want, want_rule in STOCK_PROBES:
             try:
                 d = _evaluate(tool, params)
                 got, rule = d.get("decision"), str(d.get("rule_id") or "")
@@ -327,28 +340,35 @@ def check_enforcement(ctx: str) -> str:
         except (urllib.error.URLError, OSError, json.JSONDecodeError):
             pass  # transport trouble: fall through and let the PUT report it
 
-        try:
-            _api(port, "/api/v1/baseline/controls", token,
-                 {"namespace": TENANT, "effects": {"strict_default_block": "deny"}}, method="PUT")
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404 and not router_present:
-                print("  [SKIP] promote-to-deny: this artifact has no /baseline/controls router at all "
-                      "(released images are built from main) — becomes a real check once main has it")
+        for effects, want, want_rule in CONTROL_ROUND_TRIP:
+            label = f"execute_sql -> {want} ({want_rule}) with baseline controls {effects or 'at the defaults'}"
+            try:
+                _api(port, "/api/v1/baseline/controls", token, {"namespace": TENANT, "effects": effects},
+                     method="PUT")
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404 and not router_present:
+                    print("  [SKIP] baseline controls: this artifact has no /baseline/controls router at all "
+                          "(released images are built from main) — becomes a real check once main has it")
+                    return token
+                # Router present but the PUT 404'd, or any other status: that is a real failure.
+                check(label, False, f"HTTP {exc.code}" + ("" if router_present else " (and GET also 404)"))
                 return token
-            # Router present but the PUT 404'd, or any other status: that is a real failure.
-            check("promote strict_default_block to deny", False,
-                  f"HTTP {exc.code}" + ("" if router_present else " (and GET also 404)"))
-            return token
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-            check("promote strict_default_block to deny", False, str(exc))
-            return token
-        try:
-            d = _evaluate("execute_sql", {"query": "SELECT * FROM users"})
-            got = d.get("decision")
-            check("execute_sql BLOCKS once strict_default_block is promoted to deny",
-                  got == "block", f"got {got} ({d.get('rule_id')})")
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-            check("execute_sql BLOCKS once strict_default_block is promoted to deny", False, str(exc))
+            except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+                check(label, False, str(exc))
+                return token
+            # Exact rule id: a chart baseline that kept deciding in audit would read
+            # policy_audit_would_block:strict_default_block. Polled briefly, because the evaluate can land
+            # on the other API replica, which learns of the save over the policy stream.
+            seen: dict = {}
+
+            def _settled(effects_want: tuple[str, str] = (want, want_rule)) -> bool:
+                try:
+                    seen.update(_evaluate("execute_sql", {"query": "SELECT * FROM users"}))
+                except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+                    seen.update(decision="error", rule_id=str(exc))
+                return (seen.get("decision"), str(seen.get("rule_id") or "")) == effects_want
+
+            check(label, wait_until(_settled, 15, 1.0), f"got {seen.get('decision')} ({seen.get('rule_id')})")
         return token
     finally:
         pf.terminate()

@@ -29,6 +29,7 @@ from norviq.engine import evaluator as evaluator_mod
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.policy_loader import PolicyLoader
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+from tests.api.test_baseline_compiler import HEADS_CARRYING_A_SECOND_RULE, PLACEHOLDER_LOOKALIKES
 from tests.engine.test_priority_enforcement import FakeCache, _healthy_trust
 
 NS = "persona-legal"
@@ -187,6 +188,22 @@ async def test_saved_controls_do_not_supersede_a_baseline_built_from_another_pre
     policies = {**_chart(rego=moderate.read_text(encoding="utf-8")), **_controls(**everything_off)}
     assert await _decide(policies, ("run_report", {"query": "drop table users"})) == \
         ("block", "moderate_drop_block")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [*sorted(PLACEHOLDER_LOOKALIKES), "second head on the line"])
+async def test_a_chart_rule_the_parser_misread_still_enforces_after_a_save(name: str) -> None:
+    """A chart whose CONTROLS region carries a rule the compiler's parser misread: a line beginning like
+    its never-fires placeholder, or a second rule on a head's line. Measured before the fix with the
+    chart only, then with the controls saved: block/no_newsletter, then allow/default_allow — after a
+    save with nothing changed for the placeholder look-alikes, after pii_detection Off for the second
+    head. The chart now stays a floor beside the saved controls."""
+    chart = {**PLACEHOLDER_LOOKALIKES, **HEADS_CARRYING_A_SECOND_RULE}[name]
+    newsletter = ("send_newsletter", {"list": "everyone"})
+    want = ("block", "no_newsletter")
+    assert await _decide(_chart(rego=chart), newsletter) == want, "fixture: the chart does not block it"
+    for effects in ({}, {"pii_detection": "off"}):
+        assert await _decide({**_chart(rego=chart), **_controls(**effects)}, newsletter) == want, effects
 
 
 def _v025_module(**effects: str) -> str:
@@ -444,3 +461,258 @@ async def test_saving_controls_evicts_decisions_cached_under_the_chart_baseline(
     finally:
         await _drop_rows(loader)
         await ev.close()
+
+
+# --- PUT /baseline/controls against Postgres: what GET shows is never weaker than what the engine does ---
+#
+# The real set_controls / list_controls handlers, a real AsyncSession and PolicyLoader on the test
+# database, and a fresh evaluator per check, so the decision is what a replica reading Postgres gets.
+
+_SAVE_NS = "ctl-supersede-save"
+PII = ("update_record", {"field": "ssn", "value": "123-45-6789"})
+ADMIN = {"role": "admin", "sub": "supersede-test"}
+
+
+def _request(loader: PolicyLoader):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(loader=loader)))
+
+
+async def _put(loader: PolicyLoader, effects: dict, namespace: str = _SAVE_NS, on_session=None) -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from norviq.api.routers import baseline_router
+
+    async with AsyncSession(loader._db_engine(), expire_on_commit=False) as session:
+        if on_session is not None:
+            on_session(session)
+        await baseline_router.set_controls(baseline_router.ControlEffects(namespace=namespace, effects=effects),
+                                           _request(loader), user=ADMIN, session=session, _target=None)
+
+
+async def _shown(loader: PolicyLoader, namespace: str = _SAVE_NS) -> dict[str, str]:
+    """What GET /baseline/controls shows for every control."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from norviq.api.routers import baseline_router
+
+    async with AsyncSession(loader._db_engine()) as session:
+        body = await baseline_router.list_controls(namespace=namespace, preset="strict", user=ADMIN, session=session)
+    return {c["id"]: c["effect"] for c in body["controls"]}
+
+
+async def _stored_rows(loader: PolicyLoader, namespace: str = _SAVE_NS) -> dict[str, str]:
+    async with loader._db_engine().begin() as conn:
+        return {str(r[0]): str(r[1]) for r in (await conn.execute(text(
+            "SELECT control_id, effect FROM namespace_baseline_controls WHERE namespace = :ns"),
+            {"ns": namespace})).all()}
+
+
+async def _decided(call: tuple[str, dict], namespace: str = _SAVE_NS) -> tuple[str, str]:
+    """The decision of an evaluator that reads everything from Postgres (nothing in memory)."""
+    ev, loader = _db_loader()
+    try:
+        decision = await ev.evaluate(_event(*call, ns=namespace))
+    finally:
+        await ev.close()
+        await loader.close()
+    return decision.decision, decision.rule_id
+
+
+async def _assert_engine_not_weaker_than_get(loader: PolicyLoader, namespace: str = _SAVE_NS) -> dict[str, str]:
+    shown = await _shown(loader, namespace)
+    for cid, call in (("deny_shell_execution", SHELL), ("pii_detection", PII)):
+        got = await _decided(call, namespace)
+        if shown[cid] == "deny":
+            assert got == ("block", cid), f"GET shows {cid} at Enforce and the engine answers {got}"
+        elif shown[cid] == "monitor":
+            assert got in (("audit", cid), ("block", cid)), f"GET shows {cid} at Monitor and the engine answers {got}"
+    return shown
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["first module write", "rows commit", "second module write"])
+async def test_a_failed_save_never_leaves_the_engine_weaker_than_get(failing: str) -> None:
+    """The rows (GET) and the module (the engine, in place of the chart) are two writes. They were
+    written rows first, so a module write that failed after deny_shell_execution had been Off left GET
+    at Enforce while the old Off module kept replacing the chart: measured GET=deny, engine
+    allow/default_allow, until the next API start. This save tightens one control and relaxes another,
+    and each write fails in turn: whatever is left, the engine is at least as strict as GET says."""
+    ev, loader = _db_loader()
+    try:
+        await _drop_rows(loader, _SAVE_NS)
+        await loader.create(_SAVE_NS, "__baseline__", CHART, saved_by="chart", priority=1)
+        await _put(loader, {"deny_shell_execution": "off"})
+        assert await _decided(SHELL) == ("allow", "default_allow"), "fixture: Off did not relax the chart"
+
+        real_create, calls = loader.create, []
+
+        async def create(*args, **kwargs):
+            calls.append(args)
+            if (failing, len(calls)) in (("first module write", 1), ("second module write", 2)):
+                raise ConnectionError("postgres connection reset")
+            return await real_create(*args, **kwargs)
+
+        async def failing_commit() -> None:
+            raise ConnectionError("postgres connection reset")
+
+        def on_session(session) -> None:
+            if failing == "rows commit":
+                session.commit = failing_commit
+
+        loader.create = create
+        with pytest.raises(ConnectionError):
+            await _put(loader, {"deny_shell_execution": "deny", "pii_detection": "off"}, on_session=on_session)
+        loader.create = real_create
+        await _assert_engine_not_weaker_than_get(loader)
+
+        # A save that goes through afterwards leaves the module exactly what the rows describe.
+        await _put(loader, {"deny_shell_execution": "deny", "pii_detection": "off"})
+        stored = await loader.load_from_db(_SAVE_NS, "__controls__")
+        assert stored["rego"] == baseline.compile("strict", await _stored_rows(loader))
+        assert await _decided(SHELL) == ("block", "deny_shell_execution")
+        assert await _decided(PII) == ("allow", "default_allow")
+    finally:
+        await _drop_rows(loader, _SAVE_NS)
+        await ev.close()
+        await loader.close()
+
+
+async def _advisory_waiters(loader: PolicyLoader, namespace: str) -> int:
+    """Sessions waiting for the namespace's controls lock (baseline_router._controls_lock)."""
+    async with loader._db_engine().begin() as conn:
+        return int((await conn.execute(text(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1 "
+            "AND objid::bigint = (hashtext(:k)::bigint & 4294967295)"),
+            {"k": f"nrvq:baseline-controls:{namespace}"})).scalar_one())
+
+
+async def _until_blocked_or_done(loader: PolicyLoader, task: asyncio.Task, namespace: str) -> None:
+    """Return once `task` has finished or is waiting on the controls lock. Deterministic: without the
+    lock the task runs to completion; with it, it shows up in pg_locks as an ungranted request."""
+    for _ in range(1000):
+        if task.done() or await _advisory_waiters(loader, namespace):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the writer neither finished nor waited on the controls lock within 10s")
+
+
+async def _seed_stale_off(loader: PolicyLoader) -> None:
+    """deny_shell_execution saved Off, its module in the pre-marker format, so the re-render rewrites it."""
+    await loader.create(_SAVE_NS, "__baseline__", CHART, saved_by="chart", priority=1)
+    async with loader._db_engine().begin() as conn:
+        await conn.execute(text(
+            "INSERT INTO namespace_baseline_controls (namespace, control_id, effect, preset, set_by, set_at) "
+            "VALUES (:ns, 'deny_shell_execution', 'off', 'strict', 'seed', NOW())"), {"ns": _SAVE_NS})
+    stale = "\n".join(line for line in baseline.compile("strict", {"deny_shell_execution": "off"}).splitlines()
+                      if not line.startswith(baseline.CONTROLS_OFF)) + "\n"
+    await loader.create(_SAVE_NS, "__controls__", stale, saved_by="baseline-controls", priority=2,
+                        enforcement_mode="block", policy_name="baseline-controls:strict")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paused", ["re-render, mid-write", "PUT, between module and rows"])
+async def test_a_put_and_the_startup_rerender_never_interleave(paused: str) -> None:
+    """The advisory lock serialises PUT against the startup re-render. Without a deterministic test it
+    could be removed from PUT with the suite green while a random interleave left the module different
+    from the rows in 21 of 30 rounds. Here one writer is held inside its critical section while the other
+    runs: re-enabling deny_shell_execution (a pure tightening, so the PUT writes the module once, before
+    the rows) against a re-render of the old Off rows. Without the lock the re-render's stale Off module
+    lands last and GET shows Enforce over an engine that allows the shell call."""
+    from norviq.api.routers.baseline_router import rematerialize_controls
+
+    (ev_put, put_loader), (ev_remat, remat_loader) = _db_loader(), _db_loader()
+    release, entered = asyncio.Event(), asyncio.Event()
+
+    async def hold(real):
+        entered.set()
+        await release.wait()
+        return await real()
+
+    try:
+        await _drop_rows(put_loader, _SAVE_NS)
+        await _seed_stale_off(put_loader)
+        if paused.startswith("re-render"):
+            real_create = remat_loader.create
+
+            async def held_create(*args, **kwargs):
+                return await hold(lambda: real_create(*args, **kwargs))
+
+            remat_loader.create = held_create
+            holder = asyncio.create_task(rematerialize_controls(remat_loader, namespaces=[_SAVE_NS]))
+            await asyncio.wait_for(entered.wait(), 10)
+            other = asyncio.create_task(_put(put_loader, {}))
+        else:
+            def on_session(session) -> None:
+                real_commit = session.commit
+
+                async def held_commit() -> None:
+                    await hold(real_commit)
+
+                session.commit = held_commit
+
+            holder = asyncio.create_task(_put(put_loader, {}, on_session=on_session))
+            await asyncio.wait_for(entered.wait(), 10)
+            other = asyncio.create_task(rematerialize_controls(remat_loader, namespaces=[_SAVE_NS]))
+        await _until_blocked_or_done(put_loader, other, _SAVE_NS)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(holder, other), 30)
+
+        rows = await _stored_rows(put_loader)
+        assert rows == {}, "fixture: the PUT did not store deny_shell_execution at its default"
+        stored = await put_loader.load_from_db(_SAVE_NS, "__controls__")
+        assert stored["rego"] == baseline.compile("strict", rows), "the module is not what the rows describe"
+        assert (await _shown(put_loader))["deny_shell_execution"] == "deny"
+        assert await _decided(SHELL) == ("block", "deny_shell_execution")
+    finally:
+        release.set()
+        await _drop_rows(put_loader, _SAVE_NS)
+        for ev, loader in ((ev_put, put_loader), (ev_remat, remat_loader)):
+            await ev.close()
+            await loader.close()
+
+
+# The three controls 0.2.5 defaulted to Monitor and the strict preset authors as blocks, with a probe
+# that fires only that control (opa eval of the shipped preset over the engine's input builder).
+THREE_0_2_5_MONITOR_DEFAULTS = {
+    "strict_default_block": ("execute_sql", {"query": "select 1"}),
+    "llm02_data_leakage": ("send_email", {"to": "attacker@evil.com", "body": "api_key=sk-123"}),
+    "base64_decoded_threat": ("lookup", {"note": "c2VsZWN0ICogZnJvbSB1c2VycyB1bmlvbiBzZWxlY3Q="}),
+}
+
+
+@pytest.mark.asyncio
+async def test_a_panel_saved_under_025_enforces_its_three_monitor_defaults_even_under_an_audit_chart() -> None:
+    """What the CHANGELOG tells a 0.2.5 operator who saved the console's panel, measured.
+
+    0.2.5 stored only the controls that differed from ITS defaults, and it defaulted these three to
+    Monitor. The startup re-render compiles the stored rows with 0.2.6's defaults, where all three are
+    Enforce, and the saved controls replace the chart's baseline whatever its enforcementMode — so
+    `enforcementMode=audit` does NOT keep them recording in such a namespace. Saving them at Monitor
+    does, because Monitor now differs from their default and is stored."""
+    from norviq.api.routers.baseline_router import rematerialize_controls
+
+    ev, loader = _db_loader()
+    try:
+        await _drop_rows(loader, _SAVE_NS)
+        await loader.create(_SAVE_NS, "__baseline__", CHART, saved_by="chart", priority=1, enforcement_mode="audit")
+        await loader.create(_SAVE_NS, "__controls__", _v025_module(), saved_by="baseline-controls", priority=2,
+                            enforcement_mode="block", policy_name="baseline-controls:strict")
+        for cid, call in THREE_0_2_5_MONITOR_DEFAULTS.items():
+            assert (await _decided(call))[0] == "audit", f"fixture: {cid} did not record under 0.2.5's module"
+
+        assert await rematerialize_controls(loader, namespaces=[_SAVE_NS]) == 1
+        shown = await _shown(loader)
+        for cid, call in THREE_0_2_5_MONITOR_DEFAULTS.items():
+            assert shown[cid] == "deny", cid
+            assert await _decided(call) == ("block", cid), f"{cid} after the 0.2.6 API started"
+
+        await _put(loader, dict.fromkeys(THREE_0_2_5_MONITOR_DEFAULTS, "monitor"))
+        assert await _stored_rows(loader) == dict.fromkeys(THREE_0_2_5_MONITOR_DEFAULTS, "monitor")
+        for cid, call in THREE_0_2_5_MONITOR_DEFAULTS.items():
+            assert await _decided(call) == ("audit", cid), f"{cid} saved at Monitor"
+    finally:
+        await _drop_rows(loader, _SAVE_NS)
+        await ev.close()
+        await loader.close()

@@ -78,7 +78,15 @@ _NEVER_FIRES = '{set}[id] {{ false; id := "__never__" }}'
 # and `parse_heads` is deliberately strict, so re-parsing a compiled module would explode on the
 # compiler's own output. Recognised and skipped here rather than loosened into `_HEAD_RE`: keeping the
 # head pattern tight is what makes an unreadable AUTHORED head a loud error instead of a silent "off".
-_NEVER_FIRES_RE = re.compile(r"^(blocks|escalates|audits)\[id\]\s*\{\s*false;")
+#
+# Recognised by EQUALITY with the exact lines `_render` writes, never by a prefix. It was a prefix
+# (`blocks[id] { false;`), and Rego lets one head carry several bodies, so
+# `blocks[id] { false; id := "__never__" } { input.tool_name == "send_newsletter"; id := "no_newsletter" }`
+# is a real rule that looks like the placeholder for its first nineteen characters. In a chart's
+# CONTROLS region that line was skipped as a placeholder, `_render` dropped it, `covers()` held, and
+# after a save with nothing changed the chart's block on send_newsletter came back allow/default_allow.
+# Exact, it is an unreadable head: `parse_heads` raises, and `covers()` keeps the chart as a floor.
+_NEVER_FIRES_LINES = frozenset(_NEVER_FIRES.format(set=s) for s in ("blocks", "escalates", "audits"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,15 +379,49 @@ def parse_heads(region: str) -> list[ControlHead]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if _NEVER_FIRES_RE.match(stripped):
+        if stripped in _NEVER_FIRES_LINES:
             continue  # generated placeholder, not a control
         match = _HEAD_RE.match(stripped)
-        if match is None:
+        if match is None or not _one_body(match.group(3)):
             # Loud, not skipped. A head this regex cannot read is a control that would silently
             # disappear from every compiled module — an "off" nobody chose and nobody can see.
             raise ValueError(f"unparsable line in CONTROLS region: {stripped!r}")
         heads.append(ControlHead(match.group(1), match.group(2), match.group(3).strip()))
     return heads
+
+
+def _one_body(guard: str) -> bool:
+    """Whether `guard` — the text between a head's first `{` and its last `}` — is ONE rule body.
+
+    `_HEAD_RE`'s guard is greedy, so `blocks["pii_detection"] { pii_detected } blocks["no_newsletter"]
+    { input.tool_name == "send_newsletter" }` on one line read as a single pii_detection head whose
+    guard happened to contain a second rule. OPA compiles that line as two rules. Measured with it in a
+    chart's CONTROLS region: pii_detection set to Off dropped the whole line from the re-render,
+    `covers()` held, and the chart's block/no_newsletter came back allow/default_allow — a rule
+    nobody switched off. So the braces must close exactly at the end of the line (braces inside a
+    string do not count), and a `#` outside a string, which would comment out the rest, is refused.
+    """
+    depth, quote, escaped = 0, "", False
+    for ch in guard:
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\" and quote == '"':
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in '"`':
+            quote = ch
+        elif ch == "#":
+            return False
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and not quote
 
 
 def controls_for(preset: str) -> list[ControlHead]:
