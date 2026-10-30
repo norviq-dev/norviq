@@ -20,12 +20,18 @@ of that were wrong:
 
 These drive the real handler with a real Redis mirror and a real Postgres row, and judge the outcome by
 the engine's DECISION, not only by its in-memory dict.
+
+The same rig pins two follow-ups: a stored priority of 0 must come back as 0 from every Postgres read,
+and a DELETE must reach the engine, whose only channel is `norviq:policy:invalidated` (the delete tests
+run its real pub/sub watcher).
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 
@@ -229,30 +235,35 @@ async def test_a_reloaded_entry_is_the_one_a_cold_start_builds(rig) -> None:
         await cold.close()
 
 
-async def test_a_reload_that_finds_no_policy_is_logged_as_a_warning(rig) -> None:
-    """An invalidation for a scope with no row (it was deleted after the save) must be visible. It used to
-    be a DEBUG line, which production log levels drop, so a reload that did nothing looked like one that
-    worked. The entry already in memory is left alone: unloading is the delete path's job."""
+async def test_a_reload_that_finds_no_row_unloads_the_entry(rig) -> None:
+    """No row means the policy was deleted, so the engine unloads it, which is what a cold start builds.
+    This used to keep the entry ("unloading is the delete path's job"), but the engine has no other delete
+    path: it never hears the mutation stream the API replicas use, and a deleted policy kept enforcing on
+    it until a restart. The unload is logged, not silent."""
     ns, cls, engine = rig["ns"], rig["cls"], rig["engine"]
     engine._update_memory(f"{ns}:{cls}", _rego(ns), 100, "block")
+    rig["engine_eval"].load_policy(ns, cls, _rego(ns), priority=100)
 
     with capture_logs() as logs:
         await engine._reload_policy(ns, cls)
 
-    warnings = [entry for entry in logs if entry["log_level"] == "warning"]
-    assert [(w["event"], w["code"]) for w in warnings] == [("nrvq.policy.reload_not_found", "NRVQ-REG-5023")]
-    assert not [entry for entry in logs if entry["event"] == "nrvq.policy.reloaded"]
-    assert engine.get_entry(ns, cls) == {"rego": _rego(ns), "priority": 100, "enforcement_mode": "block"}
+    assert engine.get_entry(ns, cls) is None
+    assert f"{ns}:{cls}" not in rig["engine_eval"]._policies
+    unloaded = [e for e in logs if e["event"] == "nrvq.policy.reload_unloaded"]
+    assert [(e["code"], e["log_level"], e["was_loaded"]) for e in unloaded] == [("NRVQ-REG-5023", "info", True)]
+    assert not [e for e in logs if e["event"] == "nrvq.policy.reloaded" or e["log_level"] in ("warning", "error")]
 
 
 async def test_a_reload_that_cannot_reach_postgres_is_an_error_and_keeps_the_previous_entry_whole(
     rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Now that the reload reads Postgres, a DB fault must surface as the handler's NRVQ-SDC-3022 error,
-    not be absorbed into a "reloaded" line, and must not leave a half-built entry behind."""
+    not be absorbed into a "reloaded" line, and must not leave a half-built entry behind. Nor may it
+    unload: a read that failed is not a row that is missing, and only the second means a delete."""
     ns, cls, engine = rig["ns"], rig["cls"], rig["engine"]
     before = {"rego": _rego(ns), "priority": 300, "enforcement_mode": "audit"}
     engine._update_memory(f"{ns}:{cls}", before["rego"], before["priority"], before["enforcement_mode"])
+    rig["engine_eval"].load_policy(ns, cls, before["rego"], priority=before["priority"])
 
     async def _db_down(namespace: str, agent_class: str) -> dict | None:
         raise ConnectionRefusedError("postgres unreachable")
@@ -264,8 +275,10 @@ async def test_a_reload_that_cannot_reach_postgres_is_an_error_and_keeps_the_pre
     assert [(e["event"], e["code"]) for e in logs if e["log_level"] == "error"] == [
         ("nrvq.sidecar.reload_failed", "NRVQ-SDC-3022")
     ]
-    assert not [e for e in logs if e["event"] in ("nrvq.policy.reloaded", "nrvq.sidecar.policy_reloaded")]
+    assert not [e for e in logs if e["event"] in ("nrvq.policy.reloaded", "nrvq.sidecar.policy_reloaded",
+                                                  "nrvq.policy.reload_unloaded")]
     assert engine.get_entry(ns, cls) == before
+    assert rig["engine_eval"]._policies[f"{ns}:{cls}"]["priority"] == before["priority"]
 
 
 # --- Priority 0 -----------------------------------------------------------------------------------------
@@ -343,3 +356,111 @@ def test_no_read_path_treats_a_stored_priority_of_0_as_missing() -> None:
         if falsy_default.search(line)
     ]
     assert not offenders, "\n".join(offenders)
+
+
+# --- Deletes --------------------------------------------------------------------------------------------
+# `delete()` published only on norviq:policy_events, which only the API replicas subscribe to. The engine
+# listens on norviq:policy:invalidated, so a deleted policy kept enforcing on it until a restart, and a
+# deleted RELAXATION kept relaxing. These run the engine's real watcher on the real Redis channel, so they
+# fail if the delete is never published there, not only if the handler mishandles it.
+
+_INVALIDATED = "norviq:policy:invalidated"
+
+
+async def _eventually(predicate, timeout_s: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+async def _subscribers(cache: RedisCache) -> int:
+    return int((await cache._pool.pubsub_numsub(_INVALIDATED))[0][1])
+
+
+@pytest.fixture
+async def watching(rig):
+    """`SidecarProxy._watch_policy_events` subscribed on the real channel, as `start()` wires it in
+    embedded mode. Redis pub/sub is not scoped to a db number, so other suites' keys may arrive too; every
+    assertion here is about this test's own namespace."""
+    proxy, cache = rig["proxy"], rig["cache"]
+    proxy._cache = cache
+    before = await _subscribers(cache)
+    proxy._policy_event_task = asyncio.create_task(proxy._watch_policy_events())
+    deadline = time.monotonic() + 5.0
+    while await _subscribers(cache) <= before:
+        assert time.monotonic() < deadline, "the engine's watcher never subscribed"
+        await asyncio.sleep(0.02)
+    try:
+        yield rig
+    finally:
+        proxy._policy_event_task.cancel()
+        await asyncio.gather(proxy._policy_event_task, return_exceptions=True)
+        proxy._cache = None  # the redis_cache fixture owns and closes the client
+
+
+def _relaxation(ns: str, cls: str, shape: str):
+    """(layers that stay, the relaxation that is deleted, decision with it, decision without it)."""
+    if shape == "class allow outranking a namespace-tier block":
+        kept = [(f"namespace:{ns}", "block", _TIER_BLOCK, 50)]
+        relaxing = (cls, "allow", _CLASS_ALLOW, 200)
+        return kept, relaxing, ("allow", _CLASS_ALLOW), ("block", _TIER_BLOCK)
+    kept = [(cls, "allow", _CLASS_ALLOW, 100), ("__pack__", "block", "pack_block", 100)]
+    relaxing = ("__pack_weaken__", "allow", "pack_weaken_allow", 100)
+    return kept, relaxing, ("allow", _CLASS_ALLOW), ("block", "pack_block")
+
+
+@pytest.mark.parametrize("shape", ["class allow outranking a namespace-tier block", "pack weaken over a pack block"])
+async def test_a_deleted_relaxation_stops_relaxing_on_the_embedded_engine(watching, shape: str) -> None:
+    rig = watching
+    ns, cls, console, engine = rig["ns"], rig["cls"], rig["console"], rig["engine"]
+    kept, relaxing, relaxed, enforced = _relaxation(ns, cls, shape)
+    for scope, default, rule, priority in [*kept, relaxing]:
+        await console.create(ns, scope, _layer(ns, rule, default, rule), saved_by="op", priority=priority)
+    scopes = [scope for scope, *_ in [*kept, relaxing]]
+    assert await _eventually(lambda: all(engine.get_entry(ns, s) is not None for s in scopes)), (
+        "the engine never heard the creates, so this test would prove nothing about the delete"
+    )
+    assert await _decide(rig) == relaxed
+
+    assert await console.delete(ns, relaxing[0]) is True
+    assert await _eventually(lambda: engine.get_entry(ns, relaxing[0]) is None), (
+        "the delete never reached the embedded engine; it is still enforcing the deleted policy"
+    )
+    assert f"{ns}:{relaxing[0]}" not in rig["engine_eval"]._policies
+    assert await _decide(rig) == enforced
+
+
+async def test_a_delete_notice_that_meets_a_db_error_does_not_unload(
+    watching, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete notice arrives, but the engine's read fails. Unloading on that would drop a policy on
+    any transient fault, including a blocking one on a plain upsert notice, so the entry stays whole and
+    the failure is the handler's NRVQ-SDC-3022 error."""
+    rig = watching
+    ns, cls, console, engine = rig["ns"], rig["cls"], rig["console"], rig["engine"]
+    key = f"{ns}:{cls}"
+    await console.create(ns, cls, _rego(ns), saved_by="op", priority=300)
+    assert await _eventually(lambda: engine.get_entry(ns, cls) is not None)
+    before = engine.get_entry(ns, cls)
+
+    async def _db_down(namespace: str, agent_class: str) -> dict | None:
+        raise ConnectionRefusedError("postgres unreachable")
+
+    handled = {"nrvq.sidecar.reload_failed", "nrvq.sidecar.policy_reloaded", "nrvq.policy.reload_unloaded"}
+    monkeypatch.setattr(engine, "load_from_db", _db_down)
+    with capture_logs() as logs:
+        assert await console.delete(ns, cls) is True
+        assert await _eventually(lambda: any(e["event"] in handled and e.get("key") == key for e in logs)), (
+            "the delete notice never reached the engine"
+        )
+
+    assert engine.get_entry(ns, cls) == before
+    assert key in rig["engine_eval"]._policies
+    mine = [e for e in logs if e.get("key") == key]
+    assert [(e["event"], e["code"]) for e in mine if e["log_level"] == "error"] == [
+        ("nrvq.sidecar.reload_failed", "NRVQ-SDC-3022")
+    ]
+    assert not [e for e in mine if e["event"] in handled - {"nrvq.sidecar.reload_failed"}]
