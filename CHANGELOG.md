@@ -31,6 +31,11 @@ because they should be installed.
   only with `webhook.allowLocalSidecarImages=true`. Published images are unaffected.
 - **Default Redis is Valkey 8.1** (`valkey/valkey:8.1-alpine`, BSD-3-Clause, minor-pinned). It replaces
   `redis:7-alpine`, which had moved to 7.4 and its RSALv2/SSPLv1 licence.
+- **Third-party images are pinned by digest.** opa, valkey, postgres, nginx, busybox, curl and the CNPG
+  operand render as `repo:tag@sha256:…` (`global.thirdPartyImageDigests`). With `global.imageRegistry`
+  the digest is kept, so a mirror filled by `docker pull` + `docker push` (which changes the digest)
+  fails with `manifest unknown`: re-copy with `crane copy` / `skopeo copy --all`, or set
+  `global.thirdPartyImageDigests=null`. An overridden tag renders without a pin.
 
 **Security.** Fixes in the engine's caller authentication, logout token revocation and the webhook's
 sidecar image trust; details in the advisories published with this release. Dependency floors for

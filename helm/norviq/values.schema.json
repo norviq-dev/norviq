@@ -7,7 +7,12 @@
     "global": {
       "type": "object",
       "properties": {
-        "imageRegistry": { "type": "string", "description": "Mirror host prepended to third-party images (air-gapped)." }
+        "imageRegistry": { "type": "string", "description": "Mirror host prepended to third-party images (air-gapped)." },
+        "thirdPartyImageDigests": {
+          "type": ["object", "null"],
+          "description": "Index digest per third-party image, keyed by the upstream ref the chart names (e.g. \"busybox:1.36\"). Rendered as repo:tag@digest. null drops every pin; \"\" drops one.",
+          "additionalProperties": { "type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$" }
+        }
       }
     },
     "tests": {

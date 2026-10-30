@@ -62,13 +62,25 @@ and falls back to the readable tag, which is what you want while developing.
 {{/*
 Third-party (upstream) image ref, with the optional global.imageRegistry mirror host prepended for
 air-gapped installs. Norviq's own images go through norviq.image (images.registry); this covers the
-images with no registry field of their own — opa, redis, postgres, the tls-proxy nginx, the
-cert-bootstrap job, the helm-test curl. Empty global => the upstream ref is unchanged.
-  Usage: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" "redis:7-alpine") }}
+images with no registry field of their own — opa, valkey, postgres, the CNPG operand, the tls-proxy
+nginx, the wait-for busybox, the helm-test curl. Empty global => the upstream ref is unchanged.
+  Usage: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" "valkey/valkey:8.1-alpine") }}
+
+The digest comes from global.thirdPartyImageDigests, looked up by the UPSTREAM ref exactly as the
+template names it, and is appended as `repo:tag@sha256:…` AFTER any mirror prefix. Keyed by ref,
+rather than a `digest` field beside each tag, so a digest can only ever pin the tag it was resolved
+for: an operator who overrides opa.image or images.redis.tag gets a ref with no entry and exactly
+the image they asked for, never `:<new-tag>@<old-digest>` (the runtime resolves the digest and
+ignores the tag, so that would run the OLD image under the new label). And a maintainer who bumps a
+tag without its digest renders an unpinned ref, which the release gate refuses, instead of shipping
+the previous image silently.
 */}}
 {{- define "norviq.thirdPartyImage" -}}
 {{- $g := .root.Values.global.imageRegistry | default "" -}}
-{{- if $g -}}{{ printf "%s/%s" (trimSuffix "/" $g) .image }}{{- else -}}{{ .image }}{{- end -}}
+{{- $digest := get (.root.Values.global.thirdPartyImageDigests | default dict) .image | default "" -}}
+{{- $ref := .image -}}
+{{- if $g -}}{{- $ref = printf "%s/%s" (trimSuffix "/" $g) .image -}}{{- end -}}
+{{- if $digest -}}{{ printf "%s@%s" $ref $digest }}{{- else -}}{{ $ref }}{{- end -}}
 {{- end }}
 
 {{/* imagePullSecrets block (empty when .Values.imagePullSecrets is []). Usage: indent under spec. */}}

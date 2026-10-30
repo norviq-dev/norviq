@@ -104,6 +104,36 @@ def test_ci_has_no_port_forward_for_the_console():
     )
 
 
+def test_the_third_party_preload_pulls_on_the_node_while_the_chart_pins_digests():
+    """`kind load` cannot preload an image the chart pins by digest.
+
+    The chart renders third-party images as `repo:tag@sha256:<index>`. `kind load docker-image`
+    `docker save`s the one platform the runner pulled and re-imports it on the node under a different
+    digest, so the kubelet finds nothing under the pinned one and pulls from Docker Hub at pod start —
+    the rate-limit failure the preload step exists to remove, back and silent, because the step itself
+    still goes green. `crictl pull` on the node stores the image under the digest the pod asks for.
+
+    Conditional on the pins being live in the rig: if values-e2e.yaml ever clears them, `kind load` of
+    a tag is correct again and this has nothing to say.
+    """
+    chart = yaml.safe_load((REPO / "helm/norviq/values.yaml").read_text())
+    rig = yaml.safe_load(SHARED_VALUES.read_text()) or {}
+    rig_global = rig.get("global") or {}
+    pinned = chart["global"].get("thirdPartyImageDigests") and not (
+        "thirdPartyImageDigests" in rig_global and not rig_global["thirdPartyImageDigests"]
+    )
+    if not pinned:
+        return
+    steps = yaml.safe_load(_workflow_text())["jobs"]["kind-e2e"]["steps"]
+    preload = next((s["run"] for s in steps if s.get("name") == "Preload the chart's third-party images"), None)
+    assert preload, "the third-party preload step is gone; the kubelet would pull every one at pod start"
+    assert "kind load" not in preload, (
+        "the preload kind-loads digest-pinned images: the node re-imports them under a new digest and "
+        "the kubelet pulls from the registry anyway"
+    )
+    assert "crictl pull" in preload, "the preload no longer pulls through the node's CRI image store"
+
+
 def test_every_script_a_workflow_runs_bare_is_executable():
     """A missing mode bit is a whole CI run, and this is the third time it has cost one.
 

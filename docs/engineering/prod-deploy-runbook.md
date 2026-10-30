@@ -194,13 +194,22 @@ so spans are never silently dropped into a void. Metrics (above) are independent
 ## Air-gapped / private registry
 
 Norviq's own images use `images.registry` (default `ghcr.io/norviq-dev/`). The third-party images
-(opa, redis, postgres, the tls-proxy nginx, the cert-bootstrap job, the helm-test curl) are mirrored
-with `global.imageRegistry`:
+(opa, valkey, postgres, the tls-proxy nginx, the wait-for busybox, the helm-test curl, and the CNPG
+operand when `postgresql.ha.enabled`) are mirrored with `global.imageRegistry`:
 ```bash
 --set images.registry="myregistry.example.com/norviq/" \
---set global.imageRegistry="myregistry.example.com"     # prepended to the six upstream images
+--set global.imageRegistry="myregistry.example.com"     # prepended to every upstream image
 ```
-Mirror the upstreams into your registry preserving their path (`.../openpolicyagent/opa`, `.../redis`, …).
+Mirror the upstreams into your registry preserving their path (`.../openpolicyagent/opa`,
+`.../valkey/valkey`, …) **and their digest**. The chart pins each third-party image by its multi-arch
+index digest (`global.thirdPartyImageDigests`) and keeps that digest after the mirror prefix, so copy
+with a tool that preserves it:
+```bash
+crane copy postgres:16-alpine myregistry.example.com/postgres:16-alpine     # or: skopeo copy --all
+```
+`docker pull` + `docker push` re-pushes a single platform under a new digest, and the pinned ref then
+fails with `manifest unknown`. If your mirror was filled that way, drop the pins instead:
+`--set global.thirdPartyImageDigests=null`.
 
 ## Verify the deploy
 ```bash

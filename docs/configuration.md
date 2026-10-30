@@ -204,8 +204,10 @@ waits) run the full profile including `readOnlyRootFilesystem` and `runAsUser: 6
 | `images.engine/api/ui/webhook.repository` | `norviq-engine` | Same image, different tags per component (see below) — one multi-stage build produces all four. |
 | `images.*.tag` | `engine-latest` / `api-latest` / `ui-latest` / `webhook-latest` | Per-component tag within the shared `norviq-engine` repository. |
 | `images.*.pullPolicy` | `Always` | `values-prod.yaml` sets `IfNotPresent` for all four — appropriate once you're pinning immutable tags. |
-| `images.redis.repository`/`tag` | `redis` / `7-alpine` | Bundled Redis image. |
+| `images.redis.repository`/`tag` | `valkey/valkey` / `8.1-alpine` | Bundled Redis-protocol store (Valkey, BSD-3-Clause; `redis://` clients unchanged). |
 | `images.postgresql.repository`/`tag` | `postgres` / `16-alpine` | Bundled Postgres image. |
+| `global.imageRegistry` | `""` | Mirror host prepended to every third-party image (opa, valkey, postgres, the CNPG operand, the TLS-proxy nginx, the wait-for busybox, the `helm test` curl). Norviq's own images use `images.registry`. |
+| `global.thirdPartyImageDigests` | one entry per third-party image | The multi-arch index digest each third-party image renders with (`repo:tag@sha256:…`), keyed by the upstream ref. Keyed by ref so a digest only ever pins the tag it was resolved for: override a tag or `opa.image` and that image renders on your tag alone. The digest survives `global.imageRegistry`, so mirror with a digest-preserving copy (`crane copy`, `skopeo copy --all`, a pull-through cache); for a mirror that re-pushed the images (`docker pull` + `push`), set it to `null`. |
 | `imagePullSecrets` | `[]` | See Production checklist above. |
 | `gracefulShutdown.preStopSleepSeconds` | `15` | `preStop` sleep on api/engine/webhook so the Service deregisters the endpoint before `SIGTERM`, draining in-flight requests during a rolling upgrade. `0` disables the hook.  The chart moved to 15 on measurement: at 3 a rolling restart refused 1 and 31 benign calls across two runs, at 15 it refused 0, 0 and 2 across three (`values.yaml` lines 160-161). |
 

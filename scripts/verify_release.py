@@ -115,6 +115,12 @@ def check_stamped_shape(ctx: str, chart: Path) -> None:
 
     floating = re.findall(rf"{re.escape(REPO)}:[^\"'\s]+", res.stdout)
     check("no floating image tags in the stamped chart", not floating, f"{sorted(set(floating))[:3]}")
+    # Third-party images too, with the gate release.yml runs: the line above only ever looked at
+    # Norviq's repository and passed a chart with opa, valkey, postgres, nginx, busybox and curl on tags.
+    import check_image_pins  # noqa: PLC0415 — sibling script; scripts/ is sys.path[0] when run directly
+
+    bare = [ref for _n, ref in check_image_pins.unpinned(check_image_pins.find_refs(res.stdout))]
+    check("every image in the stamped chart is digest-pinned", not bare, f"{sorted(set(bare))[:3]}")
 
     m = re.search(r"NRVQ_SIDECAR_IMAGE\s*\n\s*value:\s*\"([^\"]+)\"", res.stdout)
     check("injected sidecar is digest-pinned", bool(m and "@sha256:" in m.group(1)),

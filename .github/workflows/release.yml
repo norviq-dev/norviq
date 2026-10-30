@@ -173,21 +173,22 @@ jobs:
           helm template norviq helm/norviq \
             --set-json 'policyQuotaNamespaces=["default"]' > /tmp/rendered.yaml
           test -s /tmp/rendered.yaml
-          # Every Norviq image reference in the shipped chart must be digest-pinned.
-          if grep -E 'image: "?ghcr\.io/norviq-dev/norviq-engine' /tmp/rendered.yaml | grep -v '@sha256:'; then
-            echo "::error::a Norviq image in the rendered chart is not digest-pinned" >&2
-            exit 1
-          fi
-          grep -c '@sha256:' /tmp/rendered.yaml | xargs echo "digest-pinned image refs:"
+          # EVERY image reference in the shipped chart must be digest-pinned: Norviq's own (stamped
+          # above), the third-party ones (global.thirdPartyImageDigests in values.yaml) and the
+          # injected sidecar's NRVQ_SIDECAR_IMAGE. This used to grep ghcr.io/norviq-dev/ lines only and
+          # passed with opa, valkey, postgres, nginx, busybox and curl on bare tags — see the script.
+          python3 scripts/check_image_pins.py /tmp/rendered.yaml
 
       - name: Package
         run: |
           set -euo pipefail
           helm package helm/norviq -d dist/
           ls -l dist/
-          # The packaged tgz — not the working tree — is what consumers get. Prove it renders.
+          # The packaged tgz — not the working tree — is what consumers get. Prove it renders, and
+          # that what it renders is still pinned: the gate above read the working tree.
           helm template norviq dist/norviq-"$VERSION".tgz \
-            --set-json 'policyQuotaNamespaces=["default"]' > /dev/null
+            --set-json 'policyQuotaNamespaces=["default"]' > /tmp/rendered-tgz.yaml
+          python3 scripts/check_image_pins.py /tmp/rendered-tgz.yaml
           echo "packaged chart renders from the .tgz"
 
       # Runs on BOTH paths. On a tag it publishes to `charts/`; on a rehearsal to
