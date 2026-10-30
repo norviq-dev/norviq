@@ -36,7 +36,7 @@ dependencies = [
     # instructor — but the FOSSA gate resolved it to 3.14.1, which carries CVE-2026-59881,
     # CVE-2026-69244 and CVE-2026-69243. The project rule is the one written in
     # docs/engineering/security-baseline.md: "a CVE a version bump CAN close gets bumped", never
-    # baselined. `werkzeug>=3.1.6` in [tool.uv] below is the worked example; this is the same move for
+    # baselined. `werkzeug>=3.1.9` in [tool.uv] below is the worked example; this is the same move for
     # a dep that also has to bind on the pip path.
     "aiohttp>=3.14.4",
     # The ENABLER for the cryptography floor above, not a want of its own. pyopenssl arrives
@@ -107,39 +107,43 @@ spiffe = ["spiffe>=0.3"]
 # imports its framework lazily inside a loader function — so installing norviq alone never pulls
 # any of these in; pick the extra(s) matching the agent framework(s) you actually use.
 langchain = ["langchain-core>=0.2"]
-langgraph = ["langgraph>=0.2"]
-# `mcp` is crewai's own dependency (crewai requires mcp>=1.16.0, uncapped). The floor is
-# declared HERE, in the extra, and not only in [tool.uv] constraint-dependencies, because
-# `pip install '.[crewai]'` reads neither uv.lock nor uv's constraints. 1.28.1 fixes
-# CVE-2026-59950 (WebSocket server transport accepts any Host/Origin). Capped below the 2.0
-# major, which crewai does not yet declare support for. See SECURITY.md.
+# 1.2.14 floor: CVE-2026-118667 (unencoded thread/assistant ids in the SDK's streaming client redirect
+# authenticated GETs) affects langgraph 1.2.3 up to 1.2.14 AND langgraph-sdk below 0.4.6; 1.2.14 is
+# also the first langgraph to require langgraph-sdk>=0.4.6, which closes the sdk's CVE-2026-104873 too.
+# A direct dependency of this extra, so the floor lives here where pip honours it, like mcp's below.
+langgraph = ["langgraph>=1.2.14"]
+# `mcp` is crewai's own dependency. The floor is declared HERE, in the extra, and not only in
+# [tool.uv] constraint-dependencies, because `pip install '.[crewai]'` reads neither uv.lock nor uv's
+# constraints. 1.28.1 fixed CVE-2026-59950 (WebSocket server transport accepts any Host/Origin);
+# 1.30.0 fixes CVE-2026-59951, CVE-2026-116684, CVE-2026-116685 and CVE-2026-116686, all four open on
+# the 1.29.0 the lock held. Capped below the 2.0 major, which crewai does not yet declare support for.
+# See SECURITY.md.
+# The crewai floor is FORCED by that one, not chosen: every crewai from 1.15.6 to 1.15.28 pins
+# `mcp~=1.28.1`, which cannot co-resolve with mcp>=1.30.0, and 1.15.29 is the first to require
+# `mcp>=1.30.0,<2`. It is also past the two other advisories the old 1.6.1 pin dragged in:
+# `json-repair==0.25.2` (GHSA-xf7x-x43h-rpqh, fixed 0.60.1) and a `uv` dependency (GHSA-hq85-5cpj-mr62)
+# that crewai dropped in 1.14.5.
 # `crewai[litellm]`, not bare `crewai`. CrewAI 1.x made LiteLLM an OPTIONAL extra and routes only
 # its SUPPORTED_NATIVE_PROVIDERS (anthropic/aws/azure/bedrock/gemini/google/openai) without it —
 # every other provider, groq included, falls through to a LiteLLM import that is not there and dies
 # at `LLM(...)` construction with `ImportError: Fallback to LiteLLM is not available`. Measured on
 # crewai 1.6.1: the adapter cannot even be IMPORTED, so one of the five advertised frameworks was
 # unverifiable rather than merely untested.
-# litellm carries CVE-2024-6825 and it is NOT closable by a bump: 1.96.1 is the newest release and
-# ships no wheel for this project's Python floor (>=3.11), so `uv lock` refuses it outright.
-# It is therefore an ACCEPTED exception, on the same grounds as the other three python entries:
-# reachable only through this OPTIONAL extra and never present in a shipped image
-# (Dockerfile.api / Dockerfile.engine install `.[spiffe]` only). Recorded in SECURITY.md and
-# ACCEPTED_CVES in .github/workflows/fossa.yml, which must stay in lockstep.
-crewai = ["crewai[litellm]>=1.0", "mcp>=1.28.1,<2"]
+crewai = ["crewai[litellm]>=1.15.29", "mcp>=1.30.0,<2"]
 autogen = ["autogen-core>=0.4", "autogen-agentchat>=0.4", "autogen-ext[openai]>=0.4"]
 # MCP action-firewall (norviq/mcp). The PROXY itself needs nothing beyond the base dependencies —
 # it speaks JSON-RPC over pipes and reuses the SDK's httpx engine client, deliberately taking no
 # dependency on the `mcp` SDK so it can forward messages it does not model (see norviq/mcp/protocol.py).
 # This extra exists for the streamable-HTTP driver (starlette) and for the adversarial harness, which
 # drives a REAL `mcp` client so the end-to-end claim is not tested against a bespoke one. Same
-# CVE-2026-59950 floor as the crewai extra.
-mcp = ["mcp>=1.28.1,<2", "starlette>=0.37"]
+# mcp floor as the crewai extra, for the same five CVEs.
+mcp = ["mcp>=1.30.0,<2", "starlette>=0.37"]
 semantic-kernel = ["semantic-kernel>=1.0"]
 frameworks = [
     "langchain-core>=0.2",
-    "langgraph>=0.2",
-    "crewai>=0.80",
-    "mcp>=1.28.1,<2",  # CVE-2026-59950 — see the crewai extra above
+    "langgraph>=1.2.14",  # CVE-2026-118667 — see the langgraph extra above
+    "crewai>=1.15.29",  # forced by the mcp floor — see the crewai extra above
+    "mcp>=1.30.0,<2",  # CVE-2026-59950/-59951/-116684/-116685/-116686 — see the crewai extra above
     "autogen-core>=0.4",
     "autogen-agentchat>=0.4",
     "autogen-ext[openai]>=0.4",
@@ -151,11 +155,28 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv]
-# Security floor for a transitive dependency. werkzeug is pulled only by the optional
-# semantic-kernel framework extra (via openapi-core) — never by the shipped `.[spiffe]` runtime image.
-# 3.1.6 fixes CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199 (Windows safe_join device-name
-# path-traversal / DoS in send_from_directory); resolves to the latest 3.1.x (3.1.8). See SECURITY.md.
-constraint-dependencies = ["werkzeug>=3.1.6"]
+# Security floors for TRANSITIVE dependencies of the optional framework extras — never in the shipped
+# `.[spiffe]` runtime image. Each is the first release that closes what the lock held, and each binds
+# uv.lock (so the FOSSA/pip-audit view of the extras) but not a pip install, because none is a direct
+# dependency of an extra of ours to attach it to (see SECURITY.md, "Where a floor is declared").
+#   werkzeug 3.1.6  CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199 (Windows safe_join path traversal)
+#            3.1.9  CVE-2026-102598                     semantic-kernel -> openapi-core
+#   litellm  1.100.4  CVE-2026-84377, CVE-2026-114612   crewai[litellm]
+#   pillow   13.0.0   all 41 advisories open on 12.3.0   autogen-core, pdfplumber (crewai)
+#   filelock 4.2.1    all 12 advisories open on 3.30.2   huggingface-hub (crewai, via tokenizers)
+#   dnspython 2.9.0   CVE-2026-114605                    semantic-kernel -> aiortc -> aioice
+#   oauthlib 4.0.0    CVE-2026-49264, -49265, -49272     crewai -> chromadb -> kubernetes
+# Found on 2026-10-30 by auditing EVERY package in this lock, not only the runtime export, against two
+# feeds — the PyPI advisory API and the OSV PyPI export — because they disagree: the PyPI API did not
+# list CVE-2026-118667 against langgraph itself (see the langgraph extra).
+constraint-dependencies = [
+    "werkzeug>=3.1.9",
+    "litellm>=1.100.4",
+    "pillow>=13.0.0",
+    "filelock>=4.2.1",
+    "dnspython>=2.9.0",
+    "oauthlib>=4.0.0",
+]
 
 # Lock only for the interpreters this project actually claims (see `classifiers`: 3.11, 3.12 —
 # both images are python:3.12-slim and CI runs 3.12). Without this, `requires-python = ">=3.11"`

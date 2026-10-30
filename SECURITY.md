@@ -65,9 +65,12 @@ sidecar-injection trust model) in [`docs/configuration.md`](docs/configuration.m
 Our FOSSA dependency-vulnerability gate (`.github/workflows/fossa.yml`) fails CI on any known dependency
 CVE. The exceptions below are the only vulnerabilities we knowingly carry, and each is listed because a
 version bump cannot close it today — a CVE a bump *can* fix is bumped, not listed here (e.g. the
-`werkzeug>=3.1.6` constraint in `pyproject.toml`, which resolves to 3.1.8 and closes CVE-2025-66221 /
-CVE-2026-21860 / CVE-2026-27199, and the `mcp>=1.28.1,<2` floor on the `crewai`/`frameworks` extras,
-which closes CVE-2026-59950 — a WebSocket server transport that validated neither `Host` nor `Origin`).
+`werkzeug>=3.1.9` constraint in `pyproject.toml`, which closes CVE-2025-66221 / CVE-2026-21860 /
+CVE-2026-27199 / CVE-2026-102598, and the `mcp>=1.30.0,<2` floor on the `crewai`/`mcp`/`frameworks`
+extras, which closes CVE-2026-59950 — a WebSocket server transport that validated neither `Host` nor
+`Origin` — and CVE-2026-59951 / CVE-2026-116684 / -116685 / -116686. The other optional-extra floors
+added on 2026-10-30 (litellm, pillow, filelock, dnspython, oauthlib, langgraph, crewai) are listed with
+their CVEs in `pyproject.toml`).
 The allow-list in the gate is kept in lockstep with this table.
 
 Where a floor is declared is a decision, not a formality: `mcp` is a **direct** dependency of an extra
