@@ -12,6 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { compileGraph, extractEmbeddedGraph, detachmentStatusOf, loaderKeyFor, scopeIdentifier, BUDGET_MAX_LINES } from "./builderCompile";
 import type { BuilderGraph, BuilderRule, BuilderScope } from "./builderGraph";
+import { EMPTY_OBJECT } from "./emptyLiterals";
 
 function graphWith(rules: BuilderRule[], defaults: BuilderGraph["defaults"] = { decision: "allow", reason: "d" }): BuilderGraph {
   return { schemaVersion: 1, scope: { kind: "class", agentClass: "t" }, rules, defaults };
@@ -44,7 +45,7 @@ const FIXTURE_GOLDEN_REGO = `package norviq.custom.spike_demo
 # Source of truth is the GRAPH, embedded below as a base64 JSON blob; this rego is regenerated
 # deterministically from it and is never hand-edited (see VISUAL-POLICY-BUILDER-PLAN.md, section 2).
 # nrvq-builder-graph/v1: eyJzY2hlbWFWZXJzaW9uIjoxLCJzY29wZSI6eyJraW5kIjoiY2xhc3MiLCJhZ2VudENsYXNzIjoic3Bpa2UtZGVtbyJ9LCJydWxlcyI6W3siaWQiOiJyMSIsImRlY2lzaW9uIjoiYmxvY2siLCJydWxlSWQiOiJidWlsZGVyX3NxbF9ibG9jayIsInJlYXNvbiI6IlNRTCBpbmplY3Rpb24gYmxvY2tlZCBieSBidWlsZGVyIiwiY29uZGl0aW9ucyI6W1t7InR5cGUiOiJkZXRlY3RvciIsImRldGVjdG9yIjoic3FsX2luamVjdGlvbiJ9XSxbeyJ0eXBlIjoia2V5d29yZCIsImtleXdvcmRzIjpbImRyb3AgdGFibGUiXSwidGFyZ2V0IjoicGFyYW1zIn1dXX1dLCJkZWZhdWx0cyI6eyJkZWNpc2lvbiI6ImFsbG93IiwicmVhc29uIjoiTm8gYnVpbGRlciBydWxlIG1hdGNoZWQifX0=
-# nrvq-builder-hash: 4a91c940
+# nrvq-builder-hash: ea2ddd4e
 default decision = "allow"
 default rule_id = "builder_default_spike_demo"
 default reason = "No builder rule matched"
@@ -112,9 +113,9 @@ blocks["builder_sql_block"] {
     bld_kw_hit_params(["drop table"])
 }
 
-escalates[id] { id := [][_] }
+escalates[id] { false; id := "__never__" }
 
-audits[id] { id := [][_] }
+audits[id] { false; id := "__never__" }
 
 reasons = {
     "builder_sql_block": "SQL injection blocked by builder",
@@ -189,8 +190,10 @@ describe("builderCompile — shape", () => {
     expect(result.rego).toContain('"block_shell": "Shell injection blocked"');
     expect(result.rego).toContain('"low_trust": "Trust too low"');
     expect(result.rego).toContain('"builder_default_t": "nothing matched"');
-    // audits is unused by this graph -> gets the safe empty-set stub (no undefined-var OPA reject)
-    expect(result.rego).toContain("audits[id] { id := [][_] }");
+    // audits is unused by this graph -> gets the never-firing stub (no undefined-var OPA reject). Not
+    // `id := [][_]`: that is a type error on OPA 1.21 and failed the whole module closed (emptyLiterals.ts).
+    expect(result.rego).toContain('audits[id] { false; id := "__never__" }');
+    expect(result.rego).not.toContain("[][_]");
   });
 
   it("is deterministic: compiling the same graph twice yields identical strings", () => {
@@ -888,8 +891,11 @@ describe("builderCompile — Intent Allowlist empty allowlist (Phase 2c)", () =>
     const result = compileGraph(allowlistGraph("p2c-verify", []));
     expect(result.errors).toEqual([]);
     expect(result.rego).not.toBe("");
-    expect(result.rego).toContain("allow_names := {}");
-    expect(result.rego).toContain("allow_skeletons := {}");
+    // The TYPED empty object, not `{}` — `allow_names[...]` over a bare `{}` does not compile on OPA 1.21,
+    // which blocked the class as evaluator_error instead of as the default-deny (emptyLiterals.ts).
+    expect(result.rego).toContain(`allow_names := ${EMPTY_OBJECT}`);
+    expect(result.rego).toContain(`allow_skeletons := ${EMPTY_OBJECT}`);
+    expect(result.rego).not.toContain("allow_names := {}");
     expect(result.rego).toContain("(empty — denies every tool for this class)");
   });
 });

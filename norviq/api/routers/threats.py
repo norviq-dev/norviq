@@ -71,6 +71,7 @@ from norviq.api.threat_intent import (
     generate_intent_rego,
     mitre_for_tool,
     opa_input_for_step,
+    parse_allow_names,
     recommended_fix,
 )
 from norviq.engine.capability import (
@@ -584,10 +585,10 @@ def _build_path(
     )
 
 
-# Mirrors coverage.py's marker parser — see the note at the fallback below.
+# Mirrors coverage.py's marker parser — see the note at the fallback below. `allow_names` itself is
+# read with `threat_intent.parse_allow_names`, the same parser coverage.py uses, which knows both the
+# `{}` an empty allowlist was stored as up to 0.2.5 and the typed empty form written since.
 _INTENT_TOOLS_RE = re.compile(r"(?m)^#\s*nrvq:intent-tools\s+(\[.*\])\s*$")
-_POLICY_ALLOW_RE = re.compile(r"allow_names\s*:=\s*\{([^}]*)\}")
-_POLICY_QUOTED_RE = re.compile(r'"([^"]+)"')
 
 
 async def _governing_policies(session: AsyncSession, namespaces: list[str] | None) -> dict[str, dict]:
@@ -633,8 +634,8 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
         # intent-compiled policy read as governing NOTHING (or, read the other way by callers that
         # treat an empty allow as unrestricted, as governing EVERYTHING). Both registers parse the same
         # marker or they disagree about what a policy covers.
-        am = _POLICY_ALLOW_RE.search(rego)
-        if not am:
+        names = parse_allow_names(rego)
+        if names is None:
             im = _INTENT_TOOLS_RE.search(rego or "")
             if im:
                 try:
@@ -658,8 +659,8 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
                         "name_scoped": bool(allow),
                     }
                     continue
-        if am:
-            allow = {a.lower() for a in _POLICY_QUOTED_RE.findall(am.group(1))}
+        if names is not None:
+            allow = {a.lower() for a in names}
         out[str(r["agent_class"])] = {"kind": kind, "allow": allow, "readonly": "is_read " in rego}
     return out
 

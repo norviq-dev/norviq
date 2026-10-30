@@ -16,6 +16,7 @@ from norviq.api.routers.threats import _tools_reaching_source
 from norviq.api.schemas.graphs import AssetEdge, AssetNode
 from norviq.api.threat_intent import generate_capability_rego
 from norviq.engine.capability import Verb, defense_meta, verb_fragments
+from norviq.engine.empty_literals import EMPTY_OBJECT
 
 _OPA = shutil.which("opa")
 
@@ -60,15 +61,19 @@ class TestGenerateCapabilityRego:
         assert "cap_verb_pattern" in rego
 
     def test_empty_tool_set_is_still_a_real_forward_guard(self):
-        # CAP-FIX: with no observed tools, the OLD behaviour was a NO-OP (cap_tools := {} and nothing else).
-        # Now the verb-pattern forward guard still blocks the verbs — a 'make read-only' defense is real
-        # even before any destructive tool is seen.
+        # CAP-FIX: with no observed tools, the OLD behaviour was a NO-OP (an empty cap_tools and nothing
+        # else). Now the verb-pattern forward guard still blocks the verbs — a 'make read-only' defense is
+        # real even before any destructive tool is seen.
         meta = defense_meta("postgresql", [Verb.DELETE])
         rego = generate_capability_rego(
             "postgresql", "PostgreSQL", "analytics", meta["verbs"], [], meta["rule_id"], meta["reason"],
             verb_frags=verb_fragments("postgresql", [Verb.DELETE]),
         )
-        assert "cap_tools := {}" in rego
+        # The empty tool set is the TYPED empty object, not `{}`: OPA 1.21 rejects `cap_tools[...]` over
+        # a bare `{}` as a type error, so the whole module — forward guard included — failed to compile
+        # and every call for the class was blocked as evaluator_error (norviq/engine/empty_literals.py).
+        assert f"cap_tools := {EMPTY_OBJECT}" in rego
+        assert "cap_tools := {}" not in rego
         assert "cap_verb_pattern" in rego
 
     @pytest.mark.skipif(_OPA is None, reason="opa binary required for the capability-rego decision proof")

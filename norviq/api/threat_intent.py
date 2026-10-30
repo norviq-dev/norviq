@@ -30,6 +30,7 @@ import re
 from dataclasses import dataclass
 
 from norviq.engine.confusables import skeleton
+from norviq.engine.empty_literals import braces
 
 # --- tool-name verb classification (matches how the console + baseline reason about tools) -----------
 # A "read" tool's name starts with one of these verbs (search_kb, get_user, list_invoices, …).
@@ -212,13 +213,37 @@ def _rego_comment(value: str) -> str:
 
 
 def _rego_str_set(name: str, values: tuple[str, ...]) -> str:
-    items = ", ".join(_rego_string(v) for v in values)
-    return f"{name} := {{{items}}}"
+    return f"{name} := {braces([_rego_string(v) for v in values])}"
 
 
 def _rego_quoted_set(name: str, values: list[str]) -> str:
-    items = ", ".join(_rego_string(v) for v in values)
-    return f"{name} := {{{items}}}"
+    # No values is the common case for `cap_tools` (no tool observed yet) and `allow_names` (an
+    # allowlist that denies the class everything). A bare `{}` there is a compile error on OPA 1.21 —
+    # see norviq/engine/empty_literals.py.
+    return f"{name} := {braces([_rego_string(v) for v in values])}"
+
+
+_ALLOW_NAMES_RE = re.compile(r'allow_names\s*:=\s*\{([^}]*)\}')
+_QUOTED_RE = re.compile(r'"([^"]+)"')
+
+
+def parse_allow_names(rego: str) -> list[str] | None:
+    """The names in a policy's `allow_names := {...}` set, sorted; None when it has no such set.
+
+    Read by the console's coverage and threat-path views (`routers/coverage.py`, `routers/threats.py`)
+    from the STORED row. With no tools, a policy written by 0.2.5 or earlier holds `{}` and one written
+    since holds the typed empty comprehension (norviq/engine/empty_literals.py). Stored rows are never
+    rewritten, so both forms are live at once. A set literal's body is empty or opens with a quoted
+    name; anything else is the comprehension, whose `""` placeholder is not a tool — recognised by
+    shape rather than left to the quoted-string scan happening to skip it.
+    """
+    m = _ALLOW_NAMES_RE.search(rego or "")
+    if m is None:
+        return None
+    body = m.group(1)
+    if not body.lstrip().startswith('"'):
+        return []
+    return sorted(set(_QUOTED_RE.findall(body)))
 
 
 def generate_capability_rego(

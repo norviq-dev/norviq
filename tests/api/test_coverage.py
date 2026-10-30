@@ -143,3 +143,89 @@ def test_parse_capability_policy_kind() -> None:
     from norviq.api.routers.coverage import _parse_agent_policy
     s = _parse_agent_policy("etl", "package norviq.remediation.capability.pg_delete_etl\n", priority=100, mode="block")
     assert s["kind"] == "capability"
+
+
+# --- `allow_names` with no tools: two stored forms, both live ------------------------------------
+#
+# An intent allowlist that denies the class everything was stored as `allow_names := {}` up to 0.2.5
+# and as the typed empty comprehension since (norviq/engine/empty_literals.py — a bare `{}` does not
+# compile on OPA 1.21). Stored rows are never rewritten, so the Overview (coverage.py) and the attack-path
+# badge (threats.py) read both, through the one parser that sits next to the generator.
+
+_LEGACY_EMPTY_ALLOWLIST = (
+    "package norviq.intent.report_gen\n"
+    'default decision = "block"\n'
+    "allow_names := {}\n"
+    "allow_skeletons := {}\n"
+    "in_allowlist { allow_names[lower(input.tool_name)] }\n"
+)
+
+
+def _typed_empty_allowlist() -> str:
+    from norviq.api.threat_intent import Intent, generate_intent_rego
+
+    return generate_intent_rego("report-gen", [], Intent())
+
+
+def test_parse_allow_names_reads_both_empty_forms_and_a_populated_set() -> None:
+    from norviq.api.threat_intent import parse_allow_names
+    from norviq.engine.empty_literals import EMPTY_OBJECT
+
+    assert parse_allow_names("package norviq.custom.x\n") is None  # no set at all — not "empty"
+    assert parse_allow_names("allow_names := {}") == []
+    assert parse_allow_names(f"allow_names := {EMPTY_OBJECT}") == []
+    assert parse_allow_names(_typed_empty_allowlist()) == []
+    assert parse_allow_names('allow_names := {"search_kb", "get_order"}') == ["get_order", "search_kb"]
+    # Recognised by SHAPE: a comprehension is empty whatever its placeholder says, so a placeholder
+    # that happened to be a word could not turn into an allowlisted tool.
+    assert parse_allow_names('allow_names := {k: k | k := "__never__"; false}') == []
+
+
+def test_a_row_written_now_reads_as_empty_to_the_0_2_5_parser() -> None:
+    """Rollback: 0.2.5 parses `allow_names` with exactly these two patterns. It must read today's empty
+    form as no tools, not as a tool named after the placeholder — which is why the placeholder is `""`."""
+    import re
+
+    allow_names_re_0_2_5 = re.compile(r"allow_names\s*:=\s*\{([^}]*)\}")
+    quoted_re_0_2_5 = re.compile(r'"([^"]+)"')
+    m = allow_names_re_0_2_5.search(_typed_empty_allowlist())
+    assert m is not None
+    assert quoted_re_0_2_5.findall(m.group(1)) == []
+
+
+def test_coverage_summarises_both_empty_forms_identically() -> None:
+    from norviq.api.routers.coverage import _parse_agent_policy
+
+    legacy = _parse_agent_policy("report-gen", _LEGACY_EMPTY_ALLOWLIST, priority=100, mode="block")
+    typed = _parse_agent_policy("report-gen", _typed_empty_allowlist(), priority=100, mode="block")
+    assert legacy["kind"] == typed["kind"] == "intent"
+    assert legacy["allow_tools"] == typed["allow_tools"] == []
+
+
+def test_threat_paths_read_both_empty_forms_identically() -> None:
+    import asyncio
+
+    from norviq.api.routers.threats import _governing_policies
+
+    class _Rows:
+        def __init__(self, rows: list[dict]) -> None:
+            self._rows = rows
+
+        def mappings(self) -> _Rows:
+            return self
+
+        def all(self) -> list[dict]:
+            return self._rows
+
+    class _Session:
+        def __init__(self, rego: str) -> None:
+            self._rego = rego
+
+        async def execute(self, *_a, **_k) -> _Rows:
+            return _Rows([{"agent_class": "report-gen", "rego_source": self._rego}])
+
+    legacy = asyncio.run(_governing_policies(_Session(_LEGACY_EMPTY_ALLOWLIST), None))
+    typed = asyncio.run(_governing_policies(_Session(_typed_empty_allowlist()), None))
+    # An empty allowlist DENIES every tool, so every chokepoint for the class is governed by it.
+    assert legacy["report-gen"]["allow"] == typed["report-gen"]["allow"] == set()
+    assert legacy["report-gen"]["kind"] == typed["report-gen"]["kind"] == "intent"

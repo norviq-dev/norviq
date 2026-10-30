@@ -50,6 +50,7 @@ import type {
   BuilderScope
 } from "./builderGraph";
 import { normalizeKeywords, sanitizeClassToken } from "./composerRego";
+import { EMPTY_ARRAY, EMPTY_OBJECT, neverFires } from "./emptyLiterals";
 import { DETECTOR_BLOCKS, DETECTOR_HELPERS, DETECTOR_ORDER, DETECTOR_PREDICATE, HELPER_BLOCKS, HELPER_ORDER, type HelperKey } from "./builderTemplates";
 import { fragmentsFor, listCapabilitySourceVerbPairs, verbsForSource, type CapabilityVerb, type CapabilitySourceKey } from "./capabilitySources";
 import { skeleton } from "./skeleton";
@@ -171,12 +172,17 @@ function normalizeFactValues(values: string[] | undefined): string[] {
   return [...new Set((values || []).map((v) => String(v).trim()).filter(Boolean))].sort();
 }
 
+// With no values these return the TYPED empty literal, never a bare `[]` / `{}`: OPA 1.21 refuses to
+// compile a lookup into a bare empty literal (see emptyLiterals.ts). An empty allowlist reaches
+// `jsonSet` on every allowlist-mode policy that denies a class everything; the validator keeps the other
+// call sites non-empty, and the typed form keeps them compiling if that ever changes. `{}` is an empty
+// OBJECT, so jsonSet's empty case stays an object — the same value it always produced.
 function jsonArray(values: string[]): string {
-  return `[${values.map((v) => JSON.stringify(v)).join(", ")}]`;
+  return values.length ? `[${values.map((v) => JSON.stringify(v)).join(", ")}]` : EMPTY_ARRAY;
 }
 
 function jsonSet(values: string[]): string {
-  return `{${values.map((v) => JSON.stringify(v)).join(", ")}}`;
+  return values.length ? `{${values.map((v) => JSON.stringify(v)).join(", ")}}` : EMPTY_OBJECT;
 }
 
 // --- stats ---
@@ -1655,9 +1661,11 @@ function buildBody(graph: BuilderGraph, targetNamespace: string): string {
   // has NO defining rule anywhere in the module is an undefined identifier in rego, not an empty set —
   // OPA rejects `escalates[_]` as `rego_unsafe_var_error` if the graph has zero escalate rules (and
   // likewise for audits/blocks). So every decision set the graph does NOT use gets an explicit,
-  // always-empty stub rule (`id := [][_]` iterates zero elements — safe, and never confused with the
-  // server's `decision = "block" { false }` unreachable-rule reject, which only pattern-matches
-  // `decision = "..."` bodies, not `blocks[id] { ... }` bodies).
+  // always-empty stub rule — baseline.py's `_NEVER_FIRES`, `<set>[id] { false; id := "__never__" }`.
+  // It used to be `id := [][_]`, which iterates zero elements on OPA 1.19 and is a compile error on 1.21
+  // (`undefined ref: [][_]`): nearly every rules-mode policy uses only one decision set, so nearly every
+  // one carried two of them. The `false` body is never confused with the server's `decision = "block"
+  // { false }` unreachable-rule reject, which only pattern-matches `decision = "..."` bodies.
   const usedDecisionSets = new Set(graph.rules.map((rule) => DECISION_SET[rule.decision]));
   // The capability guard defines `blocks[...]`, so `blocks` counts as USED even when every authored
   // rule escalates or audits — otherwise the stub below would emit a second, always-empty `blocks`
@@ -1666,7 +1674,7 @@ function buildBody(graph: BuilderGraph, targetNamespace: string): string {
   if (capabilityGuardSection) usedDecisionSets.add("blocks");
   (["blocks", "escalates", "audits"] as const)
     .filter((setName) => !usedDecisionSets.has(setName))
-    .forEach((setName) => ruleBlocks.push(`${setName}[id] { id := [][_] }`));
+    .forEach((setName) => ruleBlocks.push(neverFires(setName)));
   if (capabilityGuardSection) ruleBlocks.push(capabilityGuardSection);
   const ruleSection = ruleBlocks.join("\n\n");
 

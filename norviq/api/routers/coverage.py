@@ -30,6 +30,7 @@ from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 from norviq.engine.policy_loader import stored_priority
 from norviq.api.routers.mitre import _activity_by_rule
 from norviq.api.synthetic import is_synthetic_identity
+from norviq.api.threat_intent import parse_allow_names
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -52,8 +53,6 @@ def _load_mapping() -> dict[str, list[str]]:
 
 
 _RESERVED_CLASS_RE = re.compile(r"^__.*__$")
-_ALLOW_NAMES_RE = re.compile(r'allow_names\s*:=\s*\{([^}]*)\}')
-_QUOTED_RE = re.compile(r'"([^"]+)"')
 # Marker emitted by the intent compiler's header (see its `_HEADER`), carrying the tool names that
 # intent's own predicates can admit, as JSON. Anchored to a comment line so it can never be confused
 # with rego syntax.
@@ -78,9 +77,10 @@ def _parse_agent_policy(agent_class: str, rego: str, priority: int, mode: str) -
     else:
         kind = "custom"
     allow_tools: list[str] = []
-    am = _ALLOW_NAMES_RE.search(rego or "")
-    if am:
-        allow_tools = sorted(set(_QUOTED_RE.findall(am.group(1))))
+    # Reads both empty forms — `{}` from 0.2.5 and earlier, the typed comprehension since.
+    names = parse_allow_names(rego)
+    if names is not None:
+        allow_tools = names
     else:
         # An INTENT-compiled policy (norviq/engine/intent/compiler.py) has no `allow_names` set —
         # its scoping lives in per-rule predicates, and emitting a parallel set just to feed this
