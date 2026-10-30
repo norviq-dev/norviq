@@ -350,7 +350,7 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 
 | Component | Codes | Source |
 |---|---|---|
-| REG | NRVQ-REG-5000..5008, 5010..5021; plus NRVQ-REG-9034/9035 (Redis cache-connect backoff exhausted / retrying — see the DB note above) | `norviq/engine/policy_loader.py`, `norviq/api/main.py` |
+| REG | NRVQ-REG-5000..5008, 5010..5023 (5022 = `nrvq.policy.reloaded`, the embedded engine re-read a policy from Postgres after a `norviq:policy:invalidated` event, with the `enforcement_mode` it now enforces; **5023** = `nrvq.policy.reload_not_found`, WARNING — that event named a policy with no row, so nothing was reloaded); plus NRVQ-REG-9034/9035 (Redis cache-connect backoff exhausted / retrying — see the DB note above) | `norviq/engine/policy_loader.py`, `norviq/api/main.py` |
 | GRP | NRVQ-GRP-11000, 11001, 11010..11017 (11017 = `nrvq.engine.graph.restored`, the lazy snapshot restore that survives a pod restart) | `norviq/engine/graph/*`, `norviq/engine/evaluator.py` |
 | AUD | NRVQ-AUD-6000..6008 | `norviq/engine/audit_emitter.py`, `norviq/engine/evaluator.py` |
 | AUD (retention) | NRVQ-AUD-6009 (`nrvq.retention.started`), 6010 (`nrvq.retention.pruned`), 6012 (`nrvq.retention.prune_failed`), 6013 (`nrvq.retention.step_failed` — one table's prune isolated-failed) | `norviq/api/audit_retention.py` (unified background retention pruner) |
@@ -425,7 +425,7 @@ NRVQ-SDK-1073
 NRVQ-REG-5000, NRVQ-REG-5001, NRVQ-REG-5002, NRVQ-REG-5003, NRVQ-REG-5004, NRVQ-REG-5005, NRVQ-REG-5006,
 NRVQ-REG-5007, NRVQ-REG-5008, NRVQ-REG-5010, NRVQ-REG-5011, NRVQ-REG-5012, NRVQ-REG-5013, NRVQ-REG-5014,
 NRVQ-REG-5015, NRVQ-REG-5016, NRVQ-REG-5017, NRVQ-REG-5018, NRVQ-REG-5019, NRVQ-REG-5020, NRVQ-REG-5021,
-NRVQ-REG-9034, NRVQ-REG-9035
+NRVQ-REG-5022, NRVQ-REG-5023, NRVQ-REG-9034, NRVQ-REG-9035
 
 NRVQ-SDC-3000, NRVQ-SDC-3001, NRVQ-SDC-3002, NRVQ-SDC-3003, NRVQ-SDC-3004, NRVQ-SDC-3005, NRVQ-SDC-3006,
 NRVQ-SDC-3010, NRVQ-SDC-3011, NRVQ-SDC-3012, NRVQ-SDC-3013, NRVQ-SDC-3020, NRVQ-SDC-3021, NRVQ-SDC-3022,

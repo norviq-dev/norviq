@@ -139,8 +139,6 @@ KNOWN_DUPLICATES: dict[str, tuple[str, ...]] = {
     "NRVQ-MCP-5071": ('nrvq.mcp.servers.control_plane_recovered', 'nrvq.mcp.servers.loaded'),
     "NRVQ-RED-13001": ('nrvq.redteam.attack_not_blocked', 'nrvq.redteam.rule_mismatch'),
     "NRVQ-REG-5011": ('nrvq.policy.eval_cache_cleared', 'nrvq.policy.reapplied'),
-    "NRVQ-REG-5012": ('nrvq.policy.applied_to_target', 'nrvq.policy.reload_cache_miss'),
-    "NRVQ-REG-5013": ('nrvq.policy.reloaded', 'nrvq.policy.versions_pruned'),
     "NRVQ-REG-5016": ('nrvq.policy.remote_unloaded', 'nrvq.policy.versions_rehydrated'),
     "NRVQ-SDC-3003": ('nrvq.sidecar.audit_error', 'nrvq.sidecar.process_error'),
     "NRVQ-SDC-3012": ('nrvq.sidecar.call_depth_clamped', 'nrvq.sidecar.call_depth_malformed', 'nrvq.sidecar.call_depth_negative', 'nrvq.sidecar.http.process_error'),

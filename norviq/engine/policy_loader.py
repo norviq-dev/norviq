@@ -789,25 +789,36 @@ class PolicyLoader:
                   invalidated_scope=target, ns_wide=ns_wide, code="NRVQ-REG-5011")
 
     async def _reload_policy(self, namespace: str, agent_class: str) -> None:
-        """Reload a single policy from cache or DB into memory."""
-        key = f"{namespace}:{agent_class}"
+        """Re-read one policy after a ``norviq:policy:invalidated`` event — the embedded engine's only way
+        of learning about a policy write (``SidecarProxy._on_policy_invalidated``).
 
-        cached = await self._cache.get_policy_entry(namespace, agent_class)
-        if cached:
-            rego = cached if isinstance(cached, str) else cached.get("rego", "")
-            priority = cached.get("priority", 100) if isinstance(cached, dict) else 100
-        else:
-            log.debug("nrvq.policy.reload_cache_miss", key=key, code="NRVQ-REG-5012")
+        Reads Postgres through ``load_from_db``: the same row, fields and evaluator reload a peer API replica
+        takes on an upsert (``apply_remote_event``) and a restart takes (``warm_cache``). It used to read the
+        Redis policy mirror and nothing else, which was wrong whether the mirror answered or not:
+
+        * A hit rebuilt the entry as ``{rego, priority}``. The mirror has never carried ``enforcement_mode``
+          (``RedisCache.set_policy`` writes rego/priority/version), so the evaluator's ``"block"`` default
+          took over and re-saving an audit-mode policy made the engine hard-block it.
+        * A miss returned on a debug line. The mirror expires after ``redis_ttl_policy_s`` (60s), and a
+          mode-only apply (``apply_to_target``, rego unchanged) publishes this event without rewriting it,
+          so switching a policy from Audit to Enforce a minute after it was saved never reached the engine,
+          which kept letting through what the operator had just told it to block — until a restart.
+
+        Even a mirror that carried the mode would be stale after that mode-only apply, so the reload does not
+        consult it at all; the cost is one indexed single-row SELECT per policy write. A DB error propagates
+        to the caller, which logs it (NRVQ-SDC-3022); the previous entry stays whole rather than half-updated.
+        """
+        key = self._key(namespace, agent_class)
+        entry = await self.load_from_db(namespace, agent_class)
+        if entry is None:
+            # The scope was deleted after the save that published this event. Kept as-is rather than
+            # unloaded: an invalidation is an upsert notice, and unloading belongs to the delete path.
+            log.warning("nrvq.policy.reload_not_found", key=key,
+                        detail="invalidation named a policy with no row; the in-memory entry is unchanged",
+                        code="NRVQ-REG-5023")
             return
-
-        new_policies = dict(self._policies)
-        new_policies[key] = {"rego": rego, "priority": priority}
-        self._policies = new_policies
-
-        if hasattr(self, "_evaluator") and self._evaluator:
-            self._evaluator.reload_policy(namespace, agent_class, rego, priority=int(priority))
-
-        log.info("nrvq.policy.reloaded", key=key, code="NRVQ-REG-5013")
+        log.info("nrvq.policy.reloaded", key=key, priority=entry["priority"],
+                 enforcement_mode=entry["enforcement_mode"], code="NRVQ-REG-5022")
 
     @property
     def policy_count(self) -> int:
