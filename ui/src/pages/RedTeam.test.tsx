@@ -6,7 +6,7 @@
 // proven-blocking scorecard, the got-through gap warning + failed row, the per-technique breakdown,
 // and the run-history table — all sourced from the API payload, never a hardcoded frontend value.
 
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { MemoryRouter } from "react-router-dom";
@@ -434,12 +434,6 @@ function rowFor(attackId: string): HTMLElement {
   return row;
 }
 
-// The page clears the filter in an effect keyed on `latest?.run_id`, and React runs that effect from its
-// scheduler AFTER the run is already in the DOM — so a click landing between `findBy` resolving and that
-// task is silently undone. Measured with four vitest processes in parallel: the test below lost its click
-// in 2 of 24 runs without this step and in 0 of 56 with it. Give the scheduler that turn first.
-const effectsSettled = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
-
 it("the got-through filter lists exactly the scorecard's got-through rows — throttles in, monitored detections out", async () => {
   serveMcp(verdictRun());
   const scored = Number((await screen.findByTestId("redteam-gotthrough")).textContent?.replace(/\D/g, ""));
@@ -456,7 +450,6 @@ it("the got-through filter lists exactly the scorecard's got-through rows — th
   expect(within(audited).getByTestId("redteam-row-monitored")).toHaveAttribute("title", expect.stringMatching(/Monitor/));
   expect(within(rowFor("FIN-001")).getByText(/not enabled here/)).toBeInTheDocument();
 
-  await effectsSettled();
   const filter = within(screen.getByTestId("redteam-failed-filter")).getByRole("checkbox");
   fireEvent.click(filter);
   expect(filter).toBeChecked();
@@ -464,6 +457,50 @@ it("the got-through filter lists exactly the scorecard's got-through rows — th
   expect(shown).toHaveLength(scored);
   expect(screen.getAllByTestId("redteam-row-failed")).toHaveLength(scored);
   expect(shown.map((r) => within(r).getByText(/^[A-Z]+-\d+$/).textContent)).toEqual(["PI-001", "DL-001"]);
+});
+
+it("a row stored without `outcome` falls back to the old verdict — an inapplicable miss stays out of the filter", async () => {
+  // Rows from runs written before the field existed carry no `outcome`; the page then falls back to
+  // `!passed && applicable !== false`. That branch had no test: making it always return "got_through"
+  // left every RedTeam test green.
+  const base = latest();
+  serveMcp({
+    ...base,
+    results: [
+      ...base.results,
+      { attack_id: "FIN-002", attack_name: "Sector attack, pack not enabled", category: "sector_policy",
+        agent_class: "finance-agent", namespace: "default", expected: "block", actual: "allow",
+        passed: false, applicable: false, rule_id: "default_allow",
+        atlas_technique: "AML.T0048", atlas_technique_name: "External Harms", owasp_control: null, owasp_control_name: null }
+    ]
+  });
+  await screen.findByTestId("redteam-attacks");
+  expect(within(rowFor("FIN-002")).getByText(/not enabled here/)).toBeInTheDocument();
+  expect(within(rowFor("PI-001")).getByTestId("redteam-row-failed")).toBeInTheDocument();
+  fireEvent.click(within(screen.getByTestId("redteam-failed-filter")).getByRole("checkbox"));
+  expect(screen.getAllByTestId("redteam-attack-row").map((r) => within(r).getByText(/^[A-Z]+-\d+$/).textContent)).toEqual(["PI-001"]);
+});
+
+it("a new run resets the got-through filter and the pager in the same render that shows it", async () => {
+  // The reset used to live in an effect keyed on run_id, which runs only AFTER the new run is on screen —
+  // so a click in that gap was undone (2 of 32 lost clicks with four vitest processes in parallel). It is
+  // done while rendering now; this pins that it still happens.
+  let current = latest({ run_id: "run-1" });
+  server.use(
+    targetsHandler(),
+    http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(current)),
+    http.get("*/api/v1/redteam/results", () => HttpResponse.json(historyPayload())),
+    http.post("*/api/v1/redteam/suite", () => { current = latest({ run_id: "run-2" }); return HttpResponse.json(current); })
+  );
+  renderPage();
+  await screen.findByTestId("redteam-attacks");
+  const filter = () => within(screen.getByTestId("redteam-failed-filter")).getByRole("checkbox");
+  fireEvent.click(filter());
+  expect(filter()).toBeChecked();
+  fireEvent.click(screen.getByTestId("redteam-run"));
+  await waitFor(() => expect(screen.getByTestId("redteam-run")).toBeEnabled());
+  await waitFor(() => expect(filter()).not.toBeChecked());
+  expect(screen.getAllByTestId("redteam-attack-row")).toHaveLength(2);
 });
 
 it("rows the scorecard does not score say why, in a muted label — never red", async () => {

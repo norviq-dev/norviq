@@ -91,10 +91,19 @@ const RedTeam = () => {
 
   // Whenever the displayed run changes (new run, or detail was pruned server-side), snap back to page 0 so
   // the pager can never point past the end of a smaller/scoped result set.
-  useEffect(() => {
+  //
+  // DURING RENDER, not in an effect. An effect keyed on run_id runs only after the new run is already on
+  // screen, so a click on the got-through filter made in that gap was silently undone a moment later:
+  // the existing "'got-through only' filter" test lost its click 2 times in 32 with four vitest processes
+  // running, and the e2e spec clicks the same checkbox right after the run renders. Adjusting state while
+  // rendering (React's documented pattern for "reset when a key changes") commits the reset in the same
+  // render that shows the run, so there is no window left in which a click can be lost.
+  const [shownRunId, setShownRunId] = useState(latest?.run_id);
+  if (latest?.run_id !== shownRunId) {
+    setShownRunId(latest?.run_id);
     setPage(0);
     setFailedOnly(false);
-  }, [latest?.run_id]);
+  }
 
   const runSuite = async () => {
     if (inFlightRef.current) return; // Block a duplicate submit in the same tick → exactly one POST
