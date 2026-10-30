@@ -134,6 +134,8 @@ baselineClusterPolicy:
   #   one namespace             console Target Settings -> Monitor, or
   #                             PUT /api/v1/settings?namespace=<ns> {"enforcement_mode": "audit"}
   #   one control               console Baseline controls -> Monitor or Off, or PUT /api/v1/baseline/controls
+  #                             (preset `strict` only: the panel compiles strict, and next to another
+  #                             preset its save is one more floor that relaxes nothing)
   # Once saved, a namespace's Baseline controls replace this baseline in that namespace (when they are
   # this release's compile of the same preset, baseline.covers) and run in block, so `audit` here no
   # longer reaches that namespace. config.enforcementMode below is NOT a way off: it never softens a
@@ -796,9 +798,11 @@ config:
       requests: { cpu: 10m, memory: 24Mi }
       limits: { memory: 64Mi }
   logLevel: INFO
-  # Engine-wide default (NRVQ_ENFORCEMENT_MODE). It decides whether noPolicyDecision=deny can block,
-  # and is the decision used when a module returns none; it never softens a block a policy or the
-  # baseline returns. To stop the baseline refusing calls, see baselineClusterPolicy.enforcementMode.
+  # Engine-wide default (NRVQ_ENFORCEMENT_MODE). Under `block` it lets noPolicyDecision=deny refuse a
+  # call no policy covers (under `audit` that call is allowed), and GET /api/v1/settings reports it as
+  # the mode of a namespace with none of its own. It never softens a block a policy or the baseline
+  # returns, and a module that returns no decision is allowed either way. To stop the baseline refusing
+  # calls, see baselineClusterPolicy.enforcementMode.
   enforcementMode: block
   # What a namespace with NO policy loaded does. "allow" (default) | "deny".
   #

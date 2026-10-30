@@ -90,6 +90,14 @@ def test_notes_says_what_the_install_actually_renders():
     escalated = _rendered_notes("--set", "baselineClusterPolicy.enforcementMode=escalate")
     assert "ENFORCES (baselineClusterPolicy.enforcementMode=escalate" in escalated
     assert "enforcementMode=block" not in escalated.split("To turn it off")[0]
+    # The console compiles `strict`; next to another preset covers() is False, so its Off and Monitor
+    # relax nothing and a save is one more floor. NOTES must not offer it as a way off there.
+    moderate = _rendered_notes("--set", "baselineClusterPolicy.preset=moderate")
+    assert "one control:" not in moderate and "no per-control switch" in moderate
+    moderate_audit = _rendered_notes("--set", "baselineClusterPolicy.preset=moderate",
+                                     "--set", "baselineClusterPolicy.enforcementMode=audit")
+    assert "replace it" not in moderate_audit and "second floor" in moderate_audit
+    assert "replace it" in audited
     off = _rendered_notes("--set", "baselineClusterPolicy.enabled=false")
     assert "ENFORCES" not in off and "It is in AUDIT" not in off and "NAMESPACE BASELINE: none" in off
 

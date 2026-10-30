@@ -329,10 +329,11 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
           here, the chart&apos;s baseline decides: it refuses by default, only records if the chart was
           installed with <code>baselineClusterPolicy.enforcementMode=audit</code>, and is absent from a
           namespace the chart does not list in <code>policyQuotaNamespaces</code>. Once you save, these
-          rows decide in its place in either install mode — saving under an audit install starts
-          refusing what is at Enforce — as long as the chart&apos;s baseline is the shipped strict preset
-          (its default); on any other it keeps applying beside them. A namespace set to <b>Monitor</b> in Target Settings records
-          every call and refuses none, whatever these rows say.
+          rows decide in its place in either install mode — saving under an audit install starts acting on
+          what is at Enforce — as long as the chart&apos;s baseline is the shipped strict preset (its
+          default); next to any other it keeps applying, and these rows cannot relax it. A namespace set
+          to <b>Monitor</b> in Target Settings records what these rows would stop instead of stopping it,
+          whatever they say; a frozen agent and the rate limit are still refused.
         </div>
       </div>
 

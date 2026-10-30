@@ -63,7 +63,7 @@ until you list your tenant namespaces (or explicitly set `baselineClusterPolicy.
 rather than silently installing with zero baselines. Each baseline enforces from 0.2.6
 (`baselineClusterPolicy.enforcementMode: block`; it was `audit` through 0.2.5). To turn it off: every
 namespace with `--set baselineClusterPolicy.enforcementMode=audit` (not a namespace whose Baseline
-controls were saved: those replace the chart's baseline and run in `block`); one namespace with Monitor
+controls were saved: with the default `strict` preset those replace the chart's baseline and run in `block`); one namespace with Monitor
 (`PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}`); one control from the
 console's Baseline controls panel (`PUT /api/v1/baseline/controls`). Each records the call instead of
 refusing it, except a control switched Off — see [Concepts → Turning the shipped baseline off](../concepts.md#turning-the-shipped-baseline-off).

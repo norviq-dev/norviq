@@ -403,6 +403,43 @@ async def test_saved_controls_are_rerendered_at_startup() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rows_saved_without_a_module_are_compiled_at_startup() -> None:
+    """0.2.5 committed the rows before writing the module, so a module write that failed on a namespace's
+    first save left rows and no `__controls__`. The re-render only walked existing modules: measured with
+    scope_violation_dangerous_tool saved at deny and no module, it rewrote nothing, GET showed deny and the
+    engine only recorded it. It now compiles the rows, under the same lock."""
+    from norviq.api.routers.baseline_router import rematerialize_controls
+
+    ev, loader = _db_loader()
+    scope_call = ("execute_sql", {"query": "select 1"})
+    saved = {"scope_violation_dangerous_tool": "deny", "strict_default_block": "off"}
+    try:
+        await _drop_rows(loader, _REMAT_NS)
+        await loader.create(_REMAT_NS, "__baseline__", CHART, saved_by="chart", priority=1)
+        async with loader._db_engine().begin() as conn:
+            for cid, effect in saved.items():
+                await conn.execute(text(
+                    "INSERT INTO namespace_baseline_controls (namespace, control_id, effect, preset, set_by, set_at) "
+                    "VALUES (:ns, :cid, :eff, 'strict', 'v025', NOW())"), {"ns": _REMAT_NS, "cid": cid, "eff": effect})
+        assert await loader.load_from_db(_REMAT_NS, "__controls__") is None, "fixture: a module exists"
+        assert (await _shown(loader, _REMAT_NS))["scope_violation_dangerous_tool"] == "deny"
+
+        assert await rematerialize_controls(loader, namespaces=[_REMAT_NS]) == 1
+        stored = await loader.load_from_db(_REMAT_NS, "__controls__")
+        assert stored is not None and stored["rego"] == baseline.compile("strict", saved)
+        support = ToolCallEvent(tool_name=scope_call[0], tool_params=scope_call[1], session_id="supersede",
+                                agent_identity=AgentIdentity(spiffe_id=f"spiffe://norviq/ns/{_REMAT_NS}/sa/support",
+                                                             namespace=_REMAT_NS, agent_class="customer-support"))
+        decision = await ev.evaluate(support)
+        assert (decision.decision, decision.rule_id) == ("block", "scope_violation_dangerous_tool")
+        assert await rematerialize_controls(loader, namespaces=[_REMAT_NS]) == 0, "rewrote an up-to-date module"
+    finally:
+        await _drop_rows(loader, _REMAT_NS)
+        await ev.close()
+        await loader.close()
+
+
+@pytest.mark.asyncio
 async def test_every_worker_rerendering_at_once_writes_the_module_once() -> None:
     """Every API worker of every replica runs the re-render at startup. Under the advisory lock the
     first rewrites and the rest re-read an up-to-date module."""

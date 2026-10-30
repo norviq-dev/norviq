@@ -144,39 +144,54 @@ async def rematerialize_controls(loader, namespaces: list[str] | None = None) ->
     changes a default without touching the preset leaves a module enforcing the old default while
     GET /baseline/controls shows the new one, because only deviations are stored.
 
+    It also compiles a module for a namespace that has stored rows and NO module. 0.2.5 wrote the rows
+    before the module, so a module write that failed on a namespace's first save left exactly that: GET
+    showed the saved effects while the engine ran the chart's baseline alone. Measured with
+    scope_violation_dangerous_tool saved at deny and no module: nothing was rewritten, GET showed deny,
+    and the engine only recorded it.
+
     Runs at API startup. Idempotent: a namespace is rewritten only when the module the current compiler
-    produces differs from the stored one, so concurrent workers write it once (`_controls_lock`, then a
-    DB-authoritative re-read). Only modules the baseline router wrote (policy name
-    `baseline-controls:<preset>`) are touched. One namespace failing is logged and skipped, never
-    raised; a module another compiler rendered still cannot supersede the chart (baseline.covers).
-    `namespaces` narrows the run (tests share one database); startup passes None, meaning all.
+    produces differs from the stored one (or there is none), so concurrent workers write it once
+    (`_controls_lock`, then a DB-authoritative re-read). Only modules the baseline router wrote (policy
+    name `baseline-controls:<preset>`) are touched, and the name is re-read under the lock. One namespace
+    failing is logged and skipped, never raised; a module another compiler rendered still cannot
+    supersede the chart (baseline.covers). `namespaces` narrows the run (tests share one database);
+    startup passes None, meaning all.
     """
     async with loader._db_engine().begin() as conn:
-        rows = (await conn.execute(text(
+        modules = {str(r["namespace"]): str(r["name"] or "") for r in (await conn.execute(text(
             "SELECT namespace, name FROM policies WHERE agent_class = :ac"), {"ac": _CONTROLS_KEY}
-        )).mappings().all()
+        )).mappings().all()}
+        with_rows = {str(r["namespace"]): str(r["preset"] or "") for r in (await conn.execute(text(
+            "SELECT namespace, MIN(preset) AS preset FROM namespace_baseline_controls GROUP BY namespace"
+        ))).mappings().all()}
     rewritten = 0
-    for row in rows:
-        namespace, name = str(row["namespace"]), str(row["name"] or "")
+    for namespace in sorted(set(modules) | set(with_rows)):
         if namespaces is not None and namespace not in namespaces:
             continue
-        if not name.startswith(_POLICY_NAME_PREFIX):
-            log.warning("nrvq.api.baseline.rematerialize_skipped_foreign", namespace=namespace, name=name,
-                        code="NRVQ-API-7141")
-            continue
-        preset = name[len(_POLICY_NAME_PREFIX):] or _DEFAULT_PRESET
         try:
             async with _controls_lock(loader, namespace):
                 async with loader._db_engine().begin() as conn:
+                    name = (await conn.execute(text(
+                        "SELECT name FROM policies WHERE namespace = :ns AND agent_class = :ac"),
+                        {"ns": namespace, "ac": _CONTROLS_KEY})).scalar_one_or_none()
                     stored = {str(r["control_id"]): str(r["effect"]) for r in (await conn.execute(text(
                         "SELECT control_id, effect FROM namespace_baseline_controls WHERE namespace = :ns"),
                         {"ns": namespace})).mappings().all()}
+                if name is not None and not str(name).startswith(_POLICY_NAME_PREFIX):
+                    log.warning("nrvq.api.baseline.rematerialize_skipped_foreign", namespace=namespace,
+                                name=str(name), code="NRVQ-API-7141")
+                    continue
+                if name is None and not stored:
+                    continue  # a PUT back to the defaults, or nothing saved: the chart governs
+                preset = (str(name)[len(_POLICY_NAME_PREFIX):] if name is not None
+                          else with_rows.get(namespace, "")) or _DEFAULT_PRESET
                 if await _stored_module(loader, namespace) == baseline_lib.compile(preset, stored):
                     continue
                 await _write_controls(loader, namespace, preset, stored, saved_by="baseline-controls:startup")
                 rewritten += 1
                 log.info("nrvq.api.baseline.rematerialized", namespace=namespace, preset=preset,
-                         code="NRVQ-API-7139")
+                         had_module=name is not None, code="NRVQ-API-7139")
         except Exception as exc:  # noqa: BLE001 — one namespace must not stop the rest, or startup
             log.error("nrvq.api.baseline.rematerialize_failed", namespace=namespace, error=str(exc),
                       code="NRVQ-API-7140")

@@ -155,10 +155,13 @@ def test_every_posture_page_names_all_three_ways_off(site: str) -> None:
 _GLOBAL_MODE_AS_A_SWITCH = re.compile(
     r"`config\.enforcementMode` \| `block` \| `block` \(enforce\) or `audit` \(visibility only\)"
     r"|enforcementMode: audit`?,? so a fresh dev install logs decisions instead of"
-    r"|Global default enforcement mode \(individual `NrvqPolicy` objects can override")
+    r"|Global default enforcement mode \(individual `NrvqPolicy` objects can override"
+    # And it is not a fallback decision: every OPA result path supplies one, and a module with no
+    # `decision` is allowed under block and audit alike (measured, server and subprocess mode).
+    r"|decision used when a module\s+returns none")
 
 
-@pytest.mark.parametrize("site", [*_OFF_SWITCH_PAGES, "docs/deployment.md"])
+@pytest.mark.parametrize("site", [*_OFF_SWITCH_PAGES, "docs/deployment.md", "helm/norviq/values.yaml"])
 def test_no_page_offers_the_global_mode_as_a_way_off(site: str) -> None:
     lines = (_ROOT / site).read_text().splitlines()
     stale = [f"{n+1}: {line.strip()}" for n, line in enumerate(lines)

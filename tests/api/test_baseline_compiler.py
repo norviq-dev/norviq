@@ -297,6 +297,19 @@ def test_a_chart_control_or_arm_the_compiler_never_saw_is_not_covered() -> None:
     assert not baseline.covers(compiled, extra_arm)
 
 
+def test_an_extra_head_under_a_control_goes_with_it_when_that_control_is_off() -> None:
+    """By design, and documented (CHANGELOG, concepts.md, covers()): a head added to the chart's region
+    under an EXISTING control id is part of that control. Off removes every head under the id, so the
+    re-render drops it too and the chart is superseded; at Monitor or Enforce the module lacks the head
+    and the chart stays a floor. This pins what the prose says, in both directions."""
+    pii = 'blocks["pii_detection"] { pii_detected }'
+    chart = _CHART.replace(pii, pii + '\nblocks["pii_detection"] { input.tool_name == "send_newsletter" }', 1)
+    assert chart != _CHART, "fixture: anchor moved"
+    assert baseline.covers(baseline.compile(PRESET, {"pii_detection": "off"}), chart)
+    for effect in ("monitor", "deny"):
+        assert not baseline.covers(baseline.compile(PRESET, {"pii_detection": effect}), chart), effect
+
+
 def test_a_different_module_outside_the_region_is_not_covered() -> None:
     """Controls compiled by a release whose preset differs from the chart's, above the region (the
     detectors) or below it (the resolver)."""

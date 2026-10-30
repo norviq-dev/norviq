@@ -118,10 +118,10 @@ all):
 | Scope | How |
 |---|---|
 | Every baseline namespace | `helm upgrade --install … --set baselineClusterPolicy.enforcementMode=audit` |
-| One namespace | Console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` (softens every block in that namespace) |
-| One control | Console → Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls` |
+| One namespace | Console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` (softens every block in that namespace except a trust freeze and the rate limit) |
+| One control (`baselineClusterPolicy.preset: strict`, the default) | Console → Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls`. With another preset the panel relaxes nothing: its save is one more floor beside the chart's baseline |
 
-Once a namespace's Baseline controls are saved they replace the chart's baseline there and run in
+Once a namespace's Baseline controls are saved they replace the chart's `strict` baseline there and run in
 `block`, so the install-wide `audit` no longer reaches that namespace (including one saved under 0.2.5;
 see the CHANGELOG). `baselineClusterPolicy.enabled=false` removes the baseline altogether. The baseline
 is not fail-closed either way: a namespace outside the list has no baseline, and an engine outage

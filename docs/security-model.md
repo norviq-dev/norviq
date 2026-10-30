@@ -18,8 +18,11 @@ default and the policies you author are the defense. A control that drops legiti
 asked it to drop is not a strong security posture — it is an outage wearing a security-shaped
 `rule_id`, and it gets removed from the request path, which protects nobody.
 
-**The shipped namespace baseline enforces, from 0.2.6.** It is the one place the product blocks on
-your behalf before you have written a policy: every namespace you list in `policyQuotaNamespaces` gets
+**The shipped namespace baseline enforces, from 0.2.6.** It is the one shipped *policy* that blocks on
+your behalf before you have written one. (The engine also refuses on its own account, and those are
+not policies: the per-identity rate limit, 60 non-read calls a minute by default, returns
+`rate_limit_exceeded`; a low-trust agent's would-be allow is escalated; an admin trust freeze blocks;
+and an engine error in a namespace with a policy fails closed, below.) Every namespace you list in `policyQuotaNamespaces` gets
 the `strict` baseline (`baselineClusterPolicy.enforcementMode: block`), whose 21 controls act at the
 severity the preset authors them with — 20 act on a matching call (17 refuse it, `llm06_excessive_agency`
 refuses destructive tools and escalates elevated ones, two MCP controls escalate) and
@@ -31,8 +34,8 @@ refuses destructive tools and escalates elevated ones, two MCP controls escalate
 Baseline controls panel (Off / Monitor / Enforce, `PUT /api/v1/baseline/controls`) for one control.
 Each records what it would have refused, except Off, which stops the control evaluating. Saved controls
 replace the chart's baseline in their namespace only when `covers()` proves they are this release's
-compile of the chart's own preset, so a rule the operator did not switch off cannot be dropped by
-saving the panel. See [Concepts → Turning the shipped baseline off](concepts.md#turning-the-shipped-baseline-off).
+compile of the chart's own preset, so saving the panel drops no chart rule except the heads registered
+under a control the operator switched Off — including one added to the chart under that control's id. See [Concepts → Turning the shipped baseline off](concepts.md#turning-the-shipped-baseline-off).
 The baseline is not fail-closed: a namespace outside the list has none, the no-policy decision below
 ships `allow`, and when the engine is unreachable the sidecar follows `webhook.injection.fallbackMode`,
 which also ships `allow`.

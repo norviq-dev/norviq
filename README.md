@@ -221,7 +221,8 @@ switched Off, which is not evaluated at all:
 - **Every namespace, at install:** `--set baselineClusterPolicy.enforcementMode=audit` (the 0.2.5
   posture, in every namespace whose Baseline controls nobody has saved).
 - **One namespace:** console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>`
-  with `{"enforcement_mode": "audit"}`. This softens every block in that namespace, not only the baseline's.
+  with `{"enforcement_mode": "audit"}`. This softens every block in that namespace, not only the
+  baseline's, except a trust freeze and the rate limit.
 - **One control:** console → Baseline controls → **Monitor** or **Off** (`PUT /api/v1/baseline/controls`).
 
 [Concepts → Turning the shipped baseline off](docs/concepts.md#turning-the-shipped-baseline-off) has the

@@ -26,7 +26,8 @@ because they should be installed.
   - every namespace: `--set baselineClusterPolicy.enforcementMode=audit`, the 0.2.5 posture (but see
     the next item for namespaces whose Baseline controls were saved);
   - one namespace: console Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with
-    `{"enforcement_mode": "audit"}` (softens every block in that namespace, your own policies' too);
+    `{"enforcement_mode": "audit"}` (softens every block in that namespace, your own policies' too,
+    except a trust freeze and the rate limit);
   - one control: console Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls`.
 
   `config.enforcementMode` is not one of them; it never softened a policy's block.
@@ -35,11 +36,12 @@ because they should be installed.
   0.2.6 they replace the chart's baseline in that namespace. But 0.2.5 stored only the controls that
   differed from its own defaults, which had `strict_default_block`, `llm02_data_leakage` and
   `base64_decoded_threat` at Monitor. In a namespace whose panel was saved under 0.2.5 with those three
-  left alone, the 0.2.6 API recompiles the saved controls at startup with 0.2.6's defaults, and the
-  three start refusing calls (`execute_sql` becomes `block` / `strict_default_block`), whatever
-  `enforcementMode` says. A control saved at an
-  explicit value keeps it. To keep the three recording, set them to **Monitor** in the panel and save;
-  Monitor now differs from their default, so it is stored. `GET /api/v1/baseline/controls?namespace=<ns>`
+  at Monitor — left there, or set there on purpose, which stored nothing because Monitor was the
+  default — the 0.2.6 API recompiles the saved controls at startup with 0.2.6's defaults, and the three
+  start refusing calls (`execute_sql` becomes `block` / `strict_default_block`), whatever
+  `enforcementMode` says. A control 0.2.5 did store, saved at a value other than its 0.2.5 default,
+  keeps that value. To keep the three recording, set them to **Monitor** in the panel and save; Monitor
+  now differs from their default, so it is stored. `GET /api/v1/baseline/controls?namespace=<ns>`
   shows what each control is set to. A namespace nobody saved the panel for is unaffected beyond the
   default flip: `webhook/presets/strict.rego`, the chart's baseline, has not changed since 0.2.5, so if
   you already ran 0.2.5 with `enforcementMode=block` it refuses what it refused then, and now also for
@@ -58,8 +60,11 @@ because they should be installed.
   when the API starts, so they take effect without re-saving, and a control left at its old default
   takes the new one (Monitor becomes Enforce for the three above). The cluster baseline is not replaced.
   The saved controls replace the chart's copy only when they are this release's compile of the chart's
-  own preset (the default `strict`); next to a chart baseline on another preset or a hand-edited one,
-  both apply and the stricter wins.
+  own preset (the default `strict`). Next to a chart baseline on another preset, or one edited in a way
+  the compiler does not reproduce (outside its CONTROLS region, or a new control id), both apply and the
+  stricter wins, so there the panel relaxes nothing the chart refuses. A head added to the chart's
+  CONTROLS region under an existing control id counts as part of that control: switching the control
+  Off removes it with the rest of the control.
 - **Agents that install packages are refused.** `llm05_supply_chain` blocks `install_package`,
   `load_plugin`, `download_script` and `eval` by tool name, including installs from public PyPI. Set
   that control to `monitor`, or allow the tool in your own policy.

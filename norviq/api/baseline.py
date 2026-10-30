@@ -695,8 +695,13 @@ def covers(compiled: str, chart: str) -> bool:
     comparison refuses:
 
     * a chart on another preset (`moderate` and `permissive` have no CONTROLS region) or its own rego;
-    * a chart control or detector arm the module never saw, and any difference outside the region —
-      the controls were compiled from a different preset file than the chart's;
+    * a chart control the module never saw, any difference outside the region (the controls were
+      compiled from a different preset file than the chart's), and an extra head under a control the
+      module keeps at Monitor or Enforce. An extra head under a control the module switches OFF is not
+      refused: the re-render drops it with the control, as compile() drops every head under an Off id,
+      so it compares equal and the chart is superseded. That is the meaning of Off — every head
+      registered under the id — and it is measured (chart alone block/pii_detection on an added
+      pii_detection arm; pii_detection Off, allow/default_allow), not an oversight;
     * a module compiled before CONTROLS_OFF existed, or by any compiler whose output differs from this
       one's — v0.2.5's modules among them, Off or not. The API re-renders every namespace's saved
       controls from their stored effects at startup (baseline_router.rematerialize_controls), so a

@@ -89,10 +89,12 @@ A few things worth knowing about this install:
   - every namespace: add `--set baselineClusterPolicy.enforcementMode=audit` to the install (the 0.2.5
     posture);
   - one namespace: console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>`
-    with `{"enforcement_mode": "audit"}` — this softens every block in that namespace;
+    with `{"enforcement_mode": "audit"}` — this softens every block in that namespace except a trust
+    freeze and the rate limit;
   - one control: console → Baseline controls → **Monitor** or **Off** (`PUT /api/v1/baseline/controls`).
-    Once saved, the panel's effects replace the chart's baseline in that namespace, whichever install
-    mode you chose.
+    Once saved, the panel's effects replace the chart's `strict` baseline in that namespace, whichever
+    install mode you chose (a baseline on another `baselineClusterPolicy.preset` keeps applying beside
+    them).
 
   See [Concepts → Turning the shipped baseline off](concepts.md#turning-the-shipped-baseline-off).
 

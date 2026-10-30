@@ -276,8 +276,10 @@ does what the console shows. A control nobody changed does what the chart's pres
 console's defaults are read from how the preset authors each control. They replace it only when
 `covers()` (`norviq/api/baseline.py`) proves the saved module is byte for byte what this release
 compiles from the chart's own text for the effects the module records, and only in `block` mode; with
-another preset, the chart's own rego or edits to it, or a module from an earlier release, both stay
-floors and the stricter wins (`NRVQ-ENG-2068`). The API re-compiles saved controls from their stored
+another preset, the chart's own rego, edits to the preset that the compiler would not reproduce, or a
+module from an earlier release, both stay floors and the stricter wins (`NRVQ-ENG-2068`). An extra head
+under a control the saved controls switch Off is the exception: the re-render drops it with the
+control, so it does not keep the chart (see "Turning the shipped baseline off"). The API re-compiles saved controls from their stored
 settings at startup. The cluster baseline is never replaced.
 
 ```mermaid
@@ -384,8 +386,8 @@ through unrecorded except a control you switch Off:
 | Scope | How | What a call the baseline would refuse becomes |
 |---|---|---|
 | Every baseline namespace | At install or upgrade: `--set baselineClusterPolicy.enforcementMode=audit` | `audit`, `rule_id` `policy_audit_would_block:<control>` |
-| One namespace | Console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` | `audit`, `rule_id` `monitor_would_block:<control>`. This softens *every* block in the namespace, your own policies' included |
-| One control in one namespace | Console → Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls` | Monitor: `audit`, `rule_id` `<control>`. Off: the control is not evaluated at all |
+| One namespace | Console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` | `audit`, `rule_id` `monitor_would_block:<control>`. This softens every block in the namespace, your own policies' included, except a trust freeze and the rate limit (below) |
+| One control in one namespace (the chart's default `strict` preset) | Console → Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls` | Monitor: `audit`, `rule_id` `<control>`. Off: the control is not evaluated at all |
 
 What to know before using them:
 
@@ -397,18 +399,27 @@ What to know before using them:
   `base64_decoded_threat`, left at 0.2.5's Monitor, refuse calls. Save them at Monitor to keep them
   recording.
 - **Saving the panel under an `audit` install enforces what it shows.** For the same reason, the first
-  save in a namespace turns its 20 Enforce rows from records into refusals. To promote one control
-  while keeping the rest observing, set the rest to Monitor in the same save.
+  save in a namespace turns its 20 Enforce rows from records into actions: 17 refuse the call,
+  `llm06_excessive_agency` refuses destructive tools and holds elevated ones for approval, and the two
+  MCP definition controls hold it for approval. To promote one control while keeping the rest
+  observing, set the rest to Monitor in the same save.
 - **The controls API replaces the namespace's whole set.** `PUT /api/v1/baseline/controls` with
   `{"namespace": "<ns>", "effects": {"deny_shell_execution": "monitor"}}` sets that control and returns
   every control it does not name to its shipped default. The console sends the full map.
 - **The saved controls replace only the chart's own preset.** They supersede `<ns>:__baseline__` when
-  `covers()` proves they are this release's compile of the chart's text; a chart baseline on
-  `moderate`, `permissive`, or rego of your own keeps applying beside them, and the stricter wins.
+  `covers()` proves they are this release's compile of the chart's text. A chart baseline on
+  `moderate` or `permissive` (`baselineClusterPolicy.preset`), or rego of your own, keeps applying
+  beside them and the stricter wins, so there the panel cannot relax anything the chart refuses:
+  saving it adds the `strict` compile as one more floor. One edit does not keep the chart: a head you
+  add to its CONTROLS region under an existing control id belongs to that control, and goes with it
+  when that control is switched Off (Off removes every head registered under the id). At Monitor or
+  Enforce the saved controls no longer match such a chart, and both apply.
 - **`config.enforcementMode` is not a fourth switch.** The engine-wide default (`NRVQ_ENFORCEMENT_MODE`)
-  decides whether `config.noPolicyDecision: deny` can block, and is the decision used when a module
-  returns none; it never softens a block that a policy or the baseline returns (`_resolve_posture` reads
-  only the per-namespace setting).
+  does two things: under `block` it lets `config.noPolicyDecision: deny` refuse a call no policy
+  covers (under `audit` that call is allowed), and it is what `GET /api/v1/settings` reports as the
+  mode of a namespace that has none of its own. It never softens a block that a policy or the baseline
+  returns (`_resolve_posture` reads only the per-namespace setting), and a module that returns no
+  decision is allowed under either value.
 - `trust_frozen` and, by default, `rate_limit_exceeded` stay hard under all three (`_posture_exempt_rules`).
 - The baseline is not fail-closed, by default or otherwise: a namespace outside
   `policyQuotaNamespaces` has no baseline, `config.noPolicyDecision` ships `allow`, and an engine outage

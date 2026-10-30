@@ -401,8 +401,11 @@ describe("Enforce does not mean one thing", () => {
     const posture = (await screen.findByTestId("baseline-intro-posture")).textContent ?? "";
     expect(posture).toMatch(/until you save here, the chart's baseline decides/i);
     expect(posture).toMatch(/baselineClusterPolicy\.enforcementMode=audit/);
-    expect(posture).toMatch(/saving under an audit install starts refusing/i);
-    expect(posture).toMatch(/Monitor in Target Settings records every call and refuses none/i);
+    expect(posture).toMatch(/saving under an audit install starts acting on what is at Enforce/i);
+    expect(posture).toMatch(/next to any other it keeps applying, and these rows cannot relax it/i);
+    // Not "refuses none": a trust freeze and the rate limit stay hard in Monitor (_posture_exempt_rules).
+    expect(posture).toMatch(/Monitor in Target Settings records what these rows would stop instead of stopping it/i);
+    expect(posture).toMatch(/a frozen agent and the rate limit are still refused/i);
     expect(posture).toMatch(/policyQuotaNamespaces/);
   });
 
