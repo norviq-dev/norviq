@@ -92,22 +92,31 @@ because they should be installed.
   volumes (`norviq-redis-ha-data-*`), which the chart cannot redirect, and a Valkey replica cannot load
   a full sync from a Redis 7.4 master. Keep `images.redis` on `redis:7.4-alpine` under HA until you
   migrate it yourself.
-- **OPA 1.21 rejects an empty collection literal that is read from.** OPA moves from 1.19.1 to 1.21.4
-  (see Security). Its type checker types a bare `{}`, `set()` or `[]` as having no members, so
-  `names[x]`, `names[_]`, `not names[x]` or `xs[_]` over one is a compile error, and so is comparing a
-  collection whose contents it knows with an empty literal (`limits == {}`). `count()` and `in` still
-  accept them. A policy that does not compile blocks every call it governs as `evaluator_error`.
+- **OPA 1.21 rejects an empty collection literal that is read from, and a few other forms 1.19
+  accepted.** OPA moves from 1.19.1 to 1.21.4 (see Security). Its type checker types a bare `{}`,
+  `set()` or `[]` as having no members, so `names[x]`, `names[_]`, `not names[x]` or `xs[_]` over one is a
+  compile error, and so is comparing a collection whose contents it knows with an empty literal
+  (`limits == {}`, or `L == set()` after `L := set()`). `count()` still accepts an empty literal. Also new
+  since 1.19: `in` is type-checked (`1 in {"a"}` is an error), and under `import future.keywords` a rule
+  named `and` or `or`, or a `not` directly before a brace literal (`not {"a"}[x]`), is a parse error. A
+  policy that does not compile blocks every call it governs as `evaluator_error`.
   **Norviq's own policies are handled.** The builder, composer, intent, capability, MCP-registry and
-  egress generators now write typed empty forms such as `{k: k | k := ""; false}` (same value, same kind).
-  Policies stored by 0.2.5 and earlier are compiled with the exact lines their generator wrote rewritten
-  the same way. The stored row is not changed, so `helm rollback` reads it as it was. `NRVQ-ENG-2070`
-  logs each one, once. **Hand-written Rego is not rewritten.** Check yours with the 1.21.4 binary and the
-  chart's capabilities file before upgrading:
-  `curl -fsSLo opa https://openpolicyagent.org/downloads/v1.21.4/opa_linux_amd64_static && chmod +x opa`,
-  then `./opa check --v0-compatible --capabilities=helm/norviq/files/opa-capabilities.json <policy>.rego`.
-  Replace a bare literal you read from with `count(x) == 0`, or with a comprehension that yields nothing
-  (`{s | s := ""; false}`). After the upgrade `NRVQ-ENG-2071` names any policy OPA still refuses (its
-  key and OPA's error).
+  egress generators now write typed empty forms (same value, same kind). Policies stored by 0.2.5 and
+  earlier are compiled with those exact generated lines rewritten the same way, never a line inside a
+  raw string, and only in a module carrying the generator's own header — except that `allow_names` /
+  `allow_skeletons := {}` are rewritten in any `package norviq.intent.*` module and `cap_tools := {}` in
+  any `package norviq.remediation.capability.*` module, hand-written or not (the replacement is the same
+  value). The stored row is not changed, so `helm rollback` reads it as it was. `NRVQ-ENG-2070` logs each
+  rewritten policy once. **Other hand-written Rego is not rewritten.** Check yours before upgrading with
+  the 1.21.4 binary and the chart's capabilities file, which catches every case above:
+  `curl -fsSLO https://github.com/open-policy-agent/opa/releases/download/v1.21.4/opa_linux_amd64_static`,
+  `echo "2ab571f367f293bb19523b76f92f1945bbf245003392c7f392903f95c2b9b630  opa_linux_amd64_static" | sha256sum -c -`
+  (OPA's published checksum, the one the api and engine images pin), then
+  `chmod +x opa_linux_amd64_static && ./opa_linux_amd64_static check --v0-compatible --capabilities=helm/norviq/files/opa-capabilities.json <policy>.rego`.
+  Write an empty literal you read from as a comprehension that yields nothing, of the same kind: `{}` as
+  `{k: k | k := ""; false}`, `set()` as `{s | s := ""; false}`, `[]` as `[s | s := ""; false]`; and test
+  emptiness with `count(x) == 0` rather than `x == {}`. After the upgrade `NRVQ-ENG-2071` names any policy
+  OPA still refuses to compile (its key and OPA's error).
 - **Third-party images are pinned by digest.** opa, valkey, postgres, nginx, busybox, curl and the CNPG
   operand render as `repo:tag@sha256:…` (`global.thirdPartyImageDigests`). With `global.imageRegistry`
   the digest is kept, so a mirror filled by `docker pull` + `docker push` (which changes the digest)
