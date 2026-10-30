@@ -22,6 +22,9 @@ from urllib.parse import urlsplit
 
 import structlog
 
+# The baseline compiler owns the CONTROLS-region format, so the engine asks it whether a namespace's
+# saved controls settle every control of the chart's baseline rather than parsing that format twice.
+from norviq.api import baseline as baseline_lib
 from norviq.config import settings
 from norviq.engine.latency import (
     PHASE_CACHE, PHASE_CANDIDATES, PHASE_OPA, PHASE_OPA_WAIT, PHASE_PERSIST, PHASE_POSTURE,
@@ -61,6 +64,10 @@ _MAX_DRYRUN_MODULES = 256
 # one-time compile, and the whole point of warming is to keep a slow compile from being charged to a
 # data-plane deadline. Bounded so a wedged OPA still degrades to the normal fail-closed path.
 _MODULE_WARM_TIMEOUT_S = 10.0
+# Bound on the memo of "do these saved controls settle every control of that chart baseline". One entry
+# per (controls, chart) pair actually seen — normally one per namespace that has saved controls — and it
+# holds references to the loader's own rego strings, so it costs memory only once a policy is replaced.
+_SUPERSEDE_MEMO_MAX = 1024
 
 # rule_id PREFIXES stamped when a would-block is SOFTENED to a logged `audit` decision — namespace
 # monitor mode and per-policy audit mode respectively. Exported (not inlined into the f-strings below)
@@ -446,6 +453,9 @@ class OPAEvaluator:
         # event via the cache's invalidation hook (below) — freeze/cap are NOT cached here, always read fresh.
         _eval_ttl = min(_ttl, settings.redis_ttl_eval_s) if _ttl > 0 else 0
         self._inproc_eval_cache = TTLCache(_eval_ttl, settings.evaluator_inproc_cache_max)
+        # (controls rego, chart baseline rego) -> whether the saved controls supersede that baseline.
+        # See _controls_supersede_baseline.
+        self._supersede_memo: dict[tuple[str, str], bool] = {}
         if hasattr(cache, "register_eval_invalidation_hook"):
             cache.register_eval_invalidation_hook(self._on_eval_invalidated)
         self._semaphore = asyncio.Semaphore(settings.evaluator_max_concurrency)
@@ -2352,8 +2362,12 @@ class OPAEvaluator:
             event_id=event.event_id,
         )
 
-    async def _collect_candidates(self, event: ToolCallEvent) -> list[dict]:
-        """Collect candidate policies from loader state by specificity."""
+    async def _collect_candidates(self, event: ToolCallEvent, *, explain: bool = False) -> list[dict]:
+        """Collect candidate policies from loader state by specificity.
+
+        `explain` is for /policies/effective only: a chart baseline that the namespace's saved controls
+        supersede is then KEPT in the list, tagged `superseded_by`, so the console can say why it is not
+        deciding. Enforcement never passes it, and gets the list without that candidate."""
         if self._loader is None:
             return []
         namespace = event.agent_identity.namespace
@@ -2364,7 +2378,7 @@ class OPAEvaluator:
         # /policies/effective report the real winning layer (e.g. deny_shell_execution) instead of a misleading
         # no_policy_loaded. The concrete-namespace collection below is left byte-identical (decision parity).
         if namespace == "all":
-            return await self._collect_candidates_union(agent_class)
+            return await self._collect_candidates_union(agent_class, explain=explain)
         candidates = []
 
         async def _append_policy(target_namespace: str, target_agent_class: str) -> None:
@@ -2384,7 +2398,7 @@ class OPAEvaluator:
                 candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
                                    "enforcement_mode": loaded.get("enforcement_mode", "block")})
 
-        async def _append_controls_floor(target_namespace: str, scope: str = "__controls__") -> None:
+        async def _append_controls_floor(target_namespace: str, scope: str = "__controls__") -> dict | None:
             """A reserved-scope module, tagged as a tighten-only overlay so it acts as a FLOOR.
 
             Same lookup as `_append_policy` (in-memory first, then the DB), but tagged `overlay: True` at
@@ -2400,21 +2414,25 @@ class OPAEvaluator:
             Landing in the HARD partition needs no extra work: `_resolve_overlay` partitions the PACK
             family by key suffix and treats EVERYTHING ELSE as hard, so a `__pack_weaken__` can never
             relax either of these.
+
+            Returns the candidate it appended (or None), so the chart baseline can be checked against
+            the namespace's saved controls once both are collected.
             """
             key = f"{target_namespace}:{scope}"
             entry = self._loader._policies.get(key) or await self._loader.load_from_db(
                 target_namespace, scope
             )
-            if entry:
-                candidates.append(
-                    {
-                        "key": key,
-                        "rego": entry["rego"],
-                        "priority": entry["priority"],
-                        "enforcement_mode": entry.get("enforcement_mode", "block"),
-                        "overlay": True,
-                    }
-                )
+            if not entry:
+                return None
+            candidate = {
+                "key": key,
+                "rego": entry["rego"],
+                "priority": entry["priority"],
+                "enforcement_mode": entry.get("enforcement_mode", "block"),
+                "overlay": True,
+            }
+            candidates.append(candidate)
+            return candidate
 
         await _append_policy(namespace, agent_class)
         # The customer's tuned baseline CONTROLS, kept on their own key rather than sharing
@@ -2446,7 +2464,7 @@ class OPAEvaluator:
         # means. Note this also restores MONITORING on classes that have their own policy: `audit` is
         # stricter than `allow`, and audit never interrupts a call, so the record comes back with no
         # availability cost.
-        await _append_controls_floor(namespace)
+        controls_floor = await _append_controls_floor(namespace)
         # The compiled egress allowlist (C2-013). A tighten-only overlay for the same reason the
         # controls floor is one: a per-class policy at a higher priority must not be able to discard
         # the operator's destination rules, which is exactly what C2-008 was.
@@ -2466,9 +2484,10 @@ class OPAEvaluator:
         # admin authors at a HIGH priority (`__cluster__:__baseline__` at 900): its default_allow then
         # beat a tenant's block. As a floor the baseline only tightens: its blocks apply whatever the
         # priority, and its allow never undoes a tenant's block. An `audit` baseline still only records,
-        # because floors are ranked by their effective decision. To exempt a class from one control,
-        # set that control's effect (baseline controls API) — a class policy no longer loosens it.
-        await _append_controls_floor(namespace, "__baseline__")
+        # because floors are ranked by their effective decision. A class policy no longer loosens it; the
+        # namespace's saved control effects do, by superseding it (below).
+        ns_baseline = await _append_controls_floor(namespace, "__baseline__")
+        self._apply_controls_supersede(candidates, controls_floor, ns_baseline, explain)
         await _append_controls_floor("__cluster__", "__baseline__")
         # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
         # `deployment:<name>` / `namespace:<ns>` keys); collect them here so they are enforced, not just
@@ -2537,7 +2556,7 @@ class OPAEvaluator:
                 )
         return candidates
 
-    async def _collect_candidates_union(self, agent_class: str) -> list[dict]:
+    async def _collect_candidates_union(self, agent_class: str, *, explain: bool = False) -> list[dict]:
         """Union resolver for the console's namespace=all picker. Collects the class policy + baseline +
         the additive overlays for EVERY namespace that actually holds a policy for this class, plus the single
         cluster baseline. Mirrors the concrete-namespace collection above so `_resolve_with_packs` yields the
@@ -2547,22 +2566,21 @@ class OPAEvaluator:
         candidates: list[dict] = []
         seen: set[str] = set()
 
-        async def _append_policy(target_namespace: str, target_agent_class: str, floor: bool = False) -> None:
+        async def _append_policy(target_namespace: str, target_agent_class: str, floor: bool = False) -> dict | None:
             # Base lookup, or a FLOOR when `floor` is set (the chart baselines; mirrors _collect_candidates).
             key = f"{target_namespace}:{target_agent_class}"
             if key in seen:
-                return
-            if key in self._loader._policies:
-                entry = self._loader._policies[key]
-                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
-                                   "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": floor})
-                seen.add(key)
-                return
-            loaded = await self._loader.load_from_db(target_namespace, target_agent_class)
-            if loaded:
-                candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
-                                   "enforcement_mode": loaded.get("enforcement_mode", "block"), "overlay": floor})
-                seen.add(key)
+                return None
+            entry = self._loader._policies.get(key) or await self._loader.load_from_db(
+                target_namespace, target_agent_class
+            )
+            if not entry:
+                return None
+            candidate = {"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                         "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": floor}
+            candidates.append(candidate)
+            seen.add(key)
+            return candidate
 
         def _append_overlay(key: str) -> None:
             # additive/in-memory-only overlays (pack/guardrail/override/weaken/remediation) — absent by default,
@@ -2573,13 +2591,16 @@ class OPAEvaluator:
             candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"], "overlay": True})
             seen.add(key)
 
-        def _append_controls_overlay(ns: str, scope: str = "__controls__") -> None:
+        def _append_controls_overlay(ns: str, scope: str = "__controls__") -> dict | None:
             key = f"{ns}:{scope}"
-            if key in self._loader._policies and key not in seen:
-                entry = self._loader._policies[key]
-                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
-                                   "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": True})
-                seen.add(key)
+            if key not in self._loader._policies or key in seen:
+                return None
+            entry = self._loader._policies[key]
+            candidate = {"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                         "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": True}
+            candidates.append(candidate)
+            seen.add(key)
+            return candidate
 
         for ns in await self._loader.namespaces_for_class(agent_class):
             await _append_policy(ns, agent_class)
@@ -2591,9 +2612,12 @@ class OPAEvaluator:
             # tier, the console's "All namespaces" view would report a different winning layer than the
             # one a real agent actually gets, which is precisely the view an operator uses to check that
             # their tuning took effect.
-            _append_controls_overlay(ns)
+            controls_floor = _append_controls_overlay(ns)
             _append_controls_overlay(ns, "__egress__")
-            await _append_policy(ns, "__baseline__", floor=True)
+            ns_baseline = await _append_policy(ns, "__baseline__", floor=True)
+            # Superseded per namespace, by that namespace's own controls, exactly as in
+            # _collect_candidates — or "All namespaces" would show a chart block the agent never gets.
+            self._apply_controls_supersede(candidates, controls_floor, ns_baseline, explain)
             for overlay in ("__pack__", "__guardrail__", "__pack_override__", "__pack_weaken__"):
                 _append_overlay(f"{ns}:{overlay}")
             # Mirror the per-class remediation overlay lookup from _collect_candidates for
@@ -2602,6 +2626,68 @@ class OPAEvaluator:
                 _append_overlay(f"{ns}:{agent_class}__remediation__")
         await _append_policy("__cluster__", "__baseline__", floor=True)
         return candidates
+
+    def _apply_controls_supersede(
+        self, candidates: list[dict], controls: dict | None, ns_baseline: dict | None, explain: bool
+    ) -> None:
+        """Drop the chart's namespace baseline when the namespace's saved controls supersede it.
+
+        Both are floors, and floors combine strictest-wins. That made the console's per-control switch a
+        one-way valve: it could tighten a control but never relax one below the chart's baseline, which
+        is the preset file itself, every control at the severity its head was authored with. Measured
+        live on prep/0.2.6 (namespace persona-legal, chart baseline in block): deny_shell_execution set
+        to Off, and then to Monitor, still returned block / deny_shell_execution, while namespace monitor
+        mode and the chart's own `audit` flag both softened it. "Set the control's effect instead", the
+        one loosening path left once baselines became floors, did nothing.
+
+        So once an operator has saved effects for a namespace, those effects ARE its baseline: the
+        console compiles the chart's own preset with an effect on every control — the operator's, or the
+        default the console showed them — which is a complete specification of it. Only the
+        per-namespace guard steps aside. `__cluster__:__baseline__` is an admin's cluster-wide floor and
+        is never passed here, and the controls module is still a floor, so a class policy can no more
+        loosen it than it could the chart's.
+
+        It steps aside only when `baseline_lib.covers` proves the controls settle every control the
+        chart registers; otherwise both stay floors, exactly as before. That keeps a control nobody
+        switched off from being dropped when the chart names another preset or its own rego, or when
+        the controls were compiled by a release whose detectors differ. And it is decided AFTER both
+        lookups succeeded: a lookup that raised has already failed the whole evaluation closed, and a
+        missing row is no controls, so the chart governs.
+        """
+        if controls is None or ns_baseline is None:
+            return
+        if not self._controls_supersede_baseline(controls, ns_baseline):
+            return
+        if explain:
+            ns_baseline["superseded_by"] = controls["key"]
+            return
+        candidates[:] = [c for c in candidates if c is not ns_baseline]
+
+    def _controls_supersede_baseline(self, controls: dict, ns_baseline: dict) -> bool:
+        """Whether saved controls settle every control of the chart baseline. Uncertain means no."""
+        memo = self.__dict__.get("_supersede_memo")
+        if memo is None:  # an evaluator built without __init__ (resolver tests)
+            memo = self._supersede_memo = {}
+        pair = (str(controls.get("rego") or ""), str(ns_baseline.get("rego") or ""))
+        known = memo.get(pair)
+        if known is not None:
+            return known
+        try:
+            covered = baseline_lib.covers(*pair)
+        except Exception as exc:  # noqa: BLE001 — keep the chart floor rather than guess
+            # Not memoised, so a transient fault is retried on the next evaluation rather than pinned.
+            log.error("nrvq.engine.baseline.supersede_check_failed", controls=controls.get("key"),
+                      baseline=ns_baseline.get("key"), error=str(exc), code="NRVQ-ENG-2069")
+            return False
+        if not covered:
+            # Once per distinct pair (memoised below), not per call: the operator saved effects that the
+            # engine is NOT honouring over the chart's baseline, and the console still shows them.
+            log.warning("nrvq.engine.baseline.controls_do_not_supersede", controls=controls.get("key"),
+                        baseline=ns_baseline.get("key"), code="NRVQ-ENG-2068")
+        if len(memo) >= _SUPERSEDE_MEMO_MAX:
+            memo.clear()
+        memo[pair] = covered
+        return covered
 
     def _resolve_with_packs(self, results: list[dict]) -> dict:
         """Sector packs (:__pack__) and the opt-in tool-allowlist guardrail (:__guardrail__) are

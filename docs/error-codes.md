@@ -327,6 +327,8 @@ table stays unpartitioned for that range and retention pruning gets slower over 
 | NRVQ-ENG-2031 | `nrvq.engine.policy_unloaded` (evaluator unload on delete) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2040..2050 | trust calculator/profile/history/cache codes | `norviq/engine/trust/*`, `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2067 | `nrvq.engine.trust.freeze_check_failed` — the trust-freeze check itself errored, so a frozen agent may be scored as if it were not frozen. Split off the 2040..2050 range because that range also carries routine INFO | `norviq/engine/trust/calculator.py` |
+| NRVQ-ENG-2068 | `nrvq.engine.baseline.controls_do_not_supersede` — a namespace's saved control effects do not settle every control of the chart's baseline (another preset, its own rego, a preset that changed since the controls were saved, or Off saved before 0.2.6), so the chart's baseline stays a floor and an Off or Monitor that is looser than it does not take effect. Re-save the controls; logged once per pair | `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2069 | `nrvq.engine.baseline.supersede_check_failed` — comparing the saved controls with the chart's baseline raised; the chart's baseline is kept as a floor (fail closed) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-DEBUG-* | OPA I/O and evaluator debug traces | `norviq/engine/evaluator.py` |
 
 ## UI

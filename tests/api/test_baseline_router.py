@@ -373,3 +373,41 @@ def test_the_controls_scope_is_reserved_from_the_generic_policy_api() -> None:
 
     assert "__controls__" in policies._RESERVED_DELETE_CLASSES
     assert "__controls__" in policies._NAMESPACE_WIDE_SCOPES
+
+
+def test_the_effective_stack_reports_the_chart_baseline_the_saved_controls_replace() -> None:
+    """/policies/effective is how the console explains which layer decides. Once saved controls
+    supersede the chart's baseline, listing the baseline as a layer would claim it enforces, and
+    dropping it silently would read as "no chart baseline here" — so it is reported as superseded."""
+    from norviq.engine.evaluator import OPAEvaluator
+
+    class _Loader:
+        def __init__(self, policies: dict) -> None:
+            self._policies = policies
+
+        async def load_from_db(self, namespace: str, agent_class: str) -> None:
+            return None
+
+    chart = baseline_lib.preset_source("strict")
+    controls = baseline_lib.compile("strict", {"deny_shell_execution": "off"})
+
+    def _stack(policies: dict) -> dict:
+        evaluator = OPAEvaluator.__new__(OPAEvaluator)  # collection only — no OPA call is made
+        evaluator._loader = _Loader(policies)  # type: ignore[attr-defined]
+        client, _, _ = _client(rows=[])
+        client.app.state.evaluator = evaluator
+        resp = client.get("/api/v1/policies/effective?namespace=legal&agent_class=assistant", headers=_h())
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    body = _stack({"legal:__baseline__": {"rego": chart, "priority": 1},
+                   "legal:__controls__": {"rego": controls, "priority": 2}})
+    assert [layer["scope"] for layer in body["layers"]] == ["legal:__controls__"]
+    assert body["layers"][0]["label"] == "namespace baseline (console control effects)"
+    assert body["superseded"] == [{"scope": "legal:__baseline__", "label": "namespace baseline",
+                                   "priority": 1, "superseded_by": "legal:__controls__"}]
+
+    # No saved controls: the chart's baseline is a layer, and nothing is superseded.
+    body = _stack({"legal:__baseline__": {"rego": chart, "priority": 1}})
+    assert [layer["scope"] for layer in body["layers"]] == ["legal:__baseline__"]
+    assert body["superseded"] == []

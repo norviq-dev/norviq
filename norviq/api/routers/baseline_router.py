@@ -9,8 +9,11 @@ PUT /baseline/controls   (admin)   -> set effects, recompile, materialize as (na
 
 The shape deliberately mirrors `routers/packs.py`: read a per-namespace table, recompile a rego module
 from it, write it to a reserved scope through the normal loader path, invalidate the namespace's eval
-cache. It gets its OWN reserved scope, `__controls__`, collected as a base tier just above the
-chart's `__baseline__` — sharing that key meant a helm upgrade silently reverted the customer.
+cache. It gets its OWN reserved scope, `__controls__` — sharing the chart's `__baseline__` key meant a
+helm upgrade silently reverted the customer. The engine collects it as a floor and, once saved, lets
+it REPLACE the chart's `<ns>:__baseline__` (evaluator._apply_controls_supersede), so Off and Monitor
+relax a control the chart enforces. Two floors alone combine strictest-wins, and the switch could only
+ever tighten.
 
 Every control ships at `monitor`, so a fresh namespace evaluates everything and drops nothing. This
 route is how a customer promotes a control to `deny` once they can see, in the compliance view, what
@@ -48,11 +51,11 @@ _DEFAULT_PRESET = "strict"
 
 # One above the chart's baseline, which the controller forces to priority 1.
 #
-# Base tiers resolve by highest priority outright (evaluator._resolve_precedence), so an explicit "I
-# tuned these controls" beats the chart's default posture, while an agent-class policy — authored at
-# 100+ — still outranks both exactly as it did before. Deliberately NOT in the cluster band (>=500):
-# this is a namespace's own tuning, not a cluster-wide floor, and putting it there would let it
-# outrank policies a tenant wrote for themselves.
+# This number no longer decides precedence. The controls were a base tier when it was chosen, and base
+# tiers resolve by highest priority outright; they are a floor now, which ranks by decision, and they
+# replace the chart's baseline by superseding it rather than by outranking it. It still breaks ties
+# between floors and orders the console's resolution table. Deliberately NOT in the cluster band
+# (>=500): this is a namespace's own tuning, not a cluster-wide floor.
 _CONTROLS_PRIORITY = 2
 
 

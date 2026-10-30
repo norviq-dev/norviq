@@ -72,7 +72,9 @@ sequenceDiagram
   policy saved in `audit` mode can only tighten). The namespace and cluster baselines, your tuned
   controls and the tighten-only overlays (sector packs, guardrails, remediation) are floors on top: they
   can make the result stricter, never looser, whatever their priority. From 0.2.6 a class policy no longer
-  loosens a baseline control; set that control's effect instead. See
+  loosens a baseline control. Setting the control's effect in the console's Baseline controls does: once
+  saved, a namespace's control effects replace the chart's baseline there, for every agent class (the
+  cluster baseline still applies). See
   [Concepts → Policy tiers & precedence](docs/concepts.md#policy-tiers--precedence).
 - **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can roll
   out enforcement observably before turning it on.

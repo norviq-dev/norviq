@@ -124,7 +124,8 @@ baselineClusterPolicy:
   # llm05_supply_chain refuses install_package by NAME, even from public PyPI.
   #
   # To keep the 0.2.5 posture, set this to `audit`. To loosen one control rather than the whole
-  # baseline, set its effect through the baseline controls API.
+  # baseline, set its effect in the console's Baseline controls: once saved, a namespace's control
+  # effects replace this baseline in that namespace.
   enforcementMode: block
 
 images:

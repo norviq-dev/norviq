@@ -243,3 +243,79 @@ def test_the_wire_format_carries_it():
     rows = {r["id"]: r for r in baseline.describe("strict")}
     assert rows["mcp_definition_drift"]["enforced_as"] == "escalate"
     assert all(r["enforced_as"] in ("block", "escalate", "audit") for r in rows.values())
+
+
+# --- covers(): when a namespace's saved controls may supersede the chart's baseline --------------------
+#
+# The engine lets `<ns>:__controls__` replace the chart's `<ns>:__baseline__` only when this says the
+# controls settle every control the chart registers. A false `True` drops a control nobody switched
+# off; a false `False` leaves the console's switch unable to relax anything, which is the defect the
+# supersede exists to fix. Both directions are pinned.
+
+_CHART = baseline.preset_source(PRESET)
+
+
+def _without_off_marker(compiled: str) -> str:
+    """A module as compiled before CONTROLS_OFF existed."""
+    return "\n".join(line for line in compiled.splitlines() if not line.startswith(baseline.CONTROLS_OFF)) + "\n"
+
+
+def test_the_compiled_region_records_the_controls_switched_off() -> None:
+    """`off` emits no head, so without the marker a missing control is ambiguous: switched off, or
+    unknown to the compiler."""
+    _, region, _ = baseline._split_region(
+        baseline.compile(PRESET, {"deny_shell_execution": "off", "pii_detection": "off"})
+    )
+    assert baseline._off_ids(region) == {"deny_shell_execution", "pii_detection"}
+    _, region, _ = baseline._split_region(baseline.compile(PRESET, {}))
+    assert baseline.CONTROLS_OFF in region and baseline._off_ids(region) == frozenset()
+
+
+def test_saved_controls_cover_the_charts_own_preset_at_any_effects() -> None:
+    ids = baseline.control_ids(PRESET)
+    for effects in ({}, {"deny_shell_execution": "off"}, {cid: "deny" for cid in ids},
+                    {cid: "monitor" for cid in ids}, {cid: "off" for cid in ids}):
+        assert baseline.covers(baseline.compile(PRESET, effects), _CHART), effects
+
+
+def test_a_baseline_from_another_preset_or_its_own_rego_is_not_covered() -> None:
+    moderate = (baseline._preset_dir() / "moderate.rego").read_text(encoding="utf-8")  # type: ignore[operator]
+    custom = 'package norviq.custom\ndefault decision = "block"\nrule_id = "custom_baseline"'
+    compiled = baseline.compile(PRESET, {})
+    assert not baseline.covers(compiled, moderate)
+    assert not baseline.covers(compiled, custom)
+
+
+def test_a_chart_control_or_arm_the_compiler_never_saw_is_not_covered() -> None:
+    """A chart on a newer preset than the one the controls were compiled from: one more control, or
+    one more arm on an existing one. Superseding would drop it without anyone choosing that."""
+    end = baseline.CONTROLS_END
+    extra_control = _CHART.replace(end, 'blocks["chart_only_control"] { input.tool_name == "x" }\n' + end)
+    extra_arm = _CHART.replace(end, 'blocks["pii_detection"] { input.tool_name == "x" }\n' + end)
+    compiled = baseline.compile(PRESET, {"deny_shell_execution": "off"})
+    assert not baseline.covers(compiled, extra_control)
+    assert not baseline.covers(compiled, extra_arm)
+
+
+def test_a_different_module_outside_the_region_is_not_covered() -> None:
+    """Controls compiled by a release whose preset differs from the chart's, above the region (the
+    detectors) or below it (the resolver)."""
+    compiled = baseline.compile(PRESET, {})
+    _, region, _ = baseline._split_region(_CHART)
+    above = _CHART.replace(baseline.CONTROLS_BEGIN, "# a detector changed\n" + baseline.CONTROLS_BEGIN, 1)
+    below = _CHART.replace("\nblock_fired { blocks[_] }", "\n# the resolver changed\nblock_fired { blocks[_] }", 1)
+    for newer in (above, below):
+        assert newer != _CHART and baseline._split_region(newer)[1] == region, "fixture: anchor moved"
+        assert not baseline.covers(compiled, newer)
+
+
+def test_a_module_compiled_before_the_off_marker_covers_only_when_nothing_is_off() -> None:
+    monitored = baseline.compile(PRESET, {"deny_shell_execution": "monitor"})
+    switched_off = baseline.compile(PRESET, {"deny_shell_execution": "off"})
+    assert baseline.covers(_without_off_marker(monitored), _CHART)
+    assert not baseline.covers(_without_off_marker(switched_off), _CHART)
+
+
+def test_unreadable_input_is_not_covered_rather_than_an_error() -> None:
+    assert not baseline.covers("", _CHART)
+    assert not baseline.covers(baseline.compile(PRESET, {}), "")
