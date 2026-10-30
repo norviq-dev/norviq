@@ -34,20 +34,27 @@ jobs:
       # flagged packages were absent from the runtime closure entirely).
       #
       # Generated here and never committed, so it cannot drift from the lock it derives from.
+      #
+      # `--extra spiffe` because that is what ships: Dockerfile.api and Dockerfile.engine install
+      # `.[spiffe]`. Without it the scan graded 60 packages where the images carry 64 (spiffe, pem,
+      # pyasn1, pyasn1-modules), and it graded protobuf 5.29.6 where the images get 7.35.1: spiffe
+      # needs protobuf>=6.31.1, so the lock resolves the extra in a fork of its own (pyproject.toml,
+      # [tool.uv] conflicts). tests/test_fossa_config.py holds this export to the Dockerfiles' extras.
       - name: Generate the shipped Python closure for FOSSA
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
-          uv export --frozen --no-dev --no-emit-project --no-hashes > requirements-runtime.txt
+          uv export --frozen --no-dev --extra spiffe --no-emit-project --no-hashes > requirements-runtime.txt
           echo "runtime closure: $(grep -cE '^[a-zA-Z0-9]' requirements-runtime.txt) packages"
 
           # ASSERT the narrowing is the intended one. A scope narrowed by accident looks exactly like
           # a scope narrowed on purpose, and a licence scan that quietly stopped looking is worse than
           # one that reports noise. These MUST be present — their absence means the export collapsed
           # and the scan would be grading almost nothing while still reporting green.
-          for must in fastapi pydantic sqlalchemy redis networkx grpcio; do
+          MUST="fastapi pydantic sqlalchemy redis networkx grpcio spiffe"
+          for must in $MUST; do
             grep -qiE "^${must}([=<>[;]|$)" requirements-runtime.txt \
-              || { echo "::error::runtime closure is missing ${must} — refusing to scan a set this small"; exit 1; }
+              || { echo "::error::runtime closure is missing ${must} — refusing to scan less than what ships"; exit 1; }
           done
           # And these must NOT be: they reach the graph only through optional framework extras.
           for never in scipy numpy pypdfium2 semantic-kernel chromadb pywin32; do
@@ -55,6 +62,13 @@ jobs:
               || { echo "::error::${never} is in the runtime closure — .fossa.yml's scope claim is wrong"; exit 1; }
           done
           echo "scope verified: includes what ships, excludes what does not"
+
+          # ASSERT fossa-cli will READ it. The summary check after the scan proves the setuptools
+          # project succeeded, not that one dependency was read: fossa-cli's requirements parser drops
+          # a line it cannot parse without a word, and a project of zero packages succeeds too. This
+          # reads every file setuptools discovers at the target path, each line in a form that parser
+          # is known to read, and needs the same packages in what it read.
+          python3 scripts/check_fossa_requirements.py . $MUST
 
       # Installs the fossa CLI and runs `fossa analyze` (upload only; we run `fossa test` ourselves below
       # so we can capture its JSON regardless of exit code). SHA-pinned (v1.7.0 tag dereferenced via
@@ -76,7 +90,7 @@ jobs:
             grep -qE "\* ${t} project in .*: succeeded" "$s" \
               || { echo "::error::FOSSA analysed no ${t} project; the gate would grade a partial graph"; cat "$s"; exit 1; }
           done
-          echo "analysed: setuptools (runtime closure), npm (ui), gomod (webhook)"
+          echo "analysed: setuptools (.[spiffe] closure), npm (ui), gomod (webhook)"
       - name: Dump FOSSA issues + attribution (JSON) for triage
         if: always()
         run: |
