@@ -6,7 +6,6 @@
 
 **Runtime policy enforcement for LLM agent tool calls on Kubernetes.**
 
-[![FOSSA Security](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fnorviq-dev%2Fnorviq.svg?type=shield&issueType=security)](https://app.fossa.com/projects/git%2Bgithub.com%2Fnorviq-dev%2Fnorviq?ref=badge_shield&issueType=security)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.30%2B-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 [![OPA](https://img.shields.io/badge/policy-OPA%2FRego-7D4698?logo=openpolicyagent&logoColor=white)](https://www.openpolicyagent.org)
