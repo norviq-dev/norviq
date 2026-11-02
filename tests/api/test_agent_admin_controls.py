@@ -418,3 +418,14 @@ async def test_reset_fails_closed_when_redis_cannot_answer(env) -> None:
     finally:
         app.state.cache = real
     assert resp.status_code == 503
+
+
+async def test_the_trust_update_log_line_names_the_admin_who_made_it(env) -> None:
+    """FAIL-ON-BUG: NRVQ-API-7031 is the record of a freeze being set or lifted, and it had no actor."""
+    _, client, _, ids = env
+    spiffe = _agent(ids, "who")
+    with structlog.testing.capture_logs() as logs:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr(sub="carol"))
+    assert resp.status_code == 200
+    line = [entry for entry in logs if entry.get("code") == "NRVQ-API-7031"][0]
+    assert (line["actor"], line["actor_role"], line["frozen"]) == ("carol", "admin", True)

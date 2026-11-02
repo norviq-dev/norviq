@@ -511,7 +511,7 @@ async def update_trust(
     trust = TrustScore(score=body.score, category="frozen" if frozen else "")
     await cache.set_trust(spiffe_id, trust)
     log.info("nrvq.api.agent.trust_updated", spiffe_id=spiffe_id, score=body.score, frozen=frozen, cap=cap,
-             code="NRVQ-API-7031")
+             actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7031")
     return {"spiffe_id": spiffe_id, "score": trust.score, "category": trust.category.lower()}
 
 

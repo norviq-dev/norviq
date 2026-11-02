@@ -61,7 +61,7 @@ Total unique codes: **410** (including `*-DEBUG-*` traces).
 | NRVQ-API-7022 | `nrvq.api.audit.top_blocked` | `norviq/api/routers/audit.py` |
 | NRVQ-API-7023 | `nrvq.api.audit.volume` | `norviq/api/routers/audit.py` |
 | NRVQ-API-7030 | `nrvq.api.agents.listed` | `norviq/api/routers/agents.py` |
-| NRVQ-API-7031 | `nrvq.api.agent.trust_updated`; also `nrvq.api.agent.trust_persist_failed` | `norviq/api/routers/agents.py` |
+| NRVQ-API-7031 | `nrvq.api.agent.trust_updated` — an admin set, capped or lifted an agent's freeze (`PUT /agents/{id}/trust`); carries `actor`, `actor_role`, `score`, `frozen`, `cap`. Its failure is `nrvq.api.agent.trust_persist_failed` (NRVQ-API-7033) | `norviq/api/routers/agents.py` |
 | NRVQ-API-7061 | `nrvq.api.me.served` (current-user claims) | `norviq/api/routers/me.py` |
 | NRVQ-API-7071 | `nrvq.api.mitre.activity_unavailable` (audit activity overlay best-effort; DB unavailable) | `norviq/api/routers/mitre.py` |
 | NRVQ-API-7050 | `nrvq.api.asset_graph.served` | `norviq/api/routers/graphs.py` |
