@@ -272,7 +272,9 @@ than as the client's bytes. The HTTP MCP proxy no longer stores cookies an upstr
 `Cookie` header still reaches the server on that client's requests. Server messages whose structure carries a key that
 differs from a protocol field only by case or compatibility form are withheld or refused
 (`NRVQ-MCP-5091`), and a tool call whose arguments are too large to inspect for outbound-header
-parameters is refused. Two security booleans no longer fall back to off when an
+parameters is refused. A client message forwarded by the MCP proxy keeps every number exactly as the client wrote
+it, and a message containing `NaN`, `Infinity` or a number too large for a double is refused in
+either direction. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

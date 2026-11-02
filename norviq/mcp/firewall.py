@@ -545,8 +545,8 @@ _HEADER_WALK_NODES = 65536
 # case-insensitive upstream (Go's encoding/json) as that member — so the two would act on different
 # messages. Such a message is refused (`_envelope_alias`).
 _ENVELOPE_KEYS = frozenset({"jsonrpc", "id", "method", "params", "result", "error"})
-_PARAMS_KEYS = frozenset({"name", "arguments", "uri", "_meta", P.INPUT_RESPONSES, "messages",
-                          "maxTokens", "systemPrompt"})
+_PARAMS_KEYS = frozenset({"name", "arguments", "uri", "_meta", P.INPUT_RESPONSES, P.REQUEST_STATE,
+                          "messages", "maxTokens", "systemPrompt"})
 
 
 def _alias_in(obj: Any, reserved: frozenset) -> str:
@@ -857,7 +857,7 @@ class McpFirewall:
             # FORWARDED AS PARSED, not as received. The upstream must read exactly the message Gate B
             # decided on, and the bytes are where parsers differ (duplicate names, case-insensitive
             # field matching). Compact JSON of the decoded object keeps every member and its order.
-            result.forward = P.encode(msg.data)
+            result.forward = P.encode_exact(msg.data) if msg.exact_numbers else P.encode(msg.data)
         if msg.is_request:
             # HELD until now. Forwarded: the server will have it, so its answer can be accepted —
             # here and in every peer scope. Answered here (refused, malformed): the server never sees

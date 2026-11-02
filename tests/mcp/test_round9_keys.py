@@ -55,7 +55,8 @@ async def test_an_allowed_client_message_is_forwarded_as_its_decoded_form():
     fw, _ = _fw()
     raw = b'{ "jsonrpc" : "2.0", "id" : 3, "method" : "ping", "params" : { "x" : 1.50 } }'
     result = await fw.on_client_message(P.decode(raw))
-    assert result.forward == b'{"jsonrpc":"2.0","id":3,"method":"ping","params":{"x":1.5}}\n'
+    # The number keeps the literal the client wrote (see test_round10_numbers.py).
+    assert result.forward == b'{"jsonrpc":"2.0","id":3,"method":"ping","params":{"x":1.50}}\n'
 
 
 async def test_http_the_upstream_receives_the_decoded_form():

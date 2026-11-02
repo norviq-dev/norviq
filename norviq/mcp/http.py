@@ -797,9 +797,12 @@ class HttpProxy:
         headers = {**connection, "content-type": "application/json",
                    "accept": f"application/json, {_SSE}", "accept-encoding": "identity"}
         with contextlib.suppress(Exception):
-            async with self._client.stream("POST", self._upstream, headers=headers, content=payload,
-                                           timeout=_POST_BACK_TIMEOUT_S):
-                pass
+            # One bound for the whole exchange: httpx's timeout applies per phase (connect, write,
+            # pool, read), so on its own it allowed several multiples of the figure.
+            async with asyncio.timeout(_POST_BACK_TIMEOUT_S):
+                async with self._client.stream("POST", self._upstream, headers=headers, content=payload,
+                                               timeout=_POST_BACK_TIMEOUT_S):
+                    pass
 
     # ------------------------------------------------------------------ lifecycle
     async def run(self) -> int:
