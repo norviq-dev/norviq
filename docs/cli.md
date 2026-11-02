@@ -425,8 +425,11 @@ name is misleading; the behavior above is what the endpoint does.
 
 Both writes are *intended* to be durable, and mostly are: after the Redis write the endpoint stamps
 `frozen`/`trust_cap` onto `agent_registry` (`norviq/api/routers/agents.py::update_trust`), and
-`norviq/api/routers/agents.py::warm_agent_overrides` re-seeds those columns into Redis at startup, so
-a Redis flush does not silently lift a kill switch. Two limits before you rely on it. The DB write is
+`norviq/api/routers/agents.py::warm_agent_overrides` re-seeds those columns into Redis when an API
+process starts. Nothing re-seeds them while it runs, so a store flush, a restart without persistence or
+a failover lifts every freeze and cap until the API restarts
+(`kubectl -n <namespace> rollout restart deployment/norviq-api`; `docs/trust-score-design.md` §5).
+Two more limits before you rely on it. The DB write is
 **best-effort**: it sits inside a `try/except` that logs `NRVQ-API-7033` and lets the call return
 `200` anyway — a successful `Agent frozen:` line is not proof the freeze was persisted. And it is an
 `UPDATE … WHERE spiffe_id = :s`, so an agent that has no `agent_registry` row yet gets no durable

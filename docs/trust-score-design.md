@@ -321,9 +321,37 @@ profile — see the scope-drift gap in §4 for the fact that nothing currently w
 > its neutral 0.5 and every tool looks unremarkable again**, so an adversary who can induce a Redis flush
 > gets a baseline reset. Enable Redis persistence in any deployment where that matters.
 >
-> The two durable admin controls are deliberately *not* subject to this: the freeze flag and the trust
-> cap are persisted to the `agent_registry` table and re-seeded into Redis at API startup
-> (`warm_agent_overrides`), so a Redis flush can never silently lift a kill switch.
+> The two durable admin controls are persisted, unlike the profile: the freeze flag and the trust cap
+> are stored in the `agent_registry` table. But they are enforced from Redis, and they are written back
+> into Redis only when an API process starts. See the known gap below.
+
+> **KNOWN GAP — freezes, trust caps and namespace posture are written back to the store only when an API
+> process starts.** They are persisted in Postgres (`agent_registry.frozen` / `trust_cap`,
+> `namespace_settings`), but the engine enforces them from the store: `agent_frozen:{spiffe_id}`,
+> `agent_trust_override:{spiffe_id}` and `nsconfig:{namespace}`, read on every evaluation, never from
+> Postgres. The store copy is written by the admin call that changes one, and otherwise once per API
+> process start (`warm_agent_overrides` and `warm_ns_settings`, from the lifespan in
+> `norviq/api/main.py`). Nothing writes it back while the API runs. So after the store loses its data
+> — a `FLUSHALL`, a restart without persistence or from an older snapshot, a failover to a replica that
+> had not received the write, or the 0.2.5 → 0.2.6 upgrade of the bundled store, which starts Valkey on
+> an empty directory — those keys are absent until an API process starts again. An absent key is
+> enforced as no freeze, no cap and the global posture. The engine's freeze read fails closed only when
+> the store cannot be read (`NRVQ-ENG-2067`, `NRVQ-DB-9024`, `NRVQ-DB-9025`), not when it answers with
+> nothing.
+>
+> Each boot warm is tried 3 times, 1 s then 2 s apart, each attempt cut off at 10 s
+> (`norviq/startup_retry.py::warm_with_backoff`). A failed attempt logs a WARNING (`NRVQ-API-7158` for
+> freezes and caps, `NRVQ-API-7159` for posture), and the last one an ERROR (`NRVQ-API-7035`,
+> `NRVQ-API-7138`); the API then starts anyway. `NRVQ-API-7034` and `NRVQ-API-7063` say a warm
+> completed. The warm adds what Postgres holds and deletes nothing, so a store restored from
+> an older snapshot can also bring back a freeze or cap lifted since.
+>
+> **Mitigation.** After any loss of store data or a failover, restart the API:
+> `kubectl -n <namespace> rollout restart deployment/norviq-api`, then look for `NRVQ-API-7034` in the
+> new pods' logs. Lift a freeze or cap that came back with `norviq agent reset-trust <id> --score 1.0`.
+> For the 0.2.6 upgrade, scale an agent that must stay frozen to zero across it and restart the API once
+> `helm upgrade` has finished (CHANGELOG, 0.2.6). Keep the store's persistence on (the bundled store's
+> PVC) so a plain restart reloads them.
 
 ---
 
@@ -371,7 +399,8 @@ full-state, mutually exclusive semantics:
 The CLI's `norviq agent reset-trust <spiffe_id>` defaults to `--score 0.8`, which lands in the middle
 row: it lifts the freeze but leaves the agent **capped at 0.8**. To return an agent to fully behavioral
 trust, pass `--score 1.0` explicitly. Both the freeze and the cap are persisted to `agent_registry` and
-re-seeded into Redis at startup, so neither is lost on a Redis restart.
+written back into Redis when an API process starts. A store that loses them in between enforces neither
+until the API restarts (§5, known gap).
 
 ---
 
@@ -593,14 +622,15 @@ same problem: the reported "dominant" signal reflects a configuration gap, not a
 | `scope_drift` has no data source | Pinned at 0.7; trust ceiling is 0.955, not 1.0 | §4 Signal 3 |
 | History window is 1 hour | Time-decay buckets ≥ 6h are unreachable; recovery is ~1h, not 24h | §4 Signal 5 |
 | Profile is Redis-only | A flush resets the behavioral baseline (novelty returns to neutral) | §5 |
+| Freezes, caps and ns posture are written to the store only at API start | After a store data loss or failover they are absent (not frozen, uncapped, global posture) until an API pod restarts | §5 |
 | NrvqClass / NrvqConfig trust fields | Schema-valid but never synced to the engine | §7 |
 | `baseline_rpm` floored at 10.0 | Quiet agents cannot trip session velocity below 10 calls/min | §4 Signal 7 |
 | Latency figures | Design targets; no published benchmark yet | §9 |
 
 **What is solid.** The parts of this design that are fully implemented and load-bearing: the weighted
 sum and its seven signal implementations; server-side recomputation with the caller's `trust_score`
-discarded (§11b); the tighten-only cap; the freeze kill-switch, including its durability across a Redis
-restart and its immunity to namespace audit mode; and the one-directional override semantics (trust can
+discarded (§11b); the tighten-only cap; the freeze kill-switch and its immunity to namespace audit mode
+(its durability across a store data loss holds from the next API start, not before: §5); and the one-directional override semantics (trust can
 escalate an allow, never allow a block).
 
 ---

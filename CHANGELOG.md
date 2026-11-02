@@ -102,13 +102,13 @@ because they should be installed.
   and caps) and `NRVQ-API-7063` (namespace posture) in the new pods' logs. `NRVQ-API-7035` or
   `NRVQ-API-7138` means that pod did not restore them; restart the API again. The same gap opens after
   any later loss of store data: a `FLUSHALL`, a store restart without persistence or from an older
-  snapshot, a failover. Restart the API after any of those. **Nothing is deleted:** 0.2.5's dump stays
-  at the root of the volume, and `helm rollback` to 0.2.5 finds it. A later upgrade picks Valkey's data
-  up from where it was at the rollback. The start-up write adds what Postgres holds but removes nothing,
-  so a freeze or trust cap you lifted while rolled back to 0.2.5 is enforced again after the re-upgrade
-  if Valkey held it at the rollback. Lift it again after re-upgrading with
-  `norviq agent reset-trust <id> --score 1.0`. Stores you run yourself (`redis.enabled=false`) are
-  unaffected.
+  snapshot, a failover. Restart the API after any of those (Known issues, below). **Nothing is
+  deleted:** 0.2.5's dump stays at the root of the volume, and `helm rollback` to 0.2.5 finds it. A
+  later upgrade picks Valkey's data up from where it was at the rollback. The start-up write adds what
+  Postgres holds but removes nothing, so a freeze or trust cap you lifted while rolled back to 0.2.5 is
+  enforced again after the re-upgrade if Valkey held it at the rollback. Lift it again after
+  re-upgrading with `norviq agent reset-trust <id> --score 1.0`. Stores you run yourself
+  (`redis.enabled=false`) are unaffected.
 - **HA (`redis.ha.enabled=true`, as in `values-prod.yaml`) stays on Redis 7.4.** The RedisFailover now
   takes its own `redis.ha.image`, default `redis:7.4-alpine`, the same Redis 7.4 that 0.2.5's
   `redis:7-alpine` ran, still under RSALv2/SSPLv1. Through 0.2.5 it took `images.redis`. Left on that,
@@ -197,6 +197,16 @@ overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A fai
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way
 before its ERROR, `NRVQ-API-7138`.
+
+**Known issues.** Agent freezes, trust caps and namespace posture are persisted in Postgres but
+enforced from the store, and the store copy is written only by the admin change and once when an API
+process starts. After a loss of store data while the API keeps running (a `FLUSHALL`, a store restart
+without persistence or from an older snapshot, a failover) they are absent, and enforced as not frozen,
+uncapped and the chart-wide posture, until an API pod restarts. Earlier releases behave the same. After
+any such event run `kubectl -n <namespace> rollout restart deployment/norviq-api` and look for
+`NRVQ-API-7034` in the new pods' logs. A store restored from an older snapshot can also bring back a
+freeze or cap lifted since: the restart adds what Postgres holds and removes nothing, so lift it again
+with `norviq agent reset-trust <id> --score 1.0`. Details in docs/trust-score-design.md §5.
 
 ## [0.2.5] — 2026-08-20 — log codes that named two things at once
 
