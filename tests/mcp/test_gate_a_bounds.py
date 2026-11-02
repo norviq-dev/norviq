@@ -85,15 +85,19 @@ def _kept(result, key: str) -> list:
 
 # ── a budget that is decremented but never consulted is not a budget ────────────────────────────
 
-def _count_bare_string_scans(monkeypatch) -> list[int]:
-    """The characters each bare-string scan consumed, recorded around the real scanner."""
+def _count_bare_string_scans(monkeypatch, cpu: list[float] | None = None) -> list[int]:
+    """The characters each bare-string scan consumed, recorded around the real scanner — and, when
+    `cpu` is given, the CPU seconds each of those scanner calls took."""
     import norviq.mcp.firewall as firewall_module
 
     scanned: list[int] = []
     real_scan = firewall_module.scan_untrusted_content
 
     def counting_scan(*args, **kwargs):
+        t0 = time.process_time()
         report = real_scan(*args, **kwargs)
+        if cpu is not None:
+            cpu.append(time.process_time() - t0)
         scanned.append(report.scanned_chars)
         return report
 
@@ -124,17 +128,28 @@ async def test_bare_string_listing_entries_spend_the_shared_budget(monkeypatch):
 
 
 async def test_the_bare_string_branch_cannot_be_scaled_past_the_budget(monkeypatch):
-    """Four times the payload must not be four times the work: it must be the same characters."""
-    scanned = _count_bare_string_scans(monkeypatch)
-    t0 = time.process_time()
+    """Four times the payload must not be four times the work: it must be the same characters.
+
+    The CPU guard is taken INSIDE the scanner calls, not around the whole delivery. Around the whole
+    delivery it failed a gate run at "230 ms -> 590 ms" while the scan read 524288 characters both
+    times: the rest of a delivery is legitimately linear in the entry count — this test's own
+    `json.dumps` and decode of an 8 vs 32 MiB message, the gate's re-parse, one withheld marker and
+    one finding per entry. Measured idle, 500 -> 2000 entries: scanner 216 -> 220 ms, the rest
+    ~55 -> ~260 ms; 20 replays of the whole-delivery check failed 1 (ratio up to 3.09), the scanner
+    ratio stayed <= 1.64 idle and under load. The budget is a promise about the scan, so the scan is
+    what is timed; with the budget removed the scanner's CPU grows fourfold with the entries."""
+    scan_cpu: list[float] = []
+    scanned = _count_bare_string_scans(monkeypatch, scan_cpu)
     await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
-    small_cpu, small = time.process_time() - t0, sum(scanned)
+    small_cpu, small = sum(scan_cpu), sum(scanned)
     scanned.clear()
-    t0 = time.process_time()
+    scan_cpu.clear()
     await _listing("prompts/list", "prompts", ["A" * 16380] * 2000)
-    large_cpu, large = time.process_time() - t0, sum(scanned)
+    large_cpu, large = sum(scan_cpu), sum(scanned)
     assert large == small, f"{small} chars scanned for 500 entries, {large} for 2000"
-    assert large_cpu < small_cpu * 2 + 0.100, f"{small_cpu * 1000:.0f} ms -> {large_cpu * 1000:.0f} ms of CPU is linear"
+    assert large_cpu < small_cpu * 2 + 0.050, (
+        f"the bare-string scans cost {small_cpu * 1000:.0f} ms of CPU for 500 entries and "
+        f"{large_cpu * 1000:.0f} ms for 2000: linear")
 
 
 # ── a per-item budget on a surface whose item COUNT the server picks ────────────────────────────
