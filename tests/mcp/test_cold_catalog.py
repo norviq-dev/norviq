@@ -845,6 +845,8 @@ async def test_the_sse_pump_splits_crlf_frames_as_they_complete():
     fw._client_pending.put(5, P.M_TOOLS_LIST)                         # noqa: SLF001
 
     class _Resp:
+        headers = {"content-type": "text/event-stream"}
+
         async def aiter_bytes(self):
             yield (b"data: " + json.dumps({"jsonrpc": "2.0", "id": 5,
                                            "result": {"tools": [POISONED_TOOL, CLEAN_TOOL]}}).encode()

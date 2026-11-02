@@ -387,6 +387,7 @@ class HttpProxy:
                 streamed = _SSE in resp.headers.get("content-type", "")
                 buffer = b""
                 received = 0
+                lines = _SseLines()
                 async for chunk in resp.aiter_bytes():
                     # TOTAL bytes, not the unparsed remainder: on a stream the remainder shrinks as
                     # frames are split off, so a server sending endless small non-matching frames
@@ -394,17 +395,17 @@ class HttpProxy:
                     received += len(chunk)
                     if received > _OWN_LIST_MAX_BYTES:
                         raise RuntimeError(f"tools/list answer exceeded {_OWN_LIST_MAX_BYTES} bytes")
-                    buffer += chunk
                     if not streamed:
+                        buffer += chunk
                         continue
-                    buffer = _normalise_sse(buffer)
+                    buffer += lines.feed(chunk)
                     while b"\n\n" in buffer:
                         frame, buffer = buffer.split(b"\n\n", 1)
                         found = _own_response_in_frame(frame, own.id)
                         if found is not None:
                             return found
                 if streamed:
-                    return _own_response_in_frame(_normalise_sse(buffer), own.id)
+                    return _own_response_in_frame(buffer, own.id)
                 found = P.decode(buffer)
                 return found if found is not None and found.id == own.id else None
 
@@ -453,9 +454,22 @@ class HttpProxy:
         would eventually disagree about framing — the same way `initialize` and `server/discover`
         drifted until one of them had no scan at all.
         """
+        if _SSE not in resp.headers.get("content-type", ""):
+            # The server answered a body that is NOT a stream on the path that serves the client a
+            # stream (an SSE-only client, or the GET stream). It has no frames and no `data:` lines, so
+            # the frame loop below would have read the whole body as bookkeeping and passed it through
+            # unmediated. It is one JSON-RPC message: mediate it whole, exactly as the JSON route does,
+            # and hand the client the result as the one SSE event it asked for. A body that does not
+            # decode is dropped by `_mediate_server_bytes` and nothing is emitted.
+            body = await resp.aread()
+            mediated = await self._mediate_server_bytes(fw, body) if body.strip() else b""
+            if mediated:
+                yield b"event: message\ndata: " + mediated + b"\n\n"
+            return
         buffer = b""
+        lines = _SseLines()
         async for chunk in resp.aiter_bytes():
-            buffer = _normalise_sse(buffer + chunk)
+            buffer += lines.feed(chunk)
             # SSE frames are separated by a blank line. Split on the boundary and emit whole frames
             # only — a half-received frame must not be parsed, and must not be held back longer than
             # it takes to complete.
@@ -495,20 +509,23 @@ class HttpProxy:
         return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
 
     async def _mediate_frame(self, fw: McpFirewall, frame: bytes) -> bytes:
-        """Mediate the JSON payload of one SSE frame, preserving every other SSE field.
+        """Mediate the JSON payload of one SSE frame, preserving the SSE fields a client acts on.
 
-        Only `data:` lines carry the JSON-RPC message; `event:`, `id:` and `retry:` are transport
-        bookkeeping the client needs intact (`id:` in particular drives resumption).
+        Only `data` carries the JSON-RPC message; `event:`, `id:`, `retry:` and comments are transport
+        bookkeeping the client needs intact (`id:` in particular drives resumption). The data lines are
+        joined and mediated as ONE message, as the client will read them. Any other line is dropped:
+        a spec client ignores an unknown field, and the proxy forwards nothing it did not classify.
         """
-        out_lines: list[bytes] = []
-        for line in frame.split(b"\n"):
-            if not line.startswith(b"data:"):
-                out_lines.append(line)
-                continue
-            payload = line[5:].strip()
-            mediated = await self._mediate_server_bytes(fw, payload)
-            out_lines.append(b"data: " + mediated if mediated else b"data: ")
-        return b"\n".join(out_lines)
+        keep, data, dropped = _split_frame(frame)
+        if dropped:
+            log.warning("nrvq.mcp.http.sse_lines_dropped", lines=dropped, server=self._server_id,
+                        code="NRVQ-MCP-5082",
+                        detail="lines in a server SSE frame that are neither data nor a known field "
+                               "were not forwarded")
+        if data is not None:
+            mediated = await self._mediate_server_bytes(fw, data)
+            keep.append(b"data: " + mediated if mediated else b"data: ")
+        return b"\n".join(keep)
 
     async def _mediate_server_bytes(self, fw: McpFirewall, payload: bytes) -> bytes:
         msg = P.decode(payload)
@@ -598,23 +615,68 @@ class HttpProxy:
         return 0
 
 
-def _normalise_sse(buffer: bytes) -> bytes:
-    """CRLF line endings to LF, so a blank line between SSE frames is always `\\n\\n`.
+class _SseLines:
+    """SSE's three line terminators — CRLF, bare CR, bare LF — turned into LF, across chunk boundaries.
 
-    SSE permits CRLF, and a server that used it never produced `\\n\\n`: the splitter saw one
-    unterminated frame until the stream ended, so nothing reached the client in between. A `\\r` left
-    at the very end of the buffer is kept as it is; the next chunk completes the pair.
+    The proxy and the client must agree on where a line ends, because the proxy decides from the start
+    of a line whether it carries data (mediated) or bookkeeping (passed). Splitting on LF alone, as
+    this driver did, read `event: message<CR>data: {...}` as ONE bookkeeping line, while every spec
+    client reads it as two and dispatches the data. A CR ends the line at once, as it does for a
+    streaming client; an LF that opens the NEXT chunk straight after it is the second half of that
+    CRLF and is skipped, so a CRLF split across chunks is one line end, not two.
     """
-    return buffer.replace(b"\r\n", b"\n")
+
+    __slots__ = ("_cr",)
+
+    def __init__(self) -> None:
+        self._cr = False
+
+    def feed(self, chunk: bytes) -> bytes:
+        if self._cr and chunk.startswith(b"\n"):
+            chunk = chunk[1:]
+        self._cr = chunk.endswith(b"\r")
+        return chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+# The SSE fields other than `data` that a client acts on, plus comments (`:`). Anything else is
+# ignored by a spec client and dropped here, so nothing the proxy did not classify is forwarded.
+_SSE_BOOKKEEPING = frozenset({b"event", b"id", b"retry"})
+
+
+def _split_frame(frame: bytes) -> tuple[list[bytes], bytes | None, int]:
+    """One LF-normalised SSE frame -> (bookkeeping lines to keep, joined data or None, lines dropped).
+
+    `data` values are joined with LF, exactly as a client joins them before parsing, so a message
+    written over several `data:` lines is mediated as the one message the client will read.
+    """
+    keep: list[bytes] = []
+    data: list[bytes] = []
+    dropped = 0
+    for line in frame.split(b"\n"):
+        if b"\r" in line:
+            dropped += 1        # cannot survive `_SseLines`; never forwarded if a caller skipped it
+            continue
+        if line.startswith(b":"):
+            keep.append(line)
+            continue
+        name, _, value = line.partition(b":")
+        if name == b"data":
+            data.append(value[1:] if value.startswith(b" ") else value)
+        elif name in _SSE_BOOKKEEPING:
+            keep.append(line)
+        elif line:
+            dropped += 1
+    return keep, (b"\n".join(data) if data else None), dropped
 
 
 def _own_response_in_frame(frame: bytes, own_id: Any) -> P.JsonRpcMessage | None:
     """The response to the proxy's own request, if this SSE frame carries it; else None."""
-    for line in frame.split(b"\n"):
-        if line.startswith(b"data:"):
-            msg = P.decode(line[5:])
-            if msg is not None and msg.is_response and msg.id == own_id:
-                return msg
+    _keep, data, _dropped = _split_frame(frame)
+    if data is None:
+        return None
+    msg = P.decode(data)
+    if msg is not None and msg.is_response and msg.id == own_id:
+        return msg
     return None
 
 
