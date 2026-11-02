@@ -30,7 +30,7 @@ RUN npm ci
 COPY ui/ .
 RUN npm run build
 
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.30-alpine
 USER root
 ARG NRVQ_GIT_SHA=dev
 ARG NRVQ_TREE_DIGEST=unknown

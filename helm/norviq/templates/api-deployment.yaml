@@ -185,7 +185,7 @@ spec:
         # Auto-mTLS terminator: serves TLS (+optional client-cert mTLS) on :8443 and proxies to the app
         # on loopback. The app itself stays HTTP (probes/tests unaffected); nothing is plaintext on the wire.
         - name: tls-proxy
-          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.config.internalTls.proxyImage | default "nginx:1.27-alpine")) | quote }}
+          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.config.internalTls.proxyImage | default "nginx:1.30-alpine")) | quote }}
           command: ["nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"]
           ports:
             - containerPort: 8443

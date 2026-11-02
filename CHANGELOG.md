@@ -161,7 +161,13 @@ pinned 7.18.2 is the first patched release), and chromadb CVE-2026-45830, -45831
 (no fixed release; reachable only through the optional `crewai` and `frameworks` extras, in no
 image). OPA moves from 1.19.1 to 1.21.4 in the sidecar image, the api and engine images and CI: 1.19.1's
 static binary carries 9 fixable HIGH findings (Go stdlib, x/crypto, x/net, x/text, grpc) that fail the
-image scan, and every OPA release that clears them is 1.21.2 or later.
+image scan, and every OPA release that clears them is 1.21.2 or later. The API's TLS terminator moves
+from `nginx:1.27-alpine` to `nginx:1.30-alpine`, the console's base from
+`nginxinc/nginx-unprivileged:1.27-alpine` to `1.30-alpine`, and the `helm test` pod from
+`curlimages/curl:8.10.1` to `8.23.0`. nginx 1.27 and its Alpine 3.21 base are end of life; Trivy
+(HIGH/CRITICAL, fixable only) reported 60 findings in the terminator, 58 in the console base before the
+build's `apk upgrade`, and 22 in curl. A mirror behind `global.imageRegistry` needs the new tags copied
+(digest-preserving) before the upgrade.
 
 **Fixed.** `global.imageRegistry` relocates the busybox init image. An agent that retries one refused
 call no longer loses trust on every attempt. Two security booleans no longer fall back to off when an

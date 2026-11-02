@@ -223,7 +223,7 @@ cert/key needs a writable path. Without it every injected pod crash-loops. `medi
 material off disk.
 
 **Internal TLS is on by default** (`config.internalTls.enabled: true`). A Helm hook mints an internal
-CA plus the API serving cert; the API pod runs an `nginx:1.27-alpine` terminator on `:8443` and
+CA plus the API serving cert; the API pod runs an `nginx:1.30-alpine` terminator on `:8443` and
 proxies to the app over loopback (the app itself stays plain HTTP, so probes and tests are unaffected);
 the injector hands each sidecar a CA-signed client cert for mTLS. The webhook is wired to
 `https://norviq-api.norviq.svc:8443` accordingly. No operator-managed certs or CSRs.
