@@ -19,6 +19,7 @@ the product's own routes, writers and warm path. Every identity is unique per te
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import os
 import time
 import uuid
@@ -32,7 +33,7 @@ from sqlalchemy import text
 
 from norviq.api.db.session import close_db, create_tables, get_session, init_db, upsert_agent_registry
 from norviq.api.main import create_app
-from norviq.api.routers.agents import warm_agent_overrides
+from norviq.api.routers.agents import get_admin_db, warm_agent_overrides
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
 
@@ -203,12 +204,11 @@ async def test_a_freeze_upsert_keeps_the_existing_rows_identity_and_counters(env
     assert (row["frozen"], row["trust_cap"]) == (False, None)
 
 
-class _BrokenSession:
-    async def execute(self, *_a, **_k):
-        raise RuntimeError("database unavailable")
+class _BrokenDb:
+    """The admin-write connector when Postgres cannot be reached."""
 
-    async def commit(self) -> None:  # pragma: no cover - never reached
-        return None
+    async def connect(self):
+        raise ConnectionRefusedError("database unavailable")
 
 
 async def test_a_failed_durable_write_is_a_503_not_a_200(env) -> None:
@@ -219,10 +219,7 @@ async def test_a_failed_durable_write_is_a_503_not_a_200(env) -> None:
     silently undoes is worse than one that visibly failed."""
     app, client, cache, ids = env
 
-    async def _broken():
-        yield _BrokenSession()
-
-    app.dependency_overrides[get_session] = _broken
+    app.dependency_overrides[get_admin_db] = _BrokenDb
     try:
         spiffe = _agent(ids, "db-down")
         resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
@@ -233,7 +230,7 @@ async def test_a_failed_durable_write_is_a_503_not_a_200(env) -> None:
         assert resp.status_code == 503
         assert await cache._client().get(f"agent_frozen:{spiffe}") == "1", "a failed unfreeze lifted the live freeze"
     finally:
-        app.dependency_overrides.pop(get_session, None)
+        app.dependency_overrides.pop(get_admin_db, None)
 
 
 async def test_retention_never_ages_out_a_frozen_or_capped_agent(env) -> None:
@@ -560,14 +557,15 @@ async def test_freeze_to_cap_never_leaves_an_agent_with_neither(env) -> None:
         assert (frozen, float(cap), row["trust_cap"]) == (None, 0.3, pytest.approx(0.3))
 
 
-async def test_freeze_with_the_store_down_is_persisted_and_applied_at_the_next_start(env) -> None:
+async def test_with_the_store_down_a_tightening_is_persisted_and_a_loosening_is_not_applied(env) -> None:
     """FAIL-ON-BUG (review N2). With Redis down a freeze was an unhandled 500 and nothing reached Postgres.
-    It is durable now and the 503 says it is not live yet; warm_agent_overrides applies it at the next
-    start. A cap with the store down changes nothing."""
+    A tightening (freeze, or a cap where there was none) is durable now and the 503 says it is not live yet;
+    warm_agent_overrides applies it at the next start. A loosening (freeze to cap) changes nothing."""
     app, client, cache, ids = env
-    spiffe, capped = _agent(ids, "n2"), _agent(ids, "n2cap")
-    await _seed_registered(spiffe)
-    await _seed_registered(capped)
+    spiffe, capped, lifted = _agent(ids, "n2"), _agent(ids, "n2cap"), _agent(ids, "n2lift")
+    for agent in (spiffe, capped, lifted):
+        await _seed_registered(agent)
+    assert (await client.put(f"/api/v1/agents/{lifted}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
 
     class _Down(_Proxy):
         def _client(self):
@@ -576,18 +574,26 @@ async def test_freeze_with_the_store_down_is_persisted_and_applied_at_the_next_s
         async def apply_admin_trust_control(self, *a, **k):
             raise ConnectionError("redis down")
 
+        async def claim_admin_trust_owner(self, *a, **k):
+            raise ConnectionError("redis down")
+
+        async def apply_admin_trust_control_if_owner(self, *a, **k):
+            raise ConnectionError("redis down")
+
     app.state.cache = _Down(cache)
     try:
         resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
         cap_resp = await client.put(f"/api/v1/agents/{capped}/trust", json={"score": 0.3}, headers=_hdr())
+        lift_resp = await client.put(f"/api/v1/agents/{lifted}/trust", json={"score": 0.3}, headers=_hdr())
     finally:
         app.state.cache = cache
-    assert resp.status_code == 503 and "persisted but NOT live" in resp.json()["detail"]
+    assert resp.status_code == 503 and "Persisted but NOT live" in resp.json()["detail"]
     assert (await _row(spiffe))["frozen"] is True
+    assert cap_resp.status_code == 503 and (await _row(capped))["trust_cap"] == pytest.approx(0.3)
     await warm_agent_overrides(cache)
     assert await cache._client().get(f"agent_frozen:{spiffe}") == "1"
-    assert cap_resp.status_code == 503
-    assert (await _row(capped))["trust_cap"] is None, "a cap the store did not take was left durable"
+    assert lift_resp.status_code == 503 and "not applied" in lift_resp.json()["detail"]
+    assert (await _row(lifted))["frozen"] is True, "a loosening the store could not take was left durable"
 
 
 @pytest.mark.parametrize(
@@ -597,18 +603,16 @@ async def test_freeze_with_the_store_down_is_persisted_and_applied_at_the_next_s
         "%20",
         "not-a-spiffe-id",
         "spiffe://",
-        "spiffe://norviq/ns/a/sa/b%2A",
-        "spiffe://norviq/ns/a/sa/b%3F",
-        "spiffe://norviq/ns/a/sa/my%20agent",
-        "spiffe://norviq/ns/a/sa/b%5B0%5D",
+        "spiffe://%20%20",
+        "x" * 20 + "spiffe://a",
         "spiffe://norviq/ns/a/sa/" + "x" * 600,
     ],
 )
-async def test_admin_trust_routes_refuse_an_id_that_is_not_safe_to_write_under(env, bad) -> None:
+async def test_admin_trust_routes_refuse_an_id_the_product_does_not_accept(env, bad) -> None:
     """FAIL-ON-BUG (review N3). The upsert wrote a frozen registry row for any string, '*' and ' '
-    included. PUT, reset and DELETE refuse what the evaluator refuses (no "spiffe://" prefix) plus an
-    empty id, whitespace, glob characters and more than 512 characters (422), and write nothing. Counted
-    for these exact ids, so rows another run left in a shared database cannot fail it."""
+    included. PUT, reset and DELETE refuse exactly what the evaluator and POST /keys refuse — no
+    "spiffe://" prefix, more than 512 characters — plus an id empty after the prefix (422), and write
+    nothing. Counted for these exact ids, so rows another run left in a shared database cannot fail it."""
     from urllib.parse import unquote
 
     _, client, _, _ = env
@@ -627,17 +631,27 @@ async def test_admin_trust_routes_refuse_an_id_that_is_not_safe_to_write_under(e
         "spiffe://Acme.com/agent-{u}",
         "spiffe://norviq/ns/ctl-test/sa/agent:v2-{u}",
         "spiffe://norviq/ns/ctl-test/sa/agent@prod-{u}",
+        "spiffe://norviq/ns/ctl-test/sa/my agent-{u}",
+        "spiffe://norviq/ns/ctl-test/sa/b*-{u}",
+        "spiffe://norviq/ns/ctl-test/sa/b?[0]-{u}",
     ],
 )
-async def test_an_operator_chosen_id_the_product_accepts_can_still_be_frozen(env, label) -> None:
-    """Review round 2, N10: the first version enforced the SPIFFE spec's character set and 422'd ids that
-    POST /keys mints and the evaluator registers ('spiffe://acme-agent', '.../sa/agent:v2'), so such an
-    agent was listed but could not be frozen. The rule is now the product's own plus the dangerous shapes."""
+async def test_an_id_the_product_mints_and_enforces_can_be_frozen_lifted_and_deleted(env, label) -> None:
+    """Review rounds 2 and 3 (N10): POST /keys mints any spiffe_id up to 512 characters and the evaluator
+    enforces any "spiffe://" id, whitespace and glob characters included. An earlier rule 422'd those, so
+    such an agent's kill switch was lost. The id only names keys used with GET/SET/DEL/EVAL, never a SCAN
+    pattern, so these are inert."""
+    from urllib.parse import quote
+
     _, client, cache, ids = env
     spiffe = label.format(u=uuid.uuid4().hex[:8])
     ids.append(spiffe)
-    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    path = quote(spiffe, safe="/:@")
+    assert (await client.put(f"/api/v1/agents/{path}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
     assert (await _row(spiffe))["frozen"] is True and await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+    assert (await client.put(f"/api/v1/agents/{path}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+    assert await cache._client().get(f"agent_frozen:{spiffe}") is None
+    assert (await client.delete(f"/api/v1/agents/{path}", headers=_hdr())).status_code == 200
 
 
 async def test_reset_counts_every_history_entry_it_deletes(env) -> None:
@@ -716,14 +730,11 @@ async def test_a_cap_is_not_applied_live_when_its_durable_write_fails(env) -> No
     app, client, cache, ids = env
     spiffe = _agent(ids, "n5cap")
 
-    async def _broken():
-        yield _BrokenSession()
-
-    app.dependency_overrides[get_session] = _broken
+    app.dependency_overrides[get_admin_db] = _BrokenDb
     try:
         resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.3}, headers=_hdr())
     finally:
-        app.dependency_overrides.pop(get_session, None)
+        app.dependency_overrides.pop(get_admin_db, None)
     assert resp.status_code == 503
     assert await cache._client().get(f"agent_trust_override:{spiffe}") is None
 
@@ -797,146 +808,11 @@ class _HeldLock:
         await self._gen.aclose()
 
 
-class _CommitFailsOnce(_Proxy):
-    """The route's session; its first commit fails. `landed` decides whether the server committed anyway
-    (a lost ack) or rolled back. The rollback releases the advisory lock, as a dropped connection does."""
-
-    def __init__(self, real, state: dict) -> None:
-        super().__init__(real)
-        self._state = state
-
-    async def commit(self):
-        if self._state.get("failed"):
-            return await self._real.commit()
-        self._state["failed"] = True
-        if self._state.get("landed"):
-            await self._real.commit()
-        else:
-            await self._real.rollback()
-        if "gate" in self._state:
-            self._state["hit"].set()
-            await self._state["gate"].wait()
-        raise ConnectionError("connection lost during COMMIT")
-
-
-def _override_session(app, state: dict) -> None:
-    async def _factory():
-        gen = get_session()
-        try:
-            yield _CommitFailsOnce(await gen.__anext__(), state)
-        finally:
-            await gen.aclose()
-
-    app.dependency_overrides[get_session] = _factory
-
-
-async def test_a_failed_commit_never_writes_back_over_a_freeze_committed_meanwhile(env) -> None:
-    """FAIL-ON-BUG (review round 2, R2). A cap's MULTI landed, its commit failed (lock released), and a
-    freeze from another replica committed with 200 in the gap. The old code then restored what Redis held
-    before the cap — no freeze — over it: registry frozen, agent unfrozen. Now Redis is set from the row,
-    re-read under a fresh lock."""
-    app, client, cache, ids = env
-    spiffe = _agent(ids, "r2")
-    await _seed_registered(spiffe)
-    state = {"gate": asyncio.Event(), "hit": asyncio.Event()}
-    _override_session(app, state)
-    try:
-        cap = asyncio.create_task(client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.5}, headers=_hdr()))
-        await asyncio.wait_for(state["hit"].wait(), 5)
-        app.dependency_overrides.pop(get_session, None)
-        freeze = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
-        _override_session(app, state)
-        state["gate"].set()
-        cap_resp = await asyncio.wait_for(cap, 10)
-    finally:
-        app.dependency_overrides.pop(get_session, None)
-    assert freeze.status_code == 200 and cap_resp.status_code == 503
-    assert (await _row(spiffe))["frozen"] is True
-    assert await cache._client().get(f"agent_frozen:{spiffe}") == "1", "the stale restore erased the freeze"
-
-
-async def test_a_commit_whose_ack_was_lost_is_reported_as_applied_and_the_store_matches(env) -> None:
-    """Review round 2: the commit landed but the client saw an error. The old restore put the looser
-    pre-change state back while the registry kept the new cap, and answered 'not applied'."""
-    app, client, cache, ids = env
-    spiffe = _agent(ids, "ack")
-    await _seed_registered(spiffe)
-    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.5}, headers=_hdr())).status_code == 200
-    _override_session(app, {"landed": True})
-    try:
-        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.2}, headers=_hdr())
-    finally:
-        app.dependency_overrides.pop(get_session, None)
-    assert resp.status_code == 200, resp.text
-    assert (await _row(spiffe))["trust_cap"] == pytest.approx(0.2)
-    assert float(await cache._client().get(f"agent_trust_override:{spiffe}")) == pytest.approx(0.2)
-
-
-async def test_registry_unreachable_after_a_failed_commit_leaves_the_stricter_state_live(env) -> None:
-    """Review round 2, R2's other branch: if Postgres cannot be reached to re-read the row, no other admin
-    write can commit either, so the stricter of the old and new state is safe — and the 503 says the state
-    is not confirmed (7148, ERROR)."""
-    app, client, cache, ids = env
-    spiffe = _agent(ids, "unreach")
-    await _seed_registered(spiffe)
-    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
-    state: dict = {}
-    calls = {"n": 0}
-
-    async def _factory():
-        calls["n"] += 1
-        if calls["n"] > 1:  # the reconcile's fresh session: Postgres is gone
-            yield _BrokenSession()
-            return
-        gen = get_session()
-        try:
-            yield _CommitFailsOnce(await gen.__anext__(), state)
-        finally:
-            await gen.aclose()
-
-    app.dependency_overrides[get_session] = _factory
-    try:
-        with structlog.testing.capture_logs() as logs:
-            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
-    finally:
-        app.dependency_overrides.pop(get_session, None)
-    assert resp.status_code == 503 and resp.json()["detail"].startswith("State uncertain")
-    assert await cache._client().get(f"agent_frozen:{spiffe}") == "1", "a clear that may not have committed went live"
-    assert [entry["outcome"] for entry in logs if entry.get("code") == "NRVQ-API-7148"] == [
-        "commit_unconfirmed_stricter_state_live"
-    ]
-
-
-async def test_a_store_that_cannot_be_reset_after_a_failed_clear_says_state_uncertain(env) -> None:
-    """FAIL-ON-BUG (review round 2, R3). The clear's MULTI did not confirm and putting the store back failed
-    too: the old code answered 'not applied' while the freeze might be lifted live."""
-    app, client, cache, ids = env
-    spiffe = _agent(ids, "r3")
-    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
-
-    class _StoreGone(_Proxy):
-        async def apply_admin_trust_control(self, spiffe_id, *, frozen, cap, display=None):
-            if not frozen:  # the clear lands, then Redis goes away before anything else answers
-                await self._real.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display)
-            raise ConnectionError("redis gone")
-
-    app.state.cache = _StoreGone(cache)
-    try:
-        with structlog.testing.capture_logs() as logs:
-            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
-    finally:
-        app.state.cache = cache
-    assert resp.status_code == 503 and resp.json()["detail"].startswith("State uncertain")
-    errors = [entry for entry in logs if entry.get("code") == "NRVQ-API-7148"]
-    assert errors and errors[0]["log_level"] == "error"
-    assert (await _row(spiffe))["frozen"] is True
-
-
 @pytest.fixture
 def short_waits(monkeypatch):
     import norviq.api.routers.agents as agents_mod
 
-    monkeypatch.setattr(agents_mod, "_LOCK_TIMEOUT", "300ms")
+    monkeypatch.setattr(agents_mod, "_lock_timeout_ms", lambda: 300)
     monkeypatch.setattr(agents_mod, "_STORE_TIMEOUT_S", 0.3)
     return agents_mod
 
@@ -986,34 +862,20 @@ async def test_a_hung_store_is_cut_off_and_does_not_hold_the_lock(env, short_wai
 
 
 async def test_a_reset_whose_lock_release_fails_still_reports_and_audits_what_it_cleared(env) -> None:
-    """Round 2, N9: the reset writes nothing to Postgres; ending its transaction only releases the lock.
-    A failure there used to answer 503 'nothing was cleared' with no 7145, after the history was deleted."""
+    """Round 2, N9: the reset writes nothing to Postgres; ending its hold on the agent only releases the
+    lock. A failure there used to answer 503 'nothing was cleared' with no 7145, after the history was
+    deleted. Here pg_advisory_unlock itself fails: the connection is invalidated and the answer stands."""
     app, client, cache, ids = env
     spiffe = _agent(ids, "n9")
     await _seed_registered(spiffe)
     await cache._client().zadd(f"agent_history:{spiffe}", {'{"decision": "block"}': time.time()})
 
-    class _EndFails(_Proxy):
-        async def commit(self):
-            raise ConnectionError("connection lost")
-
-        async def rollback(self):
-            await self._real.rollback()
-            raise ConnectionError("connection lost")
-
-    async def _factory():
-        gen = get_session()
-        try:
-            yield _EndFails(await gen.__anext__())
-        finally:
-            await gen.aclose()
-
-    app.dependency_overrides[get_session] = _factory
+    _admin_db(app, unlock_fails=True)
     try:
         with structlog.testing.capture_logs() as logs:
             resp = await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=_hdr())
     finally:
-        app.dependency_overrides.pop(get_session, None)
+        app.dependency_overrides.pop(get_admin_db, None)
     assert resp.status_code == 200 and resp.json()["history_entries_cleared"] == 1
     assert [entry["code"] for entry in logs if entry.get("code") in ("NRVQ-API-7145", "NRVQ-API-7146")] == [
         "NRVQ-API-7145"
@@ -1025,10 +887,16 @@ async def test_the_conditional_delete_alone_keeps_a_freeze_that_committed_after_
     disabled, a freeze committed between DELETE's check and its delete must make the delete a 409."""
     import norviq.api.routers.agents as agents_mod
 
-    async def _no_lock(*_a, **_k):
-        return None
+    @asynccontextmanager
+    async def _no_lock(db, _spiffe_id):
+        conn = await db.connect()
+        try:
+            yield conn
+        finally:
+            await conn.rollback()
+            await conn.close()
 
-    monkeypatch.setattr(agents_mod, "_lock_agent", _no_lock)
+    monkeypatch.setattr(agents_mod, "_agent_lock", _no_lock)
     await test_a_delete_crossing_a_freeze_never_loses_the_freeze(env)
 
 
@@ -1145,32 +1013,286 @@ async def test_the_boot_warm_releases_each_batch_and_resumes_after_it(env, short
     assert await cache._client().get(f"agent_frozen:{first}") is None, "the retry restarted from the top"
 
 
-async def test_a_failed_commit_with_the_store_gone_too_says_state_uncertain(env) -> None:
-    """Review round 2, R3 (probe P2): the clear's MULTI landed, the commit failed and the store went away
-    before it could be set from the registry. Postgres keeps the freeze; the store cannot be fixed from
-    here, so the answer must not be 'not applied' — it is 'State uncertain' with 7148 at ERROR."""
+# --- Round 3: ordering by direction under one session-level lock, the owner fence, and the warm cursor --------
+
+
+class _ConnProxy(_Proxy):
+    """The admin-write connection, with hooks. Commit #1 takes the lock, #2 is the trust write."""
+
+    def __init__(self, real, hooks: dict) -> None:
+        super().__init__(real)
+        self._hooks = hooks
+
+    async def execute(self, stmt, *a, **k):
+        if self._hooks.get("unlock_fails") and "pg_advisory_unlock" in str(stmt):
+            raise ConnectionError("connection lost during unlock")
+        return await self._real.execute(stmt, *a, **k)
+
+    async def commit(self):
+        self._hooks["commits"] += 1
+        if self._hooks["commits"] == self._hooks.get("fail_commit_n"):
+            if self._hooks.get("landed"):
+                await self._real.commit()
+            else:
+                await self._real.rollback()
+            raise ConnectionError("connection lost during COMMIT")
+        return await self._real.commit()
+
+
+def _admin_db(app, **hooks) -> dict:
+    import norviq.api.routers.agents as agents_mod
+
+    hooks.setdefault("commits", 0)
+
+    class _Db:
+        async def connect(self):
+            return _ConnProxy(await agents_mod._EngineConnector().connect(), hooks)
+
+    app.dependency_overrides[get_admin_db] = _Db
+    return hooks
+
+
+async def _live(cache, spiffe: str) -> tuple[bool, float | None]:
+    frozen = await cache._client().get(f"agent_frozen:{spiffe}")
+    cap = await cache._client().get(f"agent_trust_override:{spiffe}")
+    return bool(frozen), (float(cap) if cap is not None else None)
+
+
+async def _durable(spiffe: str) -> tuple[bool, float | None]:
+    row = await _row(spiffe)
+    return (False, None) if row is None else (bool(row["frozen"]), row["trust_cap"])
+
+
+@pytest.mark.parametrize(
+    "prior,new,tightening",
+    [
+        ((False, None), (True, None), True),  # freeze added
+        ((True, None), (True, None), True),  # re-freeze
+        ((False, 0.5), (True, None), True),  # cap -> freeze
+        ((False, None), (False, 0.3), True),  # cap added
+        ((False, 0.5), (False, 0.3), True),  # cap lowered
+        ((False, 0.5), (False, 0.5), True),  # unchanged
+        ((False, None), (False, None), True),  # clear of nothing
+        ((True, None), (False, 0.3), False),  # freeze -> cap
+        ((True, None), (False, None), False),  # freeze lifted
+        ((False, 0.3), (False, 0.5), False),  # cap raised
+        ((False, 0.3), (False, None), False),  # cap removed
+    ],
+)
+def test_each_trust_change_is_classified_by_direction(prior, new, tightening) -> None:
+    from norviq.api.routers.agents import _is_tightening
+
+    assert _is_tightening(prior, new) is tightening
+
+
+async def test_a_tightening_whose_commit_fails_is_live_and_says_it_may_not_be_persisted(env) -> None:
+    """Review round 3: tightening writes go to the store first, so a failed commit leaves the store stricter
+    than the registry — never looser — and the 503 says exactly that. No reconcile."""
     app, client, cache, ids = env
-    spiffe = _agent(ids, "r3commit")
-    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
-    calls = {"n": 0}
-
-    class _GoneAfterFirst(_Proxy):
-        async def apply_admin_trust_control(self, spiffe_id, *, frozen, cap, display=None):
-            calls["n"] += 1
-            if calls["n"] > 1:
-                raise ConnectionError("redis gone")
-            await self._real.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display)
-
-    app.state.cache = _GoneAfterFirst(cache)
-    _override_session(app, {})
+    spiffe = _agent(ids, "t-fail")
+    await _seed_registered(spiffe)
+    _admin_db(app, fail_commit_n=2)
     try:
-        with structlog.testing.capture_logs() as logs:
-            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.3}, headers=_hdr())
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Applied live, but it may NOT be persisted")
+    assert await _live(cache, spiffe) == (False, 0.3) and await _durable(spiffe) == (False, None)
+
+
+async def test_a_tightening_whose_commit_ack_is_lost_is_live_persisted_and_answered_truthfully(env) -> None:
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "t-ack")
+    await _seed_registered(spiffe)
+    _admin_db(app, fail_commit_n=2, landed=True)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 503 and "may NOT be persisted" in resp.json()["detail"]
+    assert await _live(cache, spiffe) == (True, None) == await _durable(spiffe)
+
+
+async def test_a_loosening_whose_commit_fails_leaves_the_store_stricter_and_says_not_applied(env) -> None:
+    """Review round 3: a loosening reaches the store only after its commit succeeded."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "l-fail")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    _admin_db(app, fail_commit_n=2)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Trust change not applied")
+    assert await _live(cache, spiffe) == (True, None) == await _durable(spiffe)
+
+
+async def test_a_loosening_whose_commit_ack_is_lost_keeps_the_store_stricter_until_retried(env) -> None:
+    """Review round 3, (3): the registry took the clear but the client never heard. The store keeps the
+    freeze (stricter than the registry, never looser), the 503 says so, and a retry converges."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "l-ack")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    _admin_db(app, fail_commit_n=2, landed=True)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 503 and "still enforces the previous, stricter state" in resp.json()["detail"]
+    assert await _durable(spiffe) == (False, None) and await _live(cache, spiffe) == (True, None)
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+    assert await _live(cache, spiffe) == (False, None)
+
+
+async def test_a_loosening_the_store_does_not_take_after_its_commit_says_persisted_and_stricter(env) -> None:
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "l-store")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+
+    class _FencedWriteFails(_Proxy):
+        async def apply_admin_trust_control_if_owner(self, *a, **k):
+            raise ConnectionError("redis gone")
+
+    app.state.cache = _FencedWriteFails(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr())
     finally:
         app.state.cache = cache
-        app.dependency_overrides.pop(get_session, None)
-    assert resp.status_code == 503 and resp.json()["detail"].startswith("State uncertain")
-    assert [(e["outcome"], e["log_level"]) for e in logs if e.get("code") == "NRVQ-API-7148"] == [
-        ("commit_failed_store_not_set_from_registry", "error")
-    ]
-    assert (await _row(spiffe))["frozen"] is True
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Persisted, but the store still enforces")
+    assert await _durable(spiffe) == (False, pytest.approx(0.4)) and await _live(cache, spiffe) == (True, None)
+
+
+async def _terminate_lock_holder(spiffe: str) -> None:
+    async with _session() as session:
+        await session.execute(
+            text(
+                "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                "AND objid::bigint = (hashtext(:k)::bigint & 4294967295) AND pid <> pg_backend_pid()"
+            ),
+            {"k": f"agent_trust:{spiffe}"},
+        )
+
+
+async def test_a_loosening_that_lost_its_lock_after_committing_cannot_land_over_a_newer_freeze(env) -> None:
+    """Review round 3: the owner fence. A clear commits, then its connection drops (the lock goes with it)
+    before its store write. A freeze from another replica takes the agent and completes with 200. The
+    clear's late store write must not land: it is fenced on agent_trust_owner:<id>, which the freeze
+    re-claimed. Without the fence the store ends unfrozen while the registry says frozen."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "fence")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    gate, hit = asyncio.Event(), asyncio.Event()
+
+    class _PauseFencedWrite(_Proxy):
+        async def apply_admin_trust_control_if_owner(self, *a, **k):
+            hit.set()
+            await gate.wait()
+            return await self._real.apply_admin_trust_control_if_owner(*a, **k)
+
+    app.state.cache = _PauseFencedWrite(cache)
+    try:
+        clear = asyncio.create_task(client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr()))
+        await asyncio.wait_for(hit.wait(), 5)
+        await _terminate_lock_holder(spiffe)
+        app.state.cache = cache
+        freeze = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        gate.set()
+        clear_resp = await asyncio.wait_for(clear, 10)
+    finally:
+        app.state.cache = cache
+    assert freeze.status_code == 200 and clear_resp.status_code == 503
+    assert await _durable(spiffe) == (True, None)
+    assert await _live(cache, spiffe) == (True, None), "a late loosening landed over a newer freeze"
+
+
+async def test_a_connection_whose_unlock_fails_is_never_returned_to_the_pool_holding_the_lock(env) -> None:
+    """Review round 3: the lock is session-level, so a pooled connection that still held it would block that
+    agent's next admin write for as long as the connection lives. If pg_advisory_unlock does not answer
+    true, the connection is invalidated and Postgres drops the lock with the backend."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "unlock")
+    _admin_db(app, unlock_fails=True)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 200
+    assert [e["code"] for e in logs if e.get("code") == "NRVQ-API-7150"] == ["NRVQ-API-7150"]
+    held = None
+    for _ in range(20):  # the backend ends asynchronously after the connection is invalidated
+        async with _session() as session:
+            held = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                        "AND objid::bigint = (hashtext(:k)::bigint & 4294967295)"
+                    ),
+                    {"k": f"agent_trust:{spiffe}"},
+                )
+            ).scalar()
+        if not held:
+            break
+        await asyncio.sleep(0.1)
+    assert held == 0, "a connection went back to the pool still holding the agent's lock"
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+
+
+async def test_the_startup_warm_resumes_after_a_failed_batch_instead_of_restarting(env, monkeypatch) -> None:
+    """Review rounds 2-3: the attempts of warm_agent_overrides_at_startup share one cursor. A batch that
+    fails is retried from the last committed batch; agents already written are not written again."""
+    import norviq.api.routers.agents as agents_mod
+    from norviq.api.routers.agents import warm_agent_overrides_at_startup
+
+    _, client, cache, ids = env
+    agents = sorted(_agent(ids, f"wcur-{n}") for n in "abc")
+    for spiffe in agents:
+        assert (
+            await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        ).status_code == 200
+        await cache._client().delete(f"agent_frozen:{spiffe}")
+    monkeypatch.setattr(agents_mod, "_WARM_BATCH", 1)
+    writes: dict[str, int] = {}
+    failed: list[str] = []
+    real_client = cache._client()
+
+    class _Pipe(_Proxy):
+        def __init__(self, real) -> None:
+            super().__init__(real)
+            self._keys: list[str] = []
+
+        async def set(self, key, *a, **k):
+            self._keys.append(key)
+            return await self._real.set(key, *a, **k)
+
+        async def execute(self, *a, **k):
+            if f"agent_frozen:{agents[1]}" in self._keys and not failed:
+                failed.append("once")
+                raise ConnectionError("store dropped mid-warm")
+            for key in self._keys:
+                writes[key] = writes.get(key, 0) + 1
+            return await self._real.execute(*a, **k)
+
+    class _PipeCtx:
+        def __init__(self, ctx) -> None:
+            self._ctx = ctx
+
+        async def __aenter__(self):
+            return _Pipe(await self._ctx.__aenter__())
+
+        async def __aexit__(self, *exc):
+            return await self._ctx.__aexit__(*exc)
+
+    class _Client(_Proxy):
+        def pipeline(self, *a, **k):
+            return _PipeCtx(self._real.pipeline(*a, **k))
+
+    class _Cache(_Proxy):
+        def _client(self):
+            return _Client(real_client)
+
+    seeded = await asyncio.wait_for(warm_agent_overrides_at_startup(_Cache(cache)), 30)
+    assert seeded is not None and failed == ["once"]
+    for spiffe in agents:
+        assert await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+    assert writes[f"agent_frozen:{agents[0]}"] == 1, "the retry restarted from the top instead of resuming"

@@ -18,6 +18,7 @@ from sqlalchemy import text
 
 from norviq.api.db.session import create_tables, ensure_schema_compatibility, get_session
 from norviq.api.main import create_app
+from norviq.api.routers.agents import get_admin_db
 from norviq.config import settings
 from norviq.engine.policy_loader import PolicyLoader
 from norviq.sdk.core.trust import TrustScore
@@ -36,6 +37,32 @@ def _override_session(client: "TestClient", session_obj: object) -> None:
         yield session_obj
 
     client.app.dependency_overrides[get_session] = _gen
+    # Admin trust writes (PUT /agents/{id}/trust) hold the agent's lock on a connection of their own.
+    client.app.dependency_overrides[get_admin_db] = lambda: _FakeAdminDb()
+
+
+class _FakeAdminConn:
+    """The admin-write connection: the lock statements answer, there is no registry row, writes succeed."""
+
+    async def execute(self, _stmt, _params=None):
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: None), scalar=lambda: True, rowcount=1)
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def invalidate(self) -> None:
+        return None
+
+
+class _FakeAdminDb:
+    async def connect(self):
+        return _FakeAdminConn()
 
 
 class FakeCache:
@@ -122,6 +149,19 @@ class FakeCache:
     async def clear_trust_override(self, spiffe_id: str) -> None:
         """Remove the admin trust cap."""
         await self.delete(f"agent_trust_override:{spiffe_id}")
+
+    async def claim_admin_trust_owner(self, spiffe_id: str, token: str) -> None:
+        """RedisCache's admin-writer fence, over the generic keys."""
+        await self.set(f"agent_trust_owner:{spiffe_id}", token)
+
+    async def apply_admin_trust_control_if_owner(
+        self, spiffe_id: str, token: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
+    ) -> bool:
+        """The fenced write: applies only while ``token`` owns the agent."""
+        if await self.get(f"agent_trust_owner:{spiffe_id}") != token:
+            return False
+        await self.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display)
+        return True
 
     async def apply_admin_trust_control(
         self, spiffe_id: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None

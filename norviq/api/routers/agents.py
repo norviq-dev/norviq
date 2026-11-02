@@ -5,7 +5,8 @@
 
 import asyncio
 import json
-import re
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from norviq.api.auth import get_current_user, read_namespace, require_admin, req
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.graph_maintenance import try_remove_graph_node
+from norviq.config import settings
 from norviq.api.synthetic import is_synthetic_identity  # the ONE shared synthetic/probe classifier
 from norviq.sdk.core.trust import TrustScore
 from norviq.startup_retry import warm_with_backoff
@@ -470,42 +472,39 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
     }
 
 
-# The shape the rest of the product accepts for an agent id: the evaluator requires the "spiffe://" prefix
-# (Evaluator._validate_spiffe) and POST /keys mints any spiffe_id up to 512 characters (keys.py), so an
-# operator-chosen id such as "spiffe://acme-agent" or ".../sa/agent:v2" is registered and listed and must
-# stay freezable. On top of that rule these routes refuse only what is dangerous to WRITE under: an empty
-# id, whitespace or control characters, and the glob characters * ? [ ] (PUT .../trust used to create a
-# frozen registry row for "*" or " " alike). 512 is also the registry column's width.
-_AGENT_ID_FORBIDDEN = re.compile(r"[\s\x00-\x1f\x7f*?\[\]]")
-
-
+# The agent ids the product itself accepts: POST /keys mints any spiffe_id up to 512 characters (keys.py) and
+# the evaluator requires only the "spiffe://" prefix (Evaluator._validate_spiffe), so an operator-chosen id
+# such as "spiffe://acme-agent", ".../sa/agent:v2" or one with a space or "*" in it is registered, enforced
+# and listed — and must stay freezable. These routes refuse exactly what that rule refuses, plus an id that
+# is empty after the prefix. The id only ever names Redis keys used with GET/SET/DEL/EVAL, never a SCAN or
+# KEYS pattern, so glob characters in it are inert. 512 is also the registry column's width.
 def _require_agent_id(spiffe_id: str) -> None:
-    """422 unless ``spiffe_id`` is an agent id the evaluator and the key API accept, and safe to write under."""
-    if (not spiffe_id.startswith("spiffe://") or len(spiffe_id) <= len("spiffe://") or len(spiffe_id) > 512
-            or _AGENT_ID_FORBIDDEN.search(spiffe_id)):
-        raise HTTPException(status_code=422, detail="Not a valid agent id (spiffe://..., at most 512 characters, "
-                                                    "no whitespace or * ? [ ])")
+    """422 unless ``spiffe_id`` is an agent id the key API mints and the evaluator enforces."""
+    if not spiffe_id.startswith("spiffe://") or not spiffe_id[len("spiffe://"):].strip() or len(spiffe_id) > 512:
+        raise HTTPException(status_code=422, detail="Not a valid agent id (spiffe://..., at most 512 characters)")
 
 
-# How long an admin trust write waits for another one on the same agent before answering 503. Below the
-# 10 s asyncpg command timeout, so a contended lock is told apart from a database that does not answer.
-_LOCK_TIMEOUT = "5s"
-# The bound on every store (Redis) call made while an agent's lock — and so a DB connection — is held. A
-# store that hangs rather than refuses used to keep both for ~20 s per request (redis-py's own socket
-# timeout, retried), and 20 concurrent admin writes exhausted the DB pool. A timeout is a store failure.
+# The bound on every store (Redis) call made while an agent's lock is held. A store that hangs rather than
+# refuses used to keep the lock and a DB connection ~20 s per request (redis-py's socket timeout, retried),
+# and 20 concurrent admin writes exhausted the DB pool. A timeout is a store failure.
 _STORE_TIMEOUT_S = 2.0
-# Agents per transaction in the boot warm. Measured on loopback: one transaction per agent cost 3.4 ms
-# per agent, so ~2.8k frozen or capped agents filled the warm's 10 s attempt bound and the rest were never
-# written back; see warm_agent_overrides for the batched figures.
+# Agents per transaction in the boot warm; see warm_agent_overrides for the measured figures.
 _WARM_BATCH = 500
 
 
+def _lock_timeout_ms() -> int:
+    """How long an admin trust write waits for another one on the same agent: 3 s, and always at least 2 s
+    under the client's command timeout, so a contended lock is never misread as a database that does not
+    answer (which would take the outage path)."""
+    return int(max(0.5, min(3.0, float(settings.db_command_timeout) - 2.0)) * 1000)
+
+
 class _LockContended(Exception):
-    """Another admin trust write holds this agent's lock for longer than _LOCK_TIMEOUT."""
+    """Another admin trust write holds this agent's lock for longer than _lock_timeout_ms()."""
 
 
-class _StoreUnconfirmed(Exception):
-    """The registry was read under the lock, but the store did not confirm the write made from it."""
+class _AdminDbUnavailable(Exception):
+    """No connection, no lock (other than contention) or no read: the registry cannot be used."""
 
 
 def _is_lock_timeout(exc: BaseException) -> bool:
@@ -519,24 +518,82 @@ def _is_lock_timeout(exc: BaseException) -> bool:
     return False
 
 
-async def _lock_agent(session: AsyncSession, spiffe_id: str) -> None:
-    """Serialize every admin trust write for one agent — PUT .../trust in all directions, DELETE, the
-    reset, and the boot warm — for the rest of this transaction, across API replicas.
+class _EngineConnector:
+    """Opens the dedicated connection one admin trust write holds its agent's lock on."""
 
-    Each of them changes Postgres and Redis, and two of them interleaved used to leave the two disagreeing
-    with both callers told 200: a clear committed, a freeze set Redis and committed, then the clear's
-    Redis DEL landed, so the registry said frozen and the agent ran unfrozen until an API restart; and a
-    DELETE that had checked the row deleted it after a freeze committed onto it. A row lock cannot cover
-    this, because the row may not exist yet (a first freeze creates it). An advisory lock on the id can.
-    Held until commit or rollback, so every Redis write below happens while it is held. Raises
-    _LockContended after _LOCK_TIMEOUT; any other failure is the database's."""
-    await session.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'"))
+    async def connect(self):
+        from norviq.api.db import session as db
+
+        if db._engine is None:
+            raise RuntimeError("Database not initialized. Call init_db() first.")
+        return await db._engine.connect()
+
+
+def get_admin_db() -> _EngineConnector:
+    """Dependency (overridable in tests): where admin trust writes get their own connection."""
+    return _EngineConnector()
+
+
+async def _quietly(awaitable) -> None:
     try:
-        await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"agent_trust:{spiffe_id}"})
+        await awaitable
+    except Exception:  # noqa: BLE001 - cleanup on a connection being abandoned; the original error is reported
+        pass
+
+
+def _lock_key(spiffe_id: str) -> dict:
+    return {"k": f"agent_trust:{spiffe_id}"}
+
+
+@asynccontextmanager
+async def _agent_lock(db, spiffe_id: str):
+    """Serialize every admin trust write for one agent — PUT .../trust in all directions, DELETE, the reset —
+    and the boot warm, across API replicas, for the WHOLE operation including its store write.
+
+    A SESSION-level advisory lock on a connection of its own, so it outlives the registry commit: the
+    ordering below (a loosening reaches the store only after its commit) needs the lock held across both.
+    It is released with pg_advisory_unlock. If that does not answer true the connection is invalidated, so
+    the backend ends and Postgres drops the lock; a connection still holding an agent's lock is never handed
+    back to the pool, where it would block that agent's next admin write. The boot warm takes the same keys
+    as transaction-level locks, which conflict with these.
+
+    Raises _LockContended after _lock_timeout_ms(); _AdminDbUnavailable for any other failure to connect or
+    lock. Exceptions from the body pass through unchanged."""
+    try:
+        conn = await db.connect()
     except Exception as exc:
-        if _is_lock_timeout(exc):
-            raise _LockContended(spiffe_id) from exc
-        raise
+        raise _AdminDbUnavailable(spiffe_id) from exc
+    held = False
+    try:
+        try:
+            await conn.execute(text(f"SET LOCAL lock_timeout = '{_lock_timeout_ms()}ms'"))
+            await conn.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), _lock_key(spiffe_id))
+            await conn.commit()
+            held = True
+        except Exception as exc:
+            await _quietly(conn.rollback())
+            if _is_lock_timeout(exc):
+                raise _LockContended(spiffe_id) from exc
+            raise _AdminDbUnavailable(spiffe_id) from exc
+        yield conn
+    finally:
+        if held:
+            await _release_agent_lock(conn, spiffe_id)
+        await _quietly(conn.close())
+
+
+async def _release_agent_lock(conn, spiffe_id: str) -> None:
+    released = False
+    try:
+        await conn.rollback()  # a transaction the body left open (or failed) must not outlive the request
+        released = bool((await conn.execute(
+            text("SELECT pg_advisory_unlock(hashtext(:k))"), _lock_key(spiffe_id))).scalar())
+        await conn.commit()
+    except Exception as exc:  # noqa: BLE001 - handled below: the connection is in doubt
+        log.warning("nrvq.api.agent.trust_lock_release_failed", spiffe_id=spiffe_id,
+                    error=f"{type(exc).__name__}: {exc}", code="NRVQ-API-7150")
+    if not released:
+        await _quietly(conn.invalidate())
 
 
 async def _store(awaitable):
@@ -551,39 +608,32 @@ async def _live_control(cache, spiffe_id: str) -> tuple[bool, float | None]:
     return bool(frozen), (float(cap) if cap is not None else None)
 
 
-async def _registry_control(session: AsyncSession, spiffe_id: str) -> tuple[bool, float | None] | None:
+async def _registry_control(conn, spiffe_id: str) -> tuple[bool, float | None] | None:
     """The agent's durable freeze/cap, or None when it has no registry row."""
-    row = (await session.execute(
+    row = (await conn.execute(
         text("SELECT frozen, trust_cap FROM agent_registry WHERE spiffe_id = :s"), {"s": spiffe_id}
     )).mappings().first()
     return None if row is None else (bool(row["frozen"]), row["trust_cap"])
 
 
-def _stricter(a: tuple[bool, float | None], b: tuple[bool, float | None]) -> tuple[bool, float | None]:
-    """The tighter of two freeze/cap states: frozen if either is, else the lower cap."""
-    caps = [c for c in (a[1], b[1]) if c is not None]
-    return (a[0] or b[0]), (min(caps) if caps else None)
-
-
-async def _rollback(session: AsyncSession) -> None:
-    try:
-        await session.rollback()
-    except Exception:  # noqa: BLE001 - the session is being abandoned; the original error is what we report
-        pass
-
-
-def _uncertain(spiffe_id: str, user: dict, error: BaseException, outcome: str) -> HTTPException:
-    log.error("nrvq.api.agent.trust_state_uncertain", spiffe_id=spiffe_id, error=f"{type(error).__name__}: {error}",
-              outcome=outcome, actor=user.get("sub"), code="NRVQ-API-7148")
-    return HTTPException(status_code=503, detail=(
-        "State uncertain: the change may be live but is NOT confirmed persisted, and the store could not be "
-        "set from the registry. Retry, then check the agent."))
+def _is_tightening(prior: tuple[bool, float | None], new: tuple[bool, float | None]) -> bool:
+    """True when ``new`` is at least as strict as ``prior`` in every dimension: a freeze is the strictest
+    state; otherwise no freeze may be lifted and the cap may only be added, kept or lowered. Equal counts
+    as tightening, so re-sending the current state rewrites the store unconditionally."""
+    (prior_frozen, prior_cap), (new_frozen, new_cap) = prior, new
+    if new_frozen:
+        return True
+    if prior_frozen:
+        return False
+    if new_cap is None:
+        return prior_cap is None
+    return prior_cap is None or new_cap <= prior_cap
 
 
 @router.put("/agents/{spiffe_id:path}/trust")
 async def update_trust(
     spiffe_id: str, body: TrustUpdate, request: Request, user: dict = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    db=Depends(get_admin_db),
     _target: None = Depends(require_target_cluster)
 ) -> dict:
     """Set an agent trust score manually.
@@ -594,24 +644,21 @@ async def update_trust(
                       misbehaving agent toward escalate/frozen but never RAISE trust above what behavior earns.
       score == 1.0  → CLEAR both the freeze and the cap (back to purely behavioral trust).
 
-    200 means the registry row and Redis both hold the new state. Under the per-agent lock (_lock_agent) the
-    row is written, then Redis is written in one MULTI, then the transaction commits. An identity with no
-    registry row gets one carrying the freeze or cap: the evaluator's first-call upsert
-    (``upsert_agent_registry``) does not touch ``frozen``/``trust_cap``.
-
-    Every failure is a 503 that says what is true, and errs toward the freeze:
-      - the lock is held by another admin write past _LOCK_TIMEOUT: nothing applied (7149);
-      - Postgres down: a freeze is still applied live (outside the lock — the one unserialized write, and it
-        only tightens), a cap or clear changes nothing (7033);
-      - Redis down: a freeze is committed (durable; applied at the next API start), a cap or clear is rolled
-        back and Redis is set back to the registry's state under the lock (7147);
-      - the commit fails: the lock is gone with it, so Redis is set from the registry under a NEW lock in a
-        new transaction — the row is the truth, and also tells a lost commit ack from a failed commit
-        (7033, reconciled=). If Postgres cannot be reached for that, no other admin write can commit either,
-        and Redis gets the stricter of the old and new state;
-      - anything Redis could not be brought back from: "state uncertain" (7148, ERROR).
-    A cap or clear can lift a freeze, and cannot land in Redis after its commit without leaving the lock
-    (an xact lock ends at commit), so the reconcile above is what keeps that window from sticking."""
+    200 means the registry row and the store both hold the new state. The whole write runs under one
+    per-agent lock (_agent_lock) and its ORDER depends on its direction against the registry state read
+    under that lock, so that the store is never looser than the registry, whatever fails:
+      TIGHTENING (freeze added, cap added or lowered, or no change): the store first, then the registry. A
+        failed or unacknowledged commit leaves the store stricter-or-equal: 503 "applied live, may not be
+        persisted". A store failure: the registry still commits; 503 "persisted but not live" (7147).
+      LOOSENING (a freeze lifted, a cap raised or removed): the registry first; the store only after a
+        successful commit, through a fenced write that lands only while this request still owns the agent
+        (agent_trust_owner:<id>, claimed under the lock). A failed commit: the store is untouched and still
+        stricter, 503 "not applied". A store failure or a lost fence after the commit: 503 "persisted; the
+        store still enforces the previous, stricter state until the change is retried" (7147).
+    Contention past the lock timeout: 503, nothing applied (7149). Postgres unreachable: a freeze is still
+    applied live (the one write made without the lock; it only tightens), anything else is not applied.
+    An identity with no registry row gets one carrying the freeze or cap: the evaluator's first-call upsert
+    (``upsert_agent_registry``) does not touch ``frozen``/``trust_cap``."""
     require_admin(user)
     _require_agent_id(spiffe_id)
     cache = request.app.state.cache
@@ -619,17 +666,21 @@ async def update_trust(
     cap = body.score if (0 < body.score < 1.0) else None
     display = TrustScore(score=body.score, category="frozen" if frozen else "")
     try:
-        await _lock_agent(session, spiffe_id)
-        prior = await _registry_control(session, spiffe_id) or (False, None)
-        await _persist_trust_control(session, spiffe_id, frozen, cap, body.score)
+        async with _agent_lock(db, spiffe_id) as conn:
+            try:
+                prior = await _registry_control(conn, spiffe_id) or (False, None)
+            except Exception as exc:
+                raise _AdminDbUnavailable(spiffe_id) from exc
+            if _is_tightening(prior, (frozen, cap)):
+                await _tighten(conn, cache, spiffe_id, frozen, cap, display, body.score, user)
+            else:
+                await _loosen(conn, cache, spiffe_id, frozen, cap, display, body.score, user)
     except _LockContended:
-        await _rollback(session)
         log.warning("nrvq.api.agent.trust_write_contended", spiffe_id=spiffe_id, score=body.score,
                     actor=user.get("sub"), code="NRVQ-API-7149")
         raise HTTPException(status_code=503, detail=(
             "Another admin change to this agent is in progress; nothing was applied. Retry.")) from None
-    except Exception as exc:  # noqa: BLE001 - any failure here means the control is not durable
-        await _rollback(session)
+    except _AdminDbUnavailable as exc:
         live = False
         if frozen:
             try:
@@ -637,90 +688,79 @@ async def update_trust(
                 live = True
             except Exception:  # noqa: BLE001 - reported in the 503 below
                 pass
-        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=str(exc), live=live,
-                    actor=user.get("sub"), code="NRVQ-API-7033")
+        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=str(exc.__cause__ or exc),
+                    live=live, actor=user.get("sub"), code="NRVQ-API-7033")
         detail = ("Freeze applied live but NOT persisted; it is lost on a Redis flush or restart. Retry."
-                  if live else "Trust change not applied: the registry write failed. Retry.")
+                  if live else "Trust change not applied: the registry could not be reached. Retry.")
         raise HTTPException(status_code=503, detail=detail) from exc
-    try:
-        await _store(cache.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display))
-    except Exception as exc:  # noqa: BLE001 - Redis did not confirm it; decide what Postgres keeps
-        durable = False
-        if frozen:
-            try:
-                await session.commit()
-                durable = True
-            except Exception:  # noqa: BLE001 - reported in the 503 below
-                await _rollback(session)
-        else:
-            # A timed-out MULTI may still have landed. Still under the lock, put Redis back to the registry's
-            # state before rolling back, so a loosening can never stay live without its durable copy.
-            try:
-                await _store(cache.apply_admin_trust_control(spiffe_id, frozen=prior[0], cap=prior[1]))
-            except Exception:  # noqa: BLE001 - the store is now in an unknown state
-                await _rollback(session)
-                raise _uncertain(spiffe_id, user, exc, "store_not_reset_after_failed_write") from exc
-            await _rollback(session)
-        log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
-                    score=body.score, durable=durable, actor=user.get("sub"), code="NRVQ-API-7147")
-        detail = ("Freeze persisted but NOT live: the store did not answer. It is applied at the next API "
-                  "start, or retry now." if durable else "Trust change not applied: the store did not answer. Retry.")
-        raise HTTPException(status_code=503, detail=detail) from exc
-    try:
-        await session.commit()
-    except Exception as exc:  # noqa: BLE001 - outcome unknown: a failed commit or a lost ack
-        await _rollback(session)
-        factory = request.app.dependency_overrides.get(get_session, get_session)
-        try:
-            durable = await _reconcile_from_registry(factory, cache, spiffe_id)
-        except _LockContended:
-            # Another admin write took the agent after ours ended and owns Redis now; it is serialized.
-            durable = None
-        except _StoreUnconfirmed:
-            raise _uncertain(spiffe_id, user, exc, "commit_failed_store_not_set_from_registry") from exc
-        except Exception:  # noqa: BLE001 - Postgres unreachable: no other admin write can commit either
-            try:
-                strict_frozen, strict_cap = _stricter(prior, (frozen, cap))
-                await _store(cache.apply_admin_trust_control(spiffe_id, frozen=strict_frozen, cap=strict_cap))
-            except Exception:  # noqa: BLE001 - neither store can be confirmed
-                raise _uncertain(spiffe_id, user, exc, "commit_failed_registry_unreachable_store_unset") from exc
-            raise _uncertain(spiffe_id, user, exc, "commit_unconfirmed_stricter_state_live") from exc
-        applied = durable == (frozen, cap)
-        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=str(exc), reconciled=True,
-                    applied=applied, actor=user.get("sub"), code="NRVQ-API-7033")
-        if not applied:
-            raise HTTPException(status_code=503, detail=(
-                "Trust change not applied: the registry write failed; the store matches the registry. Retry."
-            )) from exc
     log.info("nrvq.api.agent.trust_updated", spiffe_id=spiffe_id, score=body.score, frozen=frozen, cap=cap,
              actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7031")
     return {"spiffe_id": spiffe_id, "score": display.score, "category": display.category.lower()}
 
 
-async def _reconcile_from_registry(session_factory, cache, spiffe_id: str) -> tuple[bool, float | None]:
-    """In a new transaction under the agent's lock, set Redis from the registry row and return that state.
-
-    Used after a commit whose outcome is unknown: the lock died with the transaction, so writing back what
-    Redis held before (the first version of this code) could erase a freeze another replica committed in
-    between. The row read under a fresh lock is the truth, whether our commit landed or not."""
-    provider = session_factory()
-    session = await provider.__anext__()
+async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) -> None:
+    """Store first, then registry. Every failure leaves the store stricter than or equal to Postgres."""
+    live = True
     try:
-        await _lock_agent(session, spiffe_id)
-        state = await _registry_control(session, spiffe_id) or (False, None)
-        try:
-            await _store(cache.apply_admin_trust_control(spiffe_id, frozen=state[0], cap=state[1]))
-        except Exception as exc:  # noqa: BLE001 - Postgres answered; it is the store that did not
-            raise _StoreUnconfirmed(spiffe_id) from exc
-        await session.commit()
-        return state
-    finally:
-        await _rollback(session)
-        await provider.aclose()
+        # Claimed even though this write is unconditional: it fences off a LOOSENING that lost its lock
+        # after committing (its fenced store write then no longer matches the owner and does nothing).
+        await _store(cache.claim_admin_trust_owner(spiffe_id, uuid.uuid4().hex))
+        await _store(cache.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display))
+    except Exception as exc:  # noqa: BLE001 - still persisted below; the 503 says it is not live
+        live, store_error = False, exc
+    try:
+        await _persist_trust_control(conn, spiffe_id, frozen, cap, score)
+        await conn.commit()
+    except Exception as exc:  # noqa: BLE001 - a failed commit or a lost acknowledgement: unknown which
+        await _quietly(conn.rollback())
+        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
+                    direction="tightening", live=live, actor=user.get("sub"), code="NRVQ-API-7033")
+        raise HTTPException(status_code=503, detail=(
+            "Applied live, but it may NOT be persisted (the registry write failed or its result was lost). Retry."
+            if live else "Not applied: neither the store nor the registry confirmed the change. Retry.")) from exc
+    if not live:
+        log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id,
+                    error=f"{type(store_error).__name__}: {store_error}", score=score, direction="tightening",
+                    durable=True, actor=user.get("sub"), code="NRVQ-API-7147")
+        raise HTTPException(status_code=503, detail=(
+            "Persisted but NOT live: the store did not answer. It is applied at the next API start, or retry now."))
 
 
-async def _persist_trust_control(session: AsyncSession, spiffe_id: str, frozen: bool, cap: float | None,
-                                 score: float) -> None:
+async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> None:
+    """Registry first; the store only after a successful commit, and only while this request still owns
+    the agent. Every failure leaves the store enforcing the previous, stricter state."""
+    token = uuid.uuid4().hex
+    try:
+        await _store(cache.claim_admin_trust_owner(spiffe_id, token))
+    except Exception as exc:  # noqa: BLE001 - without the fence the store write could not be made safely
+        log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
+                    score=score, direction="loosening", durable=False, actor=user.get("sub"), code="NRVQ-API-7147")
+        raise HTTPException(status_code=503, detail=(
+            "Trust change not applied: the store did not answer. Retry.")) from exc
+    try:
+        await _persist_trust_control(conn, spiffe_id, frozen, cap, score)
+        await conn.commit()
+    except Exception as exc:  # noqa: BLE001 - the store is untouched, so it still holds the stricter state
+        await _quietly(conn.rollback())
+        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
+                    direction="loosening", live=False, actor=user.get("sub"), code="NRVQ-API-7033")
+        raise HTTPException(status_code=503, detail=(
+            "Trust change not applied. If the registry write did land, the store still enforces the previous, "
+            "stricter state. Retry.")) from exc
+    try:
+        landed = await _store(cache.apply_admin_trust_control_if_owner(
+            spiffe_id, token, frozen=frozen, cap=cap, display=display))
+        error = "fence: another admin write owns the agent"
+    except Exception as exc:  # noqa: BLE001 - reported below
+        landed, error = False, f"{type(exc).__name__}: {exc}"
+    if not landed:
+        log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=error, score=score,
+                    direction="loosening", durable=True, actor=user.get("sub"), code="NRVQ-API-7147")
+        raise HTTPException(status_code=503, detail=(
+            "Persisted, but the store still enforces the previous, stricter state until the change is retried."))
+
+
+async def _persist_trust_control(conn, spiffe_id: str, frozen: bool, cap: float | None, score: float) -> None:
     """Write the freeze/cap to agent_registry (uncommitted), the durable copy warm_agent_overrides
     re-seeds Redis from.
 
@@ -734,6 +774,7 @@ async def _persist_trust_control(session: AsyncSession, spiffe_id: str, frozen: 
     if frozen or cap is not None:
         now = datetime.now(timezone.utc)
         stmt = insert(AgentRegistryEntry).values(
+            id=uuid.uuid4(),
             spiffe_id=spiffe_id,
             # The same fallbacks the evaluator's write-through uses, so its first call lands on this row.
             namespace=_namespace_from_spiffe(spiffe_id) or "default",
@@ -751,16 +792,20 @@ async def _persist_trust_control(session: AsyncSession, spiffe_id: str, frozen: 
         # Only the two control columns on conflict: the row's identity, score and counters belong to the
         # evaluator's write-through and are not the admin's to overwrite.
         stmt = stmt.on_conflict_do_update(index_elements=["spiffe_id"], set_={"frozen": frozen, "trust_cap": cap})
-        await session.execute(stmt)
+        await conn.execute(stmt)
     else:
-        await session.execute(
+        await conn.execute(
             text("UPDATE agent_registry SET frozen = false, trust_cap = NULL WHERE spiffe_id = :s"),
             {"s": spiffe_id},
         )
 
 
+async def _rollback(session) -> None:
+    await _quietly(session.rollback())
+
+
 async def warm_agent_overrides(cache, session_factory=get_session, progress: dict | None = None,
-                               batch_size: int = _WARM_BATCH) -> int:
+                               batch_size: int | None = None) -> int:
     """SECURITY (fail-open fix): at startup, re-seed durable admin freeze/cap from agent_registry into Redis so
     a store that lost the agent_frozen:/override keys before this process started does not leave a killed or
     capped agent running unpoliced. Runs only at process start: a loss while the API runs is not repaired
@@ -771,8 +816,10 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
     the query failed), which reads exactly like "nothing is frozen" while every freeze stayed absent until
     the next restart. The SETs are idempotent, so the caller can simply run it again.
 
-    Batched, in spiffe_id order, under the admin lock. Each batch is one transaction: take every agent's
-    _lock_agent lock in hashtext order, re-read the batch's rows, write them in one pipeline, commit. Locked
+    Batched, in spiffe_id order, under the admin lock. Each batch is one transaction: take every agent's lock
+    key (the one _agent_lock takes session-level; these transaction-level requests conflict with it, so an
+    admin write holding an agent until after its store write blocks the warm for that agent) in hashtext
+    order, re-read the batch's rows, write them in one pipeline, commit. Locked
     and re-read, an admin write on another replica lands wholly before the read or wholly after the write, so
     a stale snapshot can no longer put back a looser cap or a lifted freeze. Taking many locks cannot
     deadlock with an admin write, which holds exactly one; two warms take theirs in the same (lock-key)
@@ -781,7 +828,10 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
     Measured on loopback (Postgres 5433, Redis 6379), batches of 500: 5 000 frozen or capped agents in 0.3 s and
     20 000 in 1.0-1.1 s, against the 10 s attempt bound; with the bound forced down to 0.45 s, 20 000 still
     completed on the third attempt because each retry resumed. One transaction per agent took 16.9 s for
-    5 000 and never finished past ~2.8k at startup."""
+    5 000 and never finished past ~2.8k at startup. Each batch costs about four database round trips, so the
+    time grows with the round-trip time to Postgres: at 5 ms RTT, 20 000 agents add roughly 0.8 s. The
+    resumable cursor, not the batch size, is what keeps a slow link from losing the tail."""
+    batch_size = batch_size or _WARM_BATCH
     progress = progress if progress is not None else {}
     progress.setdefault("after", "")
     progress.setdefault("seeded", 0)
@@ -855,7 +905,7 @@ async def _reset_multi(cache, history_key: str, profile_key: str) -> tuple[list,
 @router.post("/agents/{spiffe_id:path}/trust/reset")
 async def reset_agent_trust_history(
     spiffe_id: str, request: Request, user: dict = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    db=Depends(get_admin_db),
     _target: None = Depends(require_target_cluster)
 ) -> dict:
     """Admin-only, audited clean slate for an agent's BEHAVIOURAL record: deletes its rolling decision
@@ -870,36 +920,42 @@ async def reset_agent_trust_history(
     same MULTI as the DEL, so an entry the evaluator records meanwhile is either counted or survives."""
     require_admin(user)
     _require_agent_id(spiffe_id)
-    from norviq.api.db.models import AgentRegistryEntry
     from norviq.engine.trust.history import AgentHistoryStore
     from norviq.engine.trust.profile import AgentProfileStore
 
     cache = request.app.state.cache
     history_key = AgentHistoryStore(cache)._key(spiffe_id)
     profile_key = AgentProfileStore(cache)._key(spiffe_id)
+    stage = "lock"
     try:
-        await _lock_agent(session, spiffe_id)
-        row = (
-            await session.execute(select(AgentRegistryEntry).where(AgentRegistryEntry.spiffe_id == spiffe_id))
-        ).scalar_one_or_none()
-        # Copied out now: ending the transaction below expires the ORM row.
-        reg = None if row is None else SimpleNamespace(trust_score=row.trust_score, violation_count=row.violation_count,
-                                                       frozen=bool(row.frozen), trust_cap=row.trust_cap)
-        trust = await _store(cache.get_trust(spiffe_id))
-        history, has_history, has_profile = await _store(_reset_multi(cache, history_key, profile_key))
+        async with _agent_lock(db, spiffe_id) as conn:
+            stage = "read"
+            row = (await conn.execute(
+                text("SELECT trust_score, violation_count, frozen, trust_cap FROM agent_registry WHERE spiffe_id = :s"),
+                {"s": spiffe_id},
+            )).mappings().first()
+            reg = None if row is None else SimpleNamespace(**row)
+            trust = await _store(cache.get_trust(spiffe_id))
+            stage = "multi"
+            history, has_history, has_profile = await _store(_reset_multi(cache, history_key, profile_key))
+            stage = "done"
     except Exception as exc:  # noqa: BLE001 - nothing is reported as cleared unless the MULTI answered
-        await _rollback(session)
-        contended = isinstance(exc, _LockContended)
-        log.warning("nrvq.api.agent.trust_reset_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
-                    contended=contended, actor=user.get("sub"), code="NRVQ-API-7146")
-        detail = ("Another admin change to this agent is in progress; nothing was cleared. Retry." if contended
-                  else "Trust history reset not confirmed: the store did not answer, so it may or may not have "
-                       "cleared the history. Retry.")
-        raise HTTPException(status_code=503, detail=detail) from exc
-    # The MULTI ran: the record is gone, so from here on the audit line is written whatever else happens.
-    # The transaction wrote nothing; ending it only releases the lock, and a failure to end it cannot undo
-    # the reset (it used to answer 503 "nothing was cleared" with the history already deleted).
-    await _rollback(session)
+        if stage != "done":
+            contended = isinstance(exc, _LockContended)
+            log.warning("nrvq.api.agent.trust_reset_failed", spiffe_id=spiffe_id,
+                        error=f"{type(exc.__cause__ or exc).__name__}: {exc.__cause__ or exc}",
+                        contended=contended, stage=stage, actor=user.get("sub"), code="NRVQ-API-7146")
+            if contended:
+                detail = "Another admin change to this agent is in progress; nothing was cleared. Retry."
+            elif stage == "multi":
+                detail = ("Trust history reset not confirmed: the store did not answer, so it may or may not "
+                          "have cleared the history. Retry.")
+            else:
+                detail = "Trust history reset failed before anything was cleared. Retry."
+            raise HTTPException(status_code=503, detail=detail) from exc
+    # The MULTI answered: the record is gone, so from here on the audit line is written whatever else
+    # happens. Releasing the lock cannot fail this (_release_agent_lock invalidates the connection instead);
+    # the first version answered 503 "nothing was cleared" when ending its transaction failed afterwards.
     present = [k for k, there in ((history_key, has_history), (profile_key, has_profile)) if there]
     if reg is None and trust is None and not present:
         raise HTTPException(status_code=404, detail="Agent not found")  # the MULTI found nothing to delete
@@ -929,7 +985,7 @@ async def reset_agent_trust_history(
 @router.delete("/agents/{spiffe_id:path}")
 async def deregister_agent(
     spiffe_id: str, request: Request, user: dict = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    db=Depends(get_admin_db),
     _target: None = Depends(require_target_cluster)
 ) -> dict:
     """Admin removal of a decommissioned agent identity from the registry. The background pruner ages
@@ -945,59 +1001,54 @@ async def deregister_agent(
     of both, so deleting it used to lift them as a side effect, with a log line that did not say so: the
     identity came back unfrozen on its next call or the next Redis restart. Lift the control first with
     PUT .../trust (score 1.0), which is logged with its actor, then deregister. The check and the delete run
-    under the per-agent lock PUT .../trust takes (_lock_agent), and the delete is itself conditional on
+    under the per-agent lock PUT .../trust takes (_agent_lock), and the delete is itself conditional on
     the row carrying neither control, so a freeze cannot commit between them."""
     require_admin(user)
     _require_agent_id(spiffe_id)
-    from norviq.api.db.models import AgentRegistryEntry
-
     try:
-        await _lock_agent(session, spiffe_id)
-        row = (
-            await session.execute(select(AgentRegistryEntry).where(AgentRegistryEntry.spiffe_id == spiffe_id))
-        ).scalar_one_or_none()
-        if row is None:
-            await _rollback(session)
-            raise HTTPException(status_code=404, detail="Agent not found in registry")
-        ns = row.namespace
-        # The live keys as well as the row: a freeze set before the registry carried it durably exists only
-        # in Redis. A Redis that cannot answer is a refusal too — fail closed rather than delete what may be
-        # the last record of a freeze.
-        live_frozen, live_cap = await _live_control(request.app.state.cache, spiffe_id)
-        frozen = bool(row.frozen) or live_frozen
-        capped = row.trust_cap is not None or live_cap is not None
-        deleted = 0
-        if not (frozen or capped):
-            result = await session.execute(
-                text("DELETE FROM agent_registry WHERE spiffe_id = :s AND frozen = false AND trust_cap IS NULL"),
-                {"s": spiffe_id},
-            )
-            deleted = result.rowcount or 0
-            # rowcount 0 here means the row gained a control after it was read — refused, like any other.
-            frozen = frozen or not deleted
-        if not deleted:
-            await _rollback(session)
-            log.info("nrvq.api.agent.deregister_refused", spiffe_id=spiffe_id, frozen=frozen, capped=capped,
-                     actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7143")
-            control = "frozen" if frozen else "under a trust cap"
-            raise HTTPException(
-                status_code=409,
-                detail=(f"Agent is {control}. Deleting it would lift that control. Lift it first "
-                        f"(PUT /api/v1/agents/{{id}}/trust with score 1.0), then delete."),
-            )
-        await session.commit()
+        async with _agent_lock(db, spiffe_id) as conn:
+            row = (await conn.execute(
+                text("SELECT namespace, frozen, trust_cap FROM agent_registry WHERE spiffe_id = :s"), {"s": spiffe_id}
+            )).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Agent not found in registry")
+            ns = row["namespace"]
+            # The live keys as well as the row: a freeze set before the registry carried it durably exists
+            # only in Redis. A Redis that cannot answer is a refusal too — fail closed rather than delete what
+            # may be the last record of a freeze.
+            live_frozen, live_cap = await _live_control(request.app.state.cache, spiffe_id)
+            frozen = bool(row["frozen"]) or live_frozen
+            capped = row["trust_cap"] is not None or live_cap is not None
+            deleted = 0
+            if not (frozen or capped):
+                result = await conn.execute(
+                    text("DELETE FROM agent_registry WHERE spiffe_id = :s AND frozen = false AND trust_cap IS NULL"),
+                    {"s": spiffe_id},
+                )
+                deleted = result.rowcount or 0
+                # rowcount 0 here means the row gained a control after it was read — refused, like any other.
+                frozen = frozen or not deleted
+            if not deleted:
+                log.info("nrvq.api.agent.deregister_refused", spiffe_id=spiffe_id, frozen=frozen, capped=capped,
+                         actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7143")
+                control = "frozen" if frozen else "under a trust cap"
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"Agent is {control}. Deleting it would lift that control. Lift it first "
+                            f"(PUT /api/v1/agents/{{id}}/trust with score 1.0), then delete."),
+                )
+            await conn.commit()
     except HTTPException:
         raise
     except _LockContended:
-        await _rollback(session)
         log.warning("nrvq.api.agent.trust_write_contended", spiffe_id=spiffe_id, op="delete",
                     actor=user.get("sub"), code="NRVQ-API-7149")
         raise HTTPException(status_code=503, detail=(
             "Another admin change to this agent is in progress; nothing was deleted. Retry.")) from None
     except Exception as exc:  # noqa: BLE001 - see above
-        await _rollback(session)
-        log.warning("nrvq.api.agent.deregister_check_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
-                    actor=user.get("sub"), code="NRVQ-API-7144")
+        cause = exc.__cause__ if isinstance(exc, _AdminDbUnavailable) and exc.__cause__ else exc
+        log.warning("nrvq.api.agent.deregister_check_failed", spiffe_id=spiffe_id,
+                    error=f"{type(cause).__name__}: {cause}", actor=user.get("sub"), code="NRVQ-API-7144")
         raise HTTPException(status_code=503, detail="Could not confirm the agent is not frozen; not deleted") from exc
     # ALSO prune the asset-graph node. Deleting the registry row alone only removes agents the graph
     # was rendering from the registry — the never-observed "awaiting" ones. An agent that actually ran

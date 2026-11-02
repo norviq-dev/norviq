@@ -173,18 +173,19 @@ because they should be installed.
   `norviq agent reset-history`): admin only, logged as `NRVQ-API-7145` with the actor, the score and
   violation count before, and the keys cleared. It does not lift a freeze or cap.
 - **`PUT /api/v1/agents/{spiffe_id}/trust` answers `503` when the freeze or cap was not persisted.** It
-  used to log `NRVQ-API-7033` and answer `200`. A freeze is still applied at once and the `503` says it
-  is not durable yet; a cap or a clear changes nothing until the write succeeds. A freeze or cap on an
-  agent the registry has not seen yet now creates its registry row, so the next API start writes it
-  back after a store loss. Before, it lived only in Redis. With Redis down a freeze is persisted and answers `503` (it takes
-  effect at the next API start) where it was a `500`. Admin trust writes for one agent (PUT trust,
+  used to log `NRVQ-API-7033` and answer `200`. A freeze or cap on an agent the registry has not seen yet
+  now creates its registry row, so the next API start writes it back after a store loss. Before, it
+  lived only in Redis. With Redis down a freeze or a new or lower cap is persisted and answers `503` (it
+  takes effect at the next API start) where it was a `500`; a lift changes nothing. Admin trust writes for one agent (PUT trust,
   DELETE, the reset) are serialized by a per-agent Postgres lock, so two of them on different replicas
-  no longer leave the registry and Redis disagreeing, and a starting API's write-back of freezes and
-  caps takes the same lock per agent, so it no longer restores a cap or freeze another replica changed
-  while it ran. The three routes answer `422` for an id that is not
-  safe to write under (no `spiffe://` prefix, empty, whitespace, `* ? [ ]`, over 512 characters). A
-  change that finds the agent locked by another for over 5 s is a `503` that applies nothing
-  (`NRVQ-API-7149`). `NRVQ-API-7031` names the actor.
+  no longer leave the registry and Redis disagreeing. The lock is held across the store write, and a
+  tightening reaches the store before the registry while a loosening reaches it only after its commit,
+  so whatever fails the store is never looser than the registry. A starting API's write-back of freezes
+  and caps takes the same locks in batches, so it no longer restores a cap or freeze another replica
+  changed while it ran, and a retried write-back resumes where it stopped. The three routes answer
+  `422` for an id the evaluator and `POST /api/v1/keys` would not accept (no `spiffe://` prefix, empty,
+  over 512 characters). A change that finds the agent locked by another for over 3 s is a `503` that
+  applies nothing (`NRVQ-API-7149`). `NRVQ-API-7031` names the actor.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck
 reports 47 standard-library advisories, 29 of them reachable from the webhook. An older Go fetches
@@ -234,11 +235,10 @@ freeze or cap lifted since: the restart adds what Postgres holds and removes not
 with `norviq agent reset-trust <id> --score 1.0` (which clears a cap too; `--score <cap>` lifts the
 freeze and keeps that cap). Details in docs/trust-score-design.md §5.
 
-An admin trust change (`PUT /api/v1/agents/{spiffe_id}/trust`) writes Redis under the agent's lock and
-then commits, because the lock ends with the transaction. If that commit fails, Redis is set from the
-registry under a new lock. If neither Postgres nor Redis can then be confirmed, the answer is a `503`
-starting "State uncertain" and `NRVQ-API-7148` is logged at ERROR: a cap or clear may be live without
-its durable copy. Retry the change, or restart the API, which writes the registry's state back.
+An admin trust change (`PUT /api/v1/agents/{spiffe_id}/trust`) that fails part-way answers `503` and
+leaves the store stricter than the registry, never looser: a tightening may be live without being
+persisted, and a loosening that the registry took may not be live yet. Both say so in the `503`; retry the
+change.
 
 ## [0.2.5] — 2026-08-20 — log codes that named two things at once
 

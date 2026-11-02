@@ -18,8 +18,8 @@ from types import SimpleNamespace
 import jwt
 from fastapi.testclient import TestClient
 
-from norviq.api.db.session import get_session
 from norviq.api.main import create_app
+from norviq.api.routers.agents import get_admin_db
 from norviq.config import settings
 from norviq.sdk.core.trust import TrustScore
 
@@ -101,12 +101,14 @@ def test_admin_reads_namespaceless_agent() -> None:
 
 
 def _session_override(app, row):
-    class _FakeSession:
-        async def execute(self, _stmt, _params=None):
-            return SimpleNamespace(scalar_one_or_none=lambda: row, rowcount=1)
+    """DELETE runs on the admin-write connection (agents.get_admin_db), which holds the agent's lock."""
+    mapping = None if row is None else {"namespace": row.namespace, "frozen": row.frozen, "trust_cap": row.trust_cap}
 
-        async def delete(self, _row) -> None:
-            return None
+    class _FakeConn:
+        async def execute(self, _stmt, _params=None):
+            return SimpleNamespace(
+                mappings=lambda: SimpleNamespace(first=lambda: mapping), scalar=lambda: True, rowcount=1
+            )
 
         async def commit(self) -> None:
             return None
@@ -114,10 +116,17 @@ def _session_override(app, row):
         async def rollback(self) -> None:
             return None
 
-    async def _override():
-        yield _FakeSession()
+        async def close(self) -> None:
+            return None
 
-    app.dependency_overrides[get_session] = _override
+        async def invalidate(self) -> None:
+            return None
+
+    class _FakeDb:
+        async def connect(self):
+            return _FakeConn()
+
+    app.dependency_overrides[get_admin_db] = lambda: _FakeDb()
 
 
 def test_deregister_rejects_foreign_target_cluster() -> None:

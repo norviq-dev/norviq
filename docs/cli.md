@@ -433,18 +433,24 @@ a failover lifts every freeze and cap until the API restarts
 An agent the registry has never seen gets a row carrying the freeze or cap; the engine's write-through
 on the agent's first call (`norviq/api/db/session.py::upsert_agent_registry`) does not touch those two
 columns. Every admin trust write for one agent — `reset-trust`, `freeze`, `reset-history` and
-`DELETE /api/v1/agents/{spiffe_id}` — runs under one per-agent Postgres lock
-(`norviq/api/routers/agents.py::_lock_agent`), so two of them on different replicas cannot interleave
-and leave the registry and Redis disagreeing. A write that finds the agent locked by another one for
-more than 5 s exits non-zero on a `503` ("another admin change ... is in progress") and applies nothing.
-Every store call made under the lock is cut off at 2 s. Other failures are a `503` too and err toward
-the freeze: with the database down, a freeze is in force but not durable (retry it) and a cap or clear
-changed nothing; with Redis down, a freeze is durable and takes effect at the next API start, and a cap
-or clear changed nothing. A `503` that starts "State uncertain" (`NRVQ-API-7148`) means the store could
-not be confirmed to match the registry after a failure: retry, then check the agent with `agent get`.
-The id must start with `spiffe://`, as the evaluator requires, be at most 512 characters, and contain
-no whitespace or `*` `?` `[` `]` (`422` otherwise); any other id an API key was minted for, such as
-`spiffe://acme-agent`, is accepted. The retention
+`DELETE /api/v1/agents/{spiffe_id}` — holds one per-agent Postgres lock for the whole operation,
+store write included (`norviq/api/routers/agents.py::_agent_lock`), so two of them on different replicas
+cannot interleave. The order of each change depends on its direction against the registry state read
+under that lock (`norviq/api/routers/agents.py::_is_tightening`), so that the store is never looser than
+the registry whatever fails:
+
+| Change | Order | If something fails (exit non-zero on a `503`) |
+|---|---|---|
+| Tightening: freeze, a cap added or lowered, or re-sending the current state | store, then registry | Commit failed or unacknowledged: "Applied live, but it may NOT be persisted" — retry. Store down: "Persisted but NOT live", applied at the next API start — or retry. |
+| Loosening: a freeze lifted, a cap raised or removed | registry, then store | Commit failed or unacknowledged: "not applied"; the store still enforces the previous, stricter state. Store failed after the commit: "Persisted, but the store still enforces the previous, stricter state" until you retry. |
+
+A loosening reaches the store only through a write fenced on `agent_trust_owner:<id>`, so a request that
+lost its lock after committing can never land it over a newer change. A change that finds the agent
+locked by another one for more than 3 s exits on a `503` ("another admin change ... is in progress") and
+applies nothing (`NRVQ-API-7149`); store calls under the lock are cut off at 2 s. With the database down
+a freeze is still applied live, not durable (retry it), and nothing else changes. The id must start with
+`spiffe://`, as the evaluator requires, be at most 512 characters as `POST /api/v1/keys` allows, and not
+be empty after the prefix (`422` otherwise); any id an API key can be minted for is accepted. The retention
 pruner never ages out a frozen or capped agent
 (`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
 
@@ -458,8 +464,9 @@ and violation count before, how many history entries and blocks it removed, and 
 the command prints the score before, the violation count and the keys cleared (`-o json` prints every
 field of that record), and says so when the agent is still frozen or capped. The counts are read in the
 same Redis transaction as the delete, so they are exactly what was removed. `404` for an identity with no
-registry row, trust entry, history or profile; `503` (nothing cleared) when Redis or the database cannot
-answer.
+registry row, trust entry, history or profile. A `503` says which case it is: "another admin change ... is in
+progress" or "failed before anything was cleared" (nothing cleared), or "not confirmed" (Redis did not answer
+the delete itself, so it may or may not have run; retry).
 A pod running the opt-in in-process cache (`config.inprocCacheTtlS`) may score from its cached copy
 until that TTL expires.
 

@@ -644,6 +644,34 @@ class RedisCache:
         """Remove the admin trust cap (score cleared / set to 1.0 / frozen)."""
         await self._client().delete(f"agent_trust_override:{spiffe_id}")
 
+    # Fence for a LOOSENING admin trust write (norviq/api/routers/agents.py::_loosen). Every admin write claims
+    # agent_trust_owner:<id> under the agent's lock before it touches the store; a loosening reaches the store
+    # only after its registry commit, and only if it still owns the agent. A request that lost its lock after
+    # committing (its connection dropped) can then never land a loosening over a writer that took over.
+    _OWNER_TTL_MS = 30_000
+    _FENCED_CONTROL_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if ARGV[2] == '1' then redis.call('SET', KEYS[2], '1') else redis.call('DEL', KEYS[2]) end
+if ARGV[3] ~= '' then redis.call('SET', KEYS[3], ARGV[3]) else redis.call('DEL', KEYS[3]) end
+if ARGV[4] ~= '' then redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[5]) end
+return 1
+"""
+
+    async def claim_admin_trust_owner(self, spiffe_id: str, token: str) -> None:
+        """Make ``token`` the agent's current admin writer (30 s), voiding any earlier writer's fence."""
+        await self._client().set(f"agent_trust_owner:{spiffe_id}", token, px=self._OWNER_TTL_MS)
+
+    async def apply_admin_trust_control_if_owner(
+        self, spiffe_id: str, token: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
+    ) -> bool:
+        """apply_admin_trust_control, atomically, only while ``token`` still owns the agent. True if applied."""
+        keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}",
+                f"trust:{spiffe_id}"]
+        args = [token, "1" if frozen else "0", "" if cap is None else str(float(cap)),
+                "" if display is None else display.model_dump_json(),
+                str(self._jitter_ttl(settings.redis_ttl_trust_s))]
+        return bool(await self._client().eval(self._FENCED_CONTROL_LUA, len(keys), *keys, *args))
+
     async def apply_admin_trust_control(
         self, spiffe_id: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
     ) -> None:
