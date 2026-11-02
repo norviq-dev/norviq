@@ -341,6 +341,7 @@ class HttpProxy:
         # This POST's own correlation scope: its response body answers its request and nothing else,
         # and a GET that resumes this POST's stream answers it at most once more. See `Correlation`.
         corr = fw.new_correlation()
+        corr.upstream_headers = _connection_headers(request)
         mediation = await fw.on_client_message(msg, list_upstream=self._upstream_lister(request),
                                                corr=corr)
         if mediation.catalog_scanned:
@@ -467,6 +468,8 @@ class HttpProxy:
                 server_last_id, origin = known
                 if origin is not None:
                     corr = origin.resumption()
+        if not corr.resumed:
+            corr.upstream_headers = _connection_headers(request)
         return await self._stream_through(fw, "GET", request, None, corr,
                                           last_event_id=server_last_id)
 
@@ -479,10 +482,13 @@ class HttpProxy:
         Gate-A state by asking. Re-discovering a catalog is exactly how a rug pull would be laundered
         into a clean first sight. Pins are server-scoped and survive regardless.
         """
-        upstream = await self._client.request(
-            "DELETE", self._upstream, headers=self._forward_headers(request.headers))
-        return Response(upstream.content, status_code=upstream.status_code,
-                        headers=_passthrough(upstream.headers))
+        # The status and headers are passed on; the BODY is not. It was read whole into memory, with no
+        # bound, and handed to the client unmediated — server text on a path no gate looks at. A
+        # DELETE's answer has nothing a client needs beyond its status.
+        headers = {**self._forward_headers(request.headers), "accept-encoding": "identity"}
+        async with self._client.stream("DELETE", self._upstream, headers=headers) as upstream:
+            out = {k: v for k, v in _passthrough(upstream.headers).items() if k.lower() != "content-type"}
+            return Response(b"", status_code=upstream.status_code, headers=out)
 
     # ------------------------------------------------------------------ streaming
     async def _stream_through(self, fw: McpFirewall, method: str, request: Request,
@@ -706,7 +712,7 @@ class HttpProxy:
         if result.reply is not None:
             # A server-initiated request we refused. On this transport the reply travels back as a
             # separate POST rather than inline, so it is dispatched without blocking the stream.
-            asyncio.create_task(self._post_back(result.reply))
+            asyncio.create_task(self._post_back(result.reply, corr.upstream_headers if corr else {}))
         self._report_catalog(fw, result)
         if result.forward is None:
             return b""
@@ -736,10 +742,22 @@ class HttpProxy:
         if catalog is not None:
             asyncio.create_task(self._pin_store.flush(catalog))
 
-    async def _post_back(self, payload: bytes) -> None:
+    async def _post_back(self, payload: bytes, connection: dict[str, str]) -> None:
+        """POST the proxy's refusal of a server request back upstream.
+
+        The reply is NOT read. `post()` read the server's whole answer into memory, unbounded and
+        uncompressed-on-arrival, for a body nobody uses: one refused elicitation answered with 400 MiB
+        took the process from 110 to 473 MiB, and refusals run concurrently. The status is all that is
+        looked at; the stream is closed unread.
+
+        It carries the client's connection headers (`_connection_headers`: the credential, the
+        2025-06-18 session and the protocol revision), so the refusal reaches the session that asked.
+        """
+        headers = {**connection, "content-type": "application/json",
+                   "accept": f"application/json, {_SSE}", "accept-encoding": "identity"}
         with contextlib.suppress(Exception):
-            await self._client.post(self._upstream, content=payload,
-                                    headers={"content-type": "application/json"})
+            async with self._client.stream("POST", self._upstream, headers=headers, content=payload):
+                pass
 
     # ------------------------------------------------------------------ lifecycle
     async def run(self) -> int:
@@ -874,6 +892,12 @@ class _EventIds:
         self.entries[minted] = (server_id, origin, stream)
         self.bytes += len(server_id)
         return minted
+
+
+def _connection_headers(request: Request) -> dict[str, str]:
+    """The client headers that identify its CONNECTION (credential, session, revision) and nothing
+    that describes a particular call — what the proxy's own requests upstream carry."""
+    return {k.lower(): v for k, v in request.headers.items() if k.lower() in _LIST_HEADER_ALLOWLIST}
 
 
 def _is_sse(headers: Any) -> bool:

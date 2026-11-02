@@ -513,7 +513,7 @@ class Correlation:
     mediated as the answer to THAT POST's request, under that request's id, at most once.
     """
 
-    __slots__ = ("held", "pending", "get_stream", "resumed", "request_id")
+    __slots__ = ("held", "pending", "get_stream", "resumed", "request_id", "upstream_headers")
 
     def __init__(self, cap: int, *, get_stream: bool = False) -> None:
         self.held = _PendingMap(cap)
@@ -522,12 +522,16 @@ class Correlation:
         self.resumed = False
         # The id of the request a POST scope forwarded (one POST, one message; batches are refused).
         self.request_id: Any = None
+        # Transport-owned: the headers the HTTP driver sends on its own requests made on behalf of the
+        # client whose stream this is (a refusal posted back upstream). Empty on stdio.
+        self.upstream_headers: dict[str, str] = {}
 
     def resumption(self) -> Correlation:
         """This POST's scope as seen from a GET that resumes its stream: same entries, `resumed`."""
         view = Correlation(0)
         view.held, view.pending, view.request_id, view.resumed = (
             self.held, self.pending, self.request_id, True)
+        view.upstream_headers = self.upstream_headers
         return view
 
 

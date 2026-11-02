@@ -263,7 +263,8 @@ lines now reaches the client intact. Behind the HTTP MCP proxy: responses a serv
 plain GET stream are dropped (servers must not send them there); SSE event ids reach the client as ids
 the proxy issues, which it maps back when the client resumes; and a server's `Mcp-Session-Id` reaches
 the client on the response to `initialize`, or when it is the client's own (`NRVQ-MCP-5087` when one is
-withheld). Two security booleans no longer fall back to off when an
+withheld). The HTTP MCP proxy passes on only the status and headers of the server's answer to a
+session `DELETE`, and does not read the server's reply to a refusal it posts back. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way
