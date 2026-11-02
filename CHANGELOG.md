@@ -164,6 +164,19 @@ because they should be installed.
   likewise). If you set either, make sure nothing still signs in with a local password or an HS256 token
   before you upgrade. The fleet hub's `config.requireStrongSecret` also follows the spoke now: a nulled key
   means on, not off.
+- **`DELETE /api/v1/agents/{spiffe_id}` answers `409` while the agent is frozen or under a trust cap.**
+  The registry row it deletes is the durable copy of both, so deregistering used to lift them: the
+  identity came back unfrozen on its next call. Lift the control first with `PUT .../trust` and score
+  `1.0` (logged with its actor), then delete. DELETE still keeps the agent's history and profile. A
+  frozen or capped agent is no longer aged out by `agentRegistryRetentionDays` either. To clear an
+  agent's behavioural record, use the new `POST /api/v1/agents/{spiffe_id}/trust/reset` (CLI
+  `norviq agent reset-history`): admin only, logged as `NRVQ-API-7145` with the actor, the score and
+  violation count before, and the keys cleared. It does not lift a freeze or cap.
+- **`PUT /api/v1/agents/{spiffe_id}/trust` answers `503` when the freeze or cap was not persisted.** It
+  used to log `NRVQ-API-7033` and answer `200`. A freeze is still applied at once and the `503` says it
+  is not durable yet; a cap or a clear changes nothing until the write succeeds. A freeze or cap on an
+  agent the registry has not seen yet now creates its registry row, so it survives a Redis restart.
+  Before, it lived only in Redis. `NRVQ-API-7031` names the actor.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck
 reports 47 standard-library advisories, 29 of them reachable from the webhook. An older Go fetches
