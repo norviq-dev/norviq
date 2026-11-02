@@ -360,9 +360,10 @@ editing individual policies, put the namespace into monitor mode
 `block`/`escalate` to a logged `audit` (`rule_id` prefixed `monitor_would_block:`) for that namespace.
 Monitor mode only ever *softens*; it never turns an `allow` into a block.
 
-Two `rule_id`s stay hard regardless of posture (`_posture_exempt_rules`,
-`norviq/engine/evaluator.py:395-402`): `trust_frozen` (the admin kill switch) and `rate_limit_exceeded`
-(a resource control; setting `monitor_exempt_rate_limit` to `false` softens it too). Engine-health
+Three `rule_id`s stay hard regardless of posture (`_posture_exempt_rules` in
+`norviq/engine/evaluator.py`): `trust_frozen` (the admin kill switch), `invalid_spiffe_identity` (a caller
+whose identity no admin freeze could reach) and `rate_limit_exceeded` (a resource control; setting
+`monitor_exempt_rate_limit` to `false` softens it too). Engine-health
 blocks such as `policy_load_pending`, `evaluator_error` and `evaluator_timeout` soften in monitor mode
 like any other block (e.g. `monitor_would_block:evaluator_error`). The same exemptions apply to the
 per-policy audit mode above, so neither layer can monitor away a trust freeze. See also the
@@ -386,7 +387,7 @@ through unrecorded except a control you switch Off:
 | Scope | How | What a call the baseline would refuse becomes |
 |---|---|---|
 | Every baseline namespace | At install or upgrade: `--set baselineClusterPolicy.enforcementMode=audit` | `audit`, `rule_id` `policy_audit_would_block:<control>` |
-| One namespace | Console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` | `audit`, `rule_id` `monitor_would_block:<control>`. This softens every block in the namespace, your own policies' included, except a trust freeze and the rate limit (below) |
+| One namespace | Console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` | `audit`, `rule_id` `monitor_would_block:<control>`. This softens every block in the namespace, your own policies' included, except a trust freeze, an invalid agent identity and the rate limit (below) |
 | One control in one namespace (the chart's default `strict` preset) | Console → Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls` | Monitor: `audit`, `rule_id` `<control>`. Off: the control is not evaluated at all |
 
 What to know before using them:
@@ -420,7 +421,7 @@ What to know before using them:
   mode of a namespace that has none of its own. It never softens a block that a policy or the baseline
   returns (`_resolve_posture` reads only the per-namespace setting), and a module that returns no
   decision is allowed under either value.
-- `trust_frozen` and, by default, `rate_limit_exceeded` stay hard under all three (`_posture_exempt_rules`).
+- `trust_frozen`, `invalid_spiffe_identity` (an identity no freeze could reach) and, by default, `rate_limit_exceeded` stay hard under all three (`_posture_exempt_rules`).
 - The baseline is not fail-closed, by default or otherwise: a namespace outside
   `policyQuotaNamespaces` has no baseline, `config.noPolicyDecision` ships `allow`, and an engine outage
   follows `webhook.injection.fallbackMode`, which ships `allow`.

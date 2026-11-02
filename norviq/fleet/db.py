@@ -75,6 +75,9 @@ async def fleet_create_tables() -> None:
         # Additive column on the pre-existing `cluster` table — create_all only creates missing TABLES, not
         # columns. Idempotent (ADD COLUMN IF NOT EXISTS) so an already-registered fleet upgrades cleanly in place.
         await conn.execute(text("ALTER TABLE cluster ADD COLUMN IF NOT EXISTS console_url VARCHAR(512) DEFAULT ''"))
+        # Agent ids up to the SPIFFE limit, as on the spoke (norviq/engine/identity.py). Metadata-only widening.
+        await conn.execute(text("ALTER TABLE cluster ALTER COLUMN spiffe_id TYPE VARCHAR(2048)"))
+        await conn.execute(text("ALTER TABLE agent_rollup ALTER COLUMN spiffe_id TYPE VARCHAR(2048)"))
 
 
 async def fleet_get_session() -> AsyncSession:

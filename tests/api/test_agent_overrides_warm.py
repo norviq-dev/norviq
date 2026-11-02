@@ -52,6 +52,10 @@ class _Rows:
     def all(self):
         return self._rows
 
+    def scalar(self):
+        """The warm's fence token (nextval) — any number will do here."""
+        return 1
+
 
 class _Session:
     def __init__(self, rows=None, boom: Exception | None = None):
@@ -65,6 +69,8 @@ class _Session:
         if "spiffe_id > :after" in sql:  # the warm's batch cursor: ORDER BY spiffe_id, LIMIT n
             rows = sorted((r for r in self._rows if r["spiffe_id"] > params["after"]), key=lambda r: r["spiffe_id"])
             return _Rows(rows[: params["n"]])
+        if "pg_try_advisory_xact_lock" in sql:  # the warm's per-agent try-lock: every lock is free here
+            return _Rows([{"i": i, "locked": True} for i in params["ids"]])
         if "ANY(:ids)" in sql:
             return _Rows([r for r in self._rows if r["spiffe_id"] in params["ids"]])
         return _Rows(self._rows)
@@ -234,6 +240,10 @@ class _NsResult:
 
     def all(self):
         return self._rows
+
+    def scalar(self):
+        """The warm's fence token (nextval) — any number will do here."""
+        return 1
 
 
 class _NsSession(_Session):

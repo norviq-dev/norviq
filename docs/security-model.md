@@ -60,11 +60,12 @@ paths. Three worth stating explicitly, because each is a place where a naive imp
   bypass reachable by sending malformed input, so the error path is the enforcement path.
 
 `enforcement_mode=audit` deliberately inverts the no-policy default to allow — that is shadow mode, and
-it is a visibility posture, not an enforcement one. Two `rule_id`s stay hard even in audit mode,
-`trust_frozen` and, while `monitor_exempt_rate_limit` is on (the default), `rate_limit_exceeded`
-(`_posture_exempt_rules` in `norviq/engine/evaluator.py`), so an admin trust freeze cannot be lifted by
-flipping a namespace to audit. Engine-health blocks soften like
-any other.
+it is a visibility posture, not an enforcement one. Three `rule_id`s stay hard even in audit mode:
+`trust_frozen`, `invalid_spiffe_identity` and, while `monitor_exempt_rate_limit` is on (the default),
+`rate_limit_exceeded` (`_posture_exempt_rules` in `norviq/engine/evaluator.py`). So an admin trust freeze
+cannot be lifted by flipping a namespace to audit, and a caller whose identity no freeze could reach
+(`norviq/engine/identity.py::is_controllable_spiffe_id`) cannot run there either. Engine-health blocks
+soften like any other.
 
 **Norviq's PEP is cooperative, not interposing.** This is the single most important scope statement in
 this document. The sidecar does not sit in the network path of the tool invocation and does not execute

@@ -439,17 +439,17 @@ cannot interleave; within one API process a second change to the same agent wait
 database connection. The order of each change depends on its direction against the registry state read
 under that lock (`norviq/api/routers/agents.py::_is_tightening`). When something fails, the store ends
 stricter than or equal to the registry — except when the store itself cannot be written for a tightening:
-then the registry holds the new, stricter state, the store keeps the previous one, and the `503` says
-"NOT live" until the next successful change to that agent or the next API start.
+then the registry holds the new, stricter state, the store may keep the previous one, and the `503` says
+"NOT confirmed live" until the next successful change to that agent or the next API start.
 
 | Change | Order | If something fails (exit non-zero on a `503`) |
 |---|---|---|
-| Tightening: freeze, a cap added or lowered, or re-sending the current state | store, then registry | Commit failed or unacknowledged: "Applied live, but it may NOT be persisted" — retry. Store did not take it: "Persisted but NOT live" — retry. Both: "Not confirmed: the change may be persisted ... NOT live" — retry. |
-| Loosening: a freeze lifted, a cap raised or removed | registry, then store (retried once) | Commit failed or unacknowledged: "not confirmed"; the store was not touched. Store did not confirm after the commit: "Persisted, but the store did not confirm the update" — it may have taken it, or it holds whatever it held before this change. That is the previous, stricter state, unless an earlier change was itself answered "NOT live" (then older and looser than the registry). Retry, or restart the API to re-apply the registry. |
+| Tightening: freeze, a cap added or lowered, or re-sending the current state | store, then registry | Commit failed or unacknowledged: "Applied live, but it may NOT be persisted" — retry. Store did not confirm it: "Persisted but NOT confirmed live" (it may or may not have taken it) — retry. Both: "Not confirmed: the change may be persisted ... may or may not be live" — retry. |
+| Loosening: a freeze lifted, a cap raised or removed | registry, then store (retried once) | Commit failed or unacknowledged: "not confirmed"; the store was not touched. Store did not confirm after the commit: "Persisted, but the store did not confirm the update" — it may have taken it, or it holds whatever it held before this change. That is the previous, stricter state, unless an earlier change was itself answered "NOT confirmed live" (then possibly older and looser than the registry). Retry, or restart the API to re-apply the registry. |
 
-Every store write is fenced on `agent_trust_owner:<id>`, claimed under the lock: a write that outlives
-its lock (cut off by the 2 s store bound but already sent, or from a request whose connection dropped)
-does nothing once another change has claimed the agent. The boot warm claims and writes the same way. A
+Every store write is fenced on `agent_trust_owner:<id>`, claimed under the lock with a monotonic token: a
+write that outlives its lock (cut off by the 2 s store bound but already sent, or from a request whose
+connection dropped) does nothing once a later change has claimed the agent. The boot warm claims and writes the same way. A
 change that finds the agent locked by another one for longer than the lock timeout (3 s by default:
 `db_command_timeout` − 2 s if that is smaller, never under 0.2 s) exits on a `503` ("another admin change
 ... is in progress") and applies nothing (`NRVQ-API-7149`). So does one that finds no database, an exhausted
@@ -457,14 +457,23 @@ connection pool, or half the pool already in admin writes in that API process (t
 exception is a freeze, the kill switch: it claims the fence without the lock and is applied live ("Freeze
 applied live but NOT persisted"). That stops any write claimed before it. A change already under way that
 claims after it — it claims once it holds the lock and has read the registry — replaces the freeze with
-the state it commits and answers for itself, so check the agent (`agent get`) and retry the freeze. A
-backend whose API side vanished while holding an agent's lock is ended by Postgres after its
-`idle_session_timeout` (set on the admin connection to the fence's lifetime, at least 30 s), which frees
-the agent. The id must start with `spiffe://`, not be empty or only whitespace after it, and be at most 512
-characters (`422` otherwise). That is one rule for the whole product
+the state it commits and answers for itself, so check the agent (`agent get`) and retry the freeze. The
+admin connection sets `idle_session_timeout` and `idle_in_transaction_session_timeout` to the fence's
+lifetime (at least 30 s) and TCP keepalives of 10 s + 3 × 5 s, and puts them back before it is pooled. A
+backend whose API side vanished while holding an agent's lock is therefore ended by Postgres within
+roughly that long, whether or not it was inside a transaction, which frees the agent; until then that
+agent's changes answer "in progress" and a freeze is applied live only. The boot warm skips such an agent
+(try-locks), writes every other one, and names the skipped ones (`NRVQ-API-7160`). Connecting for an
+admin change gives up after 3 s, so a freeze with Postgres unreachable is applied live within seconds.
+The id must start with `spiffe://`, not be empty or only whitespace after it, and be at most 2048 bytes —
+the SPIFFE limit (`422` otherwise). That is one rule for the whole product
 (`norviq/engine/identity.py::is_controllable_spiffe_id`): `POST /api/v1/keys` refuses to bind a key to any
-other id, and the evaluator blocks any other id with `invalid_spiffe_identity`, so every identity that
-gets a decision can be frozen. Any other character, glob characters included, is accepted. The retention
+other id, and the evaluator blocks any other id with `invalid_spiffe_identity` in every posture (monitor
+mode does not soften it), so every identity that gets a decision can be frozen. The fence token is taken
+from a Postgres sequence while the writer holds the agent's lock, and a claim only ever raises it, so a
+claim from a writer whose lock died — even one already on the wire — is refused once a later writer has
+claimed. A writer also checks its lock connection is alive before each claim. A freeze that steals the
+fence without the lock takes the current token + 1. Any other character, glob characters included, is accepted. The retention
 pruner never ages out a frozen or capped agent
 (`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
 

@@ -34,7 +34,7 @@ class Cluster(FleetBase):
     labels: Mapped[dict] = mapped_column(JSONB, default=dict)        # policy target_selector matching
     bundle_version: Mapped[int] = mapped_column(Integer, default=0)  # monotonic, bump-on-change per cluster
     residency: Mapped[bool] = mapped_column(Boolean, default=False)  # raw logs stay in-cluster
-    spiffe_id: Mapped[str] = mapped_column(String(512), default="")  # the spoke's attested SPIFFE identity
+    spiffe_id: Mapped[str] = mapped_column(String(2048), default="")  # the spoke's attested SPIFFE identity
     last_heartbeat: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -44,7 +44,7 @@ class AgentRollup(FleetBase):
 
     __tablename__ = "agent_rollup"
     cluster_id: Mapped[str] = mapped_column(String(255), ForeignKey("cluster.id", ondelete="CASCADE"), primary_key=True)
-    spiffe_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    spiffe_id: Mapped[str] = mapped_column(String(2048), primary_key=True)
     namespace: Mapped[str] = mapped_column(String(255), default="")
     agent_class: Mapped[str] = mapped_column(String(255), default="")
     trust_score: Mapped[float] = mapped_column(Float, default=0.8)

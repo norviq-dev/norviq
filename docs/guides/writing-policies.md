@@ -516,9 +516,9 @@ the engine reads it**: when the winning candidate was saved with `enforcement_mo
 - Only **base/floor** candidates carry a mode. Overlays (§4) are constructed without one and default
   to `block`, deliberately: an overlay may only tighten, and honouring its mode would let it weaken
   the base policy beneath it.
-- The same exempt rule_ids stay hard as for namespace posture: `trust_frozen` and, while
-  `monitor_exempt_rate_limit` is on (the default), `rate_limit_exceeded` (`_posture_exempt_rules`,
-  `evaluator.py:395-402`).
+- The same exempt rule_ids stay hard as for namespace posture: `trust_frozen`, `invalid_spiffe_identity`
+  and, while `monitor_exempt_rate_limit` is on (the default), `rate_limit_exceeded` (`_posture_exempt_rules`
+  in `evaluator.py`).
 
 Separately, and layered on top, a **namespace** can be put into monitor mode wholesale:
 `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` softens *any* would-block or

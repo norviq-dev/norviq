@@ -669,13 +669,42 @@ if ARGV[2] == '1' then redis.call('SET', KEYS[2], '1') elseif ARGV[3] ~= '' then
 return 1
 """
 
-    async def claim_admin_trust_owner(self, spiffe_id: str, token: str, ttl_ms: int | None = None) -> None:
-        """Make ``token`` the agent's current admin writer, voiding any earlier writer's fence. ``ttl_ms`` (default
-        30 s) must outlast the writer's whole operation, or its own write finds the key gone."""
-        await self._client().set(f"agent_trust_owner:{spiffe_id}", token, px=ttl_ms or self._OWNER_TTL_MS)
+    # The fence token is MONOTONIC: an admin writer takes it from a Postgres sequence while holding the agent's
+    # lock (norviq/api/routers/agents.py::_fence_token), so a later lock holder always has a larger token. A
+    # claim only ever raises the owner; a writer whose lock died and whose claim lands late carries the smaller
+    # token, is refused, and its fenced write is then a no-op (review round 6: a random token let such a late
+    # claim win over a freeze committed with 200 in between). A claim without a token (a freeze stealing the
+    # fence while it cannot get the lock) takes the current owner + 1. A non-numeric owner (written by an older
+    # release) is replaced.
+    _CLAIM_LUA = """
+local cur = redis.call('GET', KEYS[1])
+local token = ARGV[1]
+local curn = cur and tonumber(cur)
+if token == '' then
+  token = tostring((curn or 0) + 1)
+elseif curn and tonumber(token) and tonumber(token) < curn then
+  return false
+end
+redis.call('SET', KEYS[1], token, 'PX', ARGV[2])
+return token
+"""
+
+    async def claim_admin_trust_owner(
+        self, spiffe_id: str, token: int | str | None, ttl_ms: int | None = None
+    ) -> str | None:
+        """Make ``token`` the agent's admin writer if it is not older than the current one, and return it; None when
+        a newer writer owns the agent. ``token`` None steals: current owner + 1. ``ttl_ms`` (default 30 s) must
+        outlast the writer's whole operation, or its own write finds the key gone."""
+        result = await self._client().eval(
+            self._CLAIM_LUA, 1, f"agent_trust_owner:{spiffe_id}", "" if token is None else str(token),
+            str(ttl_ms or self._OWNER_TTL_MS),
+        )
+        if result is None or result is False:
+            return None
+        return result.decode() if isinstance(result, bytes) else str(result)
 
     async def apply_admin_trust_control_if_owner(
-        self, spiffe_id: str, token: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
+        self, spiffe_id: str, token: int | str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
     ) -> int:
         """Write one agent's whole admin control state — freeze flag, cap, and optionally the displayed score —
         atomically, and only while ``token`` owns the agent. Returns FENCE_APPLIED, FENCE_LOST (another writer
@@ -683,13 +712,13 @@ return 1
         freeze-to-cap change never has an instant with neither, as separate DEL and SET commands did."""
         keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}",
                 f"trust:{spiffe_id}"]
-        args = [token, "1" if frozen else "0", "" if cap is None else str(float(cap)),
+        args = [str(token), "1" if frozen else "0", "" if cap is None else str(float(cap)),
                 "" if display is None else display.model_dump_json(),
                 str(self._jitter_ttl(settings.redis_ttl_trust_s))]
         return int(await self._client().eval(self._FENCED_CONTROL_LUA, len(keys), *keys, *args))
 
     async def warm_admin_trust_controls(
-        self, token: str, entries: list[tuple[str, bool, float | None]], rounds: int = 3
+        self, token: int | str, entries: list[tuple[str, bool, float | None]], rounds: int = 3
     ) -> list[int]:
         """The boot warm's batch: claim every agent for ``token``, then add each agent's freeze or cap through the
         fence, in two pipelines. A cut-off attempt's late writes are no-ops once an admin write re-claims.
@@ -707,14 +736,15 @@ return 1
                 break
             async with client.pipeline(transaction=False) as pipe:
                 for i in pending:
-                    await pipe.set(f"agent_trust_owner:{entries[i][0]}", token, px=self._OWNER_TTL_MS)
+                    await pipe.eval(self._CLAIM_LUA, 1, f"agent_trust_owner:{entries[i][0]}", str(token),
+                                    str(self._OWNER_TTL_MS))
                 await pipe.execute()
             async with client.pipeline(transaction=False) as pipe:
                 for i in pending:
                     spiffe_id, frozen, cap = entries[i]
                     keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}",
                             f"agent_trust_override:{spiffe_id}"]
-                    await pipe.eval(self._FENCED_WARM_LUA, 3, *keys, token, "1" if frozen else "0",
+                    await pipe.eval(self._FENCED_WARM_LUA, 3, *keys, str(token), "1" if frozen else "0",
                                     "" if cap is None else str(float(cap)))
                 for i, result in zip(pending, await pipe.execute()):
                     outcomes[i] = int(result)

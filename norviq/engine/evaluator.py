@@ -411,7 +411,10 @@ _SQL_TABLE_RE = re.compile(
 #   * `rate_limit_exceeded` — a resource control protecting the customer's OWN backend. "Do not block
 #                          on policy" is not a request for unbounded call volume. Configurable via
 #                          `monitor_exempt_rate_limit` for operators who want even this to soften.
-_BASE_POSTURE_EXEMPT_RULES = frozenset({"trust_frozen"})
+# Never softened by monitor mode. trust_frozen is the admin kill switch. invalid_spiffe_identity is an identity-
+# integrity failure, not a policy outcome: the identity is one no admin control can be applied to (the shared
+# rule in norviq/engine/identity.py), so softening it in a monitor namespace would let an unfreezable caller run.
+_BASE_POSTURE_EXEMPT_RULES = frozenset({"trust_frozen", "invalid_spiffe_identity"})
 
 
 def _posture_exempt_rules() -> frozenset[str]:
@@ -795,6 +798,12 @@ class OPAEvaluator:
         the identity and the violation, not a recomputed score. Uses the same background queue as the
         happy path so it cannot add latency to a call that has already failed.
         """
+        from norviq.engine.identity import is_controllable_spiffe_id
+
+        if not is_controllable_spiffe_id(event.agent_identity.spiffe_id):
+            # Not a registry identity: the admin routes refuse it, so a row for it could never be frozen,
+            # lifted or deleted, only listed. The block itself is logged (NRVQ-ENG-2006) and audited.
+            return
         try:
             from norviq.engine.trust import TrustResult
 

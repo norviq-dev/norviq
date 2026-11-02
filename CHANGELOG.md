@@ -16,9 +16,10 @@ because they should be installed.
 
 - **An agent identity must be one an admin can freeze.** The key API, the evaluator and the admin trust
   routes now share one rule: the id starts with `spiffe://`, is not empty or only whitespace after it, and
-  is at most 512 characters. `POST /api/v1/keys` refuses (`422`) a `spiffe_id` outside it. The evaluator
-  blocks a call from such an identity with `invalid_spiffe_identity` (`NRVQ-ENG-2006`; softened in a
-  namespace in monitor mode, like other fail-closed blocks) instead of deciding for it. It used to check
+  is at most 2048 bytes (the SPIFFE limit; the agent-id columns are widened to 2048 at startup, a metadata-only
+  change). `POST /api/v1/keys` refuses (`422`) a `spiffe_id` outside it. The evaluator blocks a call from such
+  an identity with `invalid_spiffe_identity` (`NRVQ-ENG-2006`) in every posture: unlike other fail-closed
+  blocks it is not softened in a monitor namespace, and no registry row is written for it. It used to check
   only the prefix; with the admin routes now refusing these ids, such an identity would get decisions that
   no freeze could reach. **Existing keys bound to such an
   id keep authenticating, but every evaluation for them now blocks**: re-issue them with a valid
@@ -191,14 +192,17 @@ because they should be installed.
   tightening reaches the store before the registry while a loosening reaches it only after its commit;
   every store write is fenced, so a late one cannot land over a newer change. When something fails the
   store is never looser than the registry, except when the store itself cannot take a tightening, which
-  the `503` reports as "NOT live". A freeze that finds another change in progress, or no database, is
+  the `503` reports as "NOT confirmed live". A freeze that finds another change in progress, or no database, is
   still applied live, not persisted; a change already under way can replace it when it finishes, and the
   `503` says to check the agent. A starting API's write-back of freezes
   and caps takes the same locks in batches, so it no longer restores a cap or freeze another replica
   changed while it ran, and a retried write-back resumes where it stopped. The three routes answer
-  `422` for an id without the `spiffe://` prefix, empty or only whitespace after it, or over 512 characters
-  (the registry column). A change that finds the agent locked by another past the lock timeout (3 s by
-  default) is a `503` that applies nothing except a freeze, which goes live unpersisted (`NRVQ-API-7149`). `NRVQ-API-7031` names the actor.
+  `422` for an id without the `spiffe://` prefix, empty or only whitespace after it, or over 2048 bytes. A change that finds the agent locked by another past the lock timeout (3 s by
+  default) is a `503` that applies nothing except a freeze, which goes live unpersisted (`NRVQ-API-7149`).
+  The connection an admin change holds the agent's lock on sets `idle_session_timeout`,
+  `idle_in_transaction_session_timeout` and TCP keepalives, so a lock left by an API node that vanished is
+  released in about 35 s, not hours. The boot write-back skips an agent whose lock is held, writes every
+  other one, and names the skipped ones (`NRVQ-API-7160`, ERROR). `NRVQ-API-7031` names the actor.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck
 reports 47 standard-library advisories, 29 of them reachable from the webhook. An older Go fetches
@@ -250,7 +254,7 @@ freeze and keeps that cap). Details in docs/trust-score-design.md §5.
 
 An admin trust change (`PUT /api/v1/agents/{spiffe_id}/trust`) that fails part-way answers `503` saying
 which state it left: a tightening may be live without being persisted, a loosening the registry took may not
-be live yet, and a tightening the store could not take is persisted but NOT live (the store then enforces
+be live yet, and a tightening the store did not confirm is persisted but NOT confirmed live (the store may then enforce
 the previous, looser state until the next successful change to that agent or the next API start). Retry
 the change.
 

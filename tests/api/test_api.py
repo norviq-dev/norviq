@@ -150,9 +150,11 @@ class FakeCache:
         """Remove the admin trust cap."""
         await self.delete(f"agent_trust_override:{spiffe_id}")
 
-    async def claim_admin_trust_owner(self, spiffe_id: str, token: str, ttl_ms: int | None = None) -> None:
-        """RedisCache's admin-writer fence, over the generic keys."""
+    async def claim_admin_trust_owner(self, spiffe_id: str, token, ttl_ms: int | None = None) -> str:
+        """RedisCache's admin-writer fence, over the generic keys (no ordering: one writer at a time here)."""
+        token = "1" if token is None else str(token)
         await self.set(f"agent_trust_owner:{spiffe_id}", token)
+        return token
 
     async def apply_admin_trust_control_if_owner(
         self, spiffe_id: str, token: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
@@ -161,7 +163,7 @@ class FakeCache:
         owner = await self.get(f"agent_trust_owner:{spiffe_id}")
         if owner is None:
             return -1
-        if owner != token:
+        if owner != str(token):
             return 0
         await self.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display)
         return 1

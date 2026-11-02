@@ -31,7 +31,14 @@ import pytest
 import structlog
 from sqlalchemy import text
 
-from norviq.api.db.session import close_db, create_tables, get_session, init_db, upsert_agent_registry
+from norviq.api.db.session import (
+    close_db,
+    create_tables,
+    ensure_schema_compatibility,
+    get_session,
+    init_db,
+    upsert_agent_registry,
+)
 from norviq.api.main import create_app
 from norviq.api.routers.agents import get_admin_db, warm_agent_overrides
 from norviq.config import settings
@@ -54,6 +61,7 @@ async def env():
     settings.http_rate_limit_enabled = False
     await init_db()
     await create_tables()
+    await ensure_schema_compatibility()  # the API lifespan's upgrade path (widens agent-id columns, for one)
     cache = RedisCache(url=_env("NRVQ_REDIS_URL"))
     await cache.connect()
     app = create_app()
@@ -589,7 +597,7 @@ async def test_with_the_store_down_a_tightening_is_persisted_and_a_loosening_is_
         lift_resp = await client.put(f"/api/v1/agents/{lifted}/trust", json={"score": 0.3}, headers=_hdr())
     finally:
         app.state.cache = cache
-    assert resp.status_code == 503 and "Persisted but NOT live" in resp.json()["detail"]
+    assert resp.status_code == 503 and "Persisted but NOT confirmed live" in resp.json()["detail"]
     assert (await _row(spiffe))["frozen"] is True
     assert cap_resp.status_code == 503 and (await _row(capped))["trust_cap"] == pytest.approx(0.3)
     await warm_agent_overrides(cache)
@@ -607,13 +615,13 @@ async def test_with_the_store_down_a_tightening_is_persisted_and_a_loosening_is_
         "spiffe://",
         "spiffe://%20%20",
         "x" * 20 + "spiffe://a",
-        "spiffe://norviq/ns/a/sa/" + "x" * 600,
+        "spiffe://norviq/ns/a/sa/" + "x" * 2100,
     ],
 )
 async def test_admin_trust_routes_refuse_an_id_the_product_does_not_accept(env, bad) -> None:
     """FAIL-ON-BUG (review N3). The upsert wrote a frozen registry row for any string, '*' and ' '
     included. PUT, reset and DELETE refuse exactly what the evaluator and POST /keys refuse — no
-    "spiffe://" prefix, more than 512 characters — plus an id empty after the prefix (422), and write
+    "spiffe://" prefix, more than 2048 bytes — plus an id empty after the prefix (422), and write
     nothing. Counted for these exact ids, so rows another run left in a shared database cannot fail it."""
     from urllib.parse import unquote
 
@@ -990,10 +998,11 @@ async def test_the_control_write_is_one_script_and_the_reset_one_multi(env) -> N
             return _EvalSpy(real_client, seen)
 
     spy = _Cache(cache)
-    token = "t-" + uuid.uuid4().hex
-    await RedisCache.claim_admin_trust_owner(spy, spiffe, token)
+    token = await RedisCache.claim_admin_trust_owner(spy, spiffe, None)
     assert await RedisCache.apply_admin_trust_control_if_owner(spy, spiffe, token, frozen=False, cap=0.3) == 1
-    assert len(evals) == 1 and seen == []
+    # Two scripts: the claim (owner compare-and-raise) and the write (owner check plus every key), no pipeline.
+    assert len(evals) == 2 and seen == []
+    assert evals[0].lstrip().startswith("local cur") and evals[1].lstrip().startswith("local owner")
     import norviq.api.routers.agents as agents_mod
 
     await agents_mod._reset_multi(spy, f"agent_history:{spiffe}", f"agent_profile:{spiffe}")
@@ -1398,7 +1407,7 @@ async def test_a_late_tightening_write_cannot_land_over_a_newer_freeze(env, shor
         a = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.5}, headers=_hdr())
     finally:
         app.state.cache = real
-    assert a.status_code == 503 and a.json()["detail"].startswith("Persisted but NOT live")
+    assert a.status_code == 503 and a.json()["detail"].startswith("Persisted but NOT confirmed live")
     assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
     spiffe_id, token, k = held["call"]
     assert await real.apply_admin_trust_control_if_owner(spiffe_id, token, **k) == RedisCache.FENCE_LOST
@@ -1547,12 +1556,14 @@ def test_the_lock_timeout_stays_below_the_command_timeout(monkeypatch, command_t
     assert _lock_timeout_ms() == expected_ms
 
 
-async def test_an_id_of_exactly_512_characters_is_accepted_and_513_is_not(env) -> None:
+async def test_an_id_of_exactly_2048_bytes_is_accepted_and_one_more_is_not(env) -> None:
+    """The SPIFFE limit (2048 bytes) is the bound everywhere, and the registry column holds it."""
     _, client, _, ids = env
-    longest = "spiffe://" + "a" * 503
+    longest = "spiffe://" + "a" * 2039
     ids.append(longest)
-    assert len(longest) == 512
+    assert len(longest.encode()) == 2048
     assert (await client.put(f"/api/v1/agents/{longest}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    assert (await _row(longest))["frozen"] is True
     assert (await client.put(f"/api/v1/agents/{longest}b/trust", json={"score": 0}, headers=_hdr())).status_code == 422
 
 
@@ -1630,9 +1641,10 @@ class _LateClaimClient(_Proxy):
                 claims: list[str] = []
 
                 class _P(_Proxy):
-                    async def set(_p, key, *sa, **sk):
-                        claims.append(key)
-                        return await pipe.set(key, *sa, **sk)
+                    async def eval(_p, script, numkeys, *args):
+                        if script.lstrip().startswith("local cur"):  # the claim script, not the fenced add
+                            claims.extend(args[:numkeys])
+                        return await pipe.eval(script, numkeys, *args)
 
                     async def execute(_p, *ea, **ek):
                         result = await pipe.execute(*ea, **ek)
@@ -1694,18 +1706,45 @@ async def test_the_warm_reclaims_after_a_dead_writers_late_claim(env) -> None:
     assert seeded == 1 and await cache._client().get(f"agent_frozen:{spiffe}") == "1"
 
 
-async def test_a_warm_batch_that_cannot_take_its_fence_fails_the_attempt_instead_of_advancing(env) -> None:
-    """Round 5, D1: if re-claiming does not help either, the batch is not counted and the cursor does not move;
-    the attempt fails, so warm_with_backoff retries it and then logs NRVQ-API-7035 at ERROR with the ids."""
+async def test_a_warm_agent_that_cannot_take_its_fence_is_skipped_named_and_retried(env) -> None:
+    """Round 5, D1 / round 6, F1: if re-claiming does not help either, the agent is not counted and not silently
+    passed over: the rest of the table is written, the agent is retried at the end of the attempt, and if it
+    still does not take its control the attempt fails naming it (NRVQ-API-7160), so warm_with_backoff retries."""
     _, _, cache, ids = env
     prefix = f"spiffe://zzzz-late-claim-{uuid.uuid4().hex[:8]}"
-    spiffe = f"{prefix}/a"
-    ids.append(spiffe)
-    await _seed_frozen_rows([spiffe])
+    stuck, fine = f"{prefix}/a", f"{prefix}/b"
+    ids.extend([stuck, fine])
+    await _seed_frozen_rows([stuck, fine])
     progress = {"after": prefix}
-    with pytest.raises(RuntimeError, match=spiffe):
-        await warm_agent_overrides(_LossyWarmCache(cache, spiffe, rounds=99), progress=progress)
-    assert progress["after"] == prefix and progress["seeded"] == 0
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(RuntimeError, match=stuck):
+            await warm_agent_overrides(_LossyWarmCache(cache, stuck, rounds=99), progress=progress)
+    assert progress["skipped"] == {stuck} and progress["seeded"] == 1
+    assert await cache._client().get(f"agent_frozen:{fine}") == "1"
+    assert [e["spiffe_ids"] for e in logs if e.get("code") == "NRVQ-API-7160"] == [[stuck]]
+    # The next attempt (same progress) retries only the skipped agent, and now it lands.
+    assert await warm_agent_overrides(cache, progress=progress) == 2
+    assert await cache._client().get(f"agent_frozen:{stuck}") == "1" and progress["skipped"] == set()
+
+
+async def test_one_stuck_agent_lock_does_not_stop_the_warm_for_the_rest(env, short_waits) -> None:
+    """Review round 6, F1: a backend holding one agent's lock (an API node that vanished mid-transaction) made
+    every batch from that agent's on fail, on every attempt: 0 of 3000 freezes restored after a store flush.
+    The warm try-locks, skips the held agent, writes everything else, and names the held one."""
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-stuck-{uuid.uuid4().hex[:8]}"
+    agents = [f"{prefix}/{n}" for n in "abcde"]
+    ids.extend(agents)
+    await _seed_frozen_rows(agents)
+    progress = {"after": prefix}
+    async with _HeldLock(agents[1]):
+        with pytest.raises(RuntimeError, match=agents[1]):
+            await asyncio.wait_for(warm_agent_overrides(cache, progress=progress, batch_size=2), 20)
+    for spiffe in agents:
+        expected = None if spiffe == agents[1] else "1"
+        assert await cache._client().get(f"agent_frozen:{spiffe}") == expected, spiffe
+    assert await warm_agent_overrides(cache, progress=progress) == 5
+    assert await cache._client().get(f"agent_frozen:{agents[1]}") == "1"
 
 
 async def test_a_loosening_after_a_not_live_tightening_does_not_claim_the_store_is_stricter(env) -> None:
@@ -1725,7 +1764,7 @@ async def test_a_loosening_after_a_not_live_tightening_does_not_claim_the_store_
         second = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.5}, headers=_hdr())
     finally:
         app.state.cache = cache
-    assert first.status_code == 503 and first.json()["detail"].startswith("Persisted but NOT live")
+    assert first.status_code == 503 and first.json()["detail"].startswith("Persisted but NOT confirmed live")
     detail = second.json()["detail"]
     assert second.status_code == 503 and "still enforces the previous, stricter state" not in detail
     assert "holds whatever it held before this change" in detail and "older than the registry" in detail
@@ -1764,7 +1803,7 @@ class _LoseFence(_Proxy):
 
 
 async def test_a_tightening_that_loses_its_fence_is_not_answered_as_live(env) -> None:
-    """Round 5 mutation gap: FENCE_LOST is not 'live'. The store did not take it, so 'Persisted but NOT live'."""
+    """Round 5 mutation gap: FENCE_LOST is not 'live'. The store did not take it, so 'Persisted but NOT confirmed live'."""
     app, client, cache, ids = env
     spiffe = _agent(ids, "tlost")
     app.state.cache = _LoseFence(cache)
@@ -1772,7 +1811,7 @@ async def test_a_tightening_that_loses_its_fence_is_not_answered_as_live(env) ->
         resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
     finally:
         app.state.cache = cache
-    assert resp.status_code == 503 and resp.json()["detail"].startswith("Persisted but NOT live")
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Persisted but NOT confirmed live")
     assert await _live(cache, spiffe) == (False, None)
 
 
@@ -1867,16 +1906,31 @@ async def test_admin_writes_in_one_process_never_take_more_than_half_the_pool(en
     assert other.status_code == 503 and "too many admin trust changes" in other.json()["detail"]
 
 
+async def _session_settings(names) -> dict[str, str]:
+    """What a connection checked out of the engine's pool reports for ``names`` (the pool hands back the
+    connection the admin write used, so its settings must be the server's again)."""
+    import norviq.api.routers.agents as agents_mod
+
+    conn = await agents_mod._EngineConnector().connect()
+    try:
+        return {n: (await conn.execute(text(f"SHOW {n}"))).scalar() for n in names}
+    finally:
+        await conn.rollback()
+        await conn.close()
+
+
 async def test_the_admin_connection_bounds_its_idle_time_and_resets_it_before_the_pool(env) -> None:
-    """Round 5: a backend whose API side vanished kept the agent's lock until TCP keepalive (hours). The admin
-    connection sets idle_session_timeout for the operation and puts the server default back on release."""
+    """Rounds 5-6: a backend whose API side vanished kept the agent's lock until TCP keepalive (hours), also
+    while idle INSIDE a transaction, where idle_session_timeout does not apply. The admin connection sets
+    idle_session_timeout, idle_in_transaction_session_timeout and TCP keepalives before taking the lock, and
+    puts every one back to the server's value before the connection returns to the pool."""
     app, client, _, ids = env
     spiffe = _agent(ids, "idle")
-    seen: list[str] = []
+    seen: list[tuple[str, object]] = []
 
     class _Record(_Proxy):
         async def execute(self, stmt, *a, **k):
-            seen.append(str(stmt))
+            seen.append((str(stmt), a[0] if a else None))
             return await self._real.execute(stmt, *a, **k)
 
     import norviq.api.routers.agents as agents_mod
@@ -1885,6 +1939,7 @@ async def test_the_admin_connection_bounds_its_idle_time_and_resets_it_before_th
         async def connect(self):
             return _Record(await agents_mod._EngineConnector().connect())
 
+    before = await _session_settings(agents_mod._ADMIN_SESSION_SETTINGS)
     app.dependency_overrides[get_admin_db] = _Db
     try:
         assert (
@@ -1892,12 +1947,18 @@ async def test_the_admin_connection_bounds_its_idle_time_and_resets_it_before_th
         ).status_code == 200
     finally:
         app.dependency_overrides.pop(get_admin_db, None)
-    set_at = next(i for i, sql in enumerate(seen) if "set_config('idle_session_timeout', :v" in sql)
-    lock_at = next(i for i, sql in enumerate(seen) if "pg_advisory_lock" in sql)
-    reset_at = next(i for i, sql in enumerate(seen) if "reset_val" in sql)
-    assert lock_at < set_at < reset_at
-    async with _session() as session:
-        assert (await session.execute(text("SHOW idle_session_timeout"))).scalar() in ("0", "0ms")
+    applied = {p["n"]: p["v"] for sql, p in seen if "set_config(:n, :v" in sql}
+    assert set(applied) == set(agents_mod._ADMIN_SESSION_SETTINGS)
+    assert (
+        applied["idle_in_transaction_session_timeout"]
+        == applied["idle_session_timeout"]
+        == f"{agents_mod._owner_ttl_ms()}ms"
+    )
+    lock_at = next(i for i, (sql, _) in enumerate(seen) if "pg_advisory_lock" in sql)
+    first_set = next(i for i, (sql, _) in enumerate(seen) if "set_config(:n, :v" in sql)
+    reset_at = next(i for i, (sql, _) in enumerate(seen) if "reset_val" in sql)
+    assert first_set < lock_at < reset_at
+    assert await _session_settings(agents_mod._ADMIN_SESSION_SETTINGS) == before
 
 
 async def test_an_id_whose_namespace_is_longer_than_the_column_can_still_be_frozen(env) -> None:
@@ -1942,7 +2003,7 @@ async def test_a_tightening_that_lost_its_fence_to_a_stolen_freeze_does_not_retr
     finally:
         app.state.cache = cache
     assert freeze.status_code == 503 and freeze.json()["detail"].startswith("Freeze applied live")
-    assert cap_resp.status_code == 503 and cap_resp.json()["detail"].startswith("Persisted but NOT live")
+    assert cap_resp.status_code == 503 and cap_resp.json()["detail"].startswith("Persisted but NOT confirmed live")
     assert await _live(cache, spiffe) == (True, None)
 
 
@@ -1986,3 +2047,131 @@ async def test_writers_queued_on_one_agent_do_not_take_slots_from_other_agents(e
         agents_mod._slots.clear()
     assert elsewhere.status_code == 200, elsewhere.text
     assert waited < 1.0, f"the other agent's write waited {waited:.1f}s for a slot held by a queued writer"
+
+
+# --- Round 6 -------------------------------------------------------------------------------------------------
+
+
+async def test_the_warm_reclaims_for_up_to_three_rounds(env) -> None:
+    """Round 6 mutation gap: a late claim landing twice is still overcome on the third round."""
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-late-claim-{uuid.uuid4().hex[:8]}"
+    spiffe = f"{prefix}/a"
+    ids.append(spiffe)
+    await _seed_frozen_rows([spiffe])
+    calls: list = []
+
+    class _Counting(_LossyWarmCache):
+        async def warm_admin_trust_controls(self, *a, **k):
+            calls.append(1)
+            return await super().warm_admin_trust_controls(*a, **k)
+
+    lossy = _Counting(cache, spiffe, rounds=2)
+    assert await warm_agent_overrides(lossy, progress={"after": prefix}) == 1
+    assert lossy._link._rounds == 0 and await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+    assert calls == [1], "the batch's own re-claim rounds did not overcome it; it fell to the skipped-agent retry"
+
+
+async def test_a_writer_whose_lock_connection_died_does_not_claim_the_fence(env) -> None:
+    """Round 6, non-blocking (a): the liveness check runs before the FIRST claim too. A backend killed after
+    the registry read used to claim anyway; that claim could land inside another writer's change."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "deadconn")
+    claims: list = []
+
+    class _CountClaims(_Proxy):
+        async def claim_admin_trust_owner(self, *a, **k):
+            claims.append(a)
+            return await self._real.claim_admin_trust_owner(*a, **k)
+
+    class _DeadAfterRead(_ConnProxy):
+        async def execute(self, stmt, *a, **k):
+            if str(stmt) == "SELECT 1":  # the liveness probe: the session is gone
+                raise ConnectionError("connection lost")
+            return await super().execute(stmt, *a, **k)
+
+    import norviq.api.routers.agents as agents_mod
+
+    hooks = {"commits": 0}
+
+    class _Db:
+        async def connect(self):
+            return _DeadAfterRead(await agents_mod._EngineConnector().connect(), hooks)
+
+    app.dependency_overrides[get_admin_db] = _Db
+    app.state.cache = _CountClaims(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert claims == [], "a writer that may have lost its lock claimed the fence"
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Persisted but NOT confirmed live")
+
+
+async def test_monitor_mode_does_not_let_an_unfreezable_identity_run(env) -> None:
+    """Review round 6, F2: in a monitor namespace the invalid-identity block was softened to allow+audit, so an
+    identity the admin routes refuse ran there, unfreezable. It stays a block in every posture."""
+    from norviq.engine.evaluator import _posture_exempt_rules
+
+    assert "invalid_spiffe_identity" in _posture_exempt_rules()
+
+
+async def test_a_freeze_goes_live_quickly_when_postgres_does_not_answer_the_connect(env, monkeypatch) -> None:
+    """Round 6, non-blocking (b): with Postgres partitioned the connect hung for the driver's timeout (60 s)
+    before the freeze fell back to being applied live; the CLI had given up at 10 s."""
+    import norviq.api.routers.agents as agents_mod
+
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "hangconn")
+    monkeypatch.setattr(agents_mod, "_CONNECT_TIMEOUT_S", 0.3)
+
+    class _Hangs:
+        async def connect(self):
+            await asyncio.Event().wait()
+
+    app.dependency_overrides[get_admin_db] = _Hangs
+    try:
+        started = time.monotonic()
+        resp = await asyncio.wait_for(
+            client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr()), 15
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Freeze applied live but NOT persisted")
+    assert elapsed < 2.0 and await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+
+
+async def test_a_claim_from_a_writer_that_lost_its_lock_cannot_win_over_a_later_freeze(env, separate_replicas) -> None:
+    """FAIL-ON-BUG (review round 6, lostlock_claim.py). H (cap 0.4) loses its lock connection while its claim
+    is on the way; B, on another replica, freezes with 200; then H's claim lands. With a random token it won
+    and H's cap replaced B's freeze in the store (store looser than the registry). Fence tokens now come from
+    a Postgres sequence taken under the lock, so B's is larger and H's late claim is refused."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "lostlock")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.5}, headers=_hdr())).status_code == 200
+    gate, hit = asyncio.Event(), asyncio.Event()
+
+    class _PauseFirstClaim(_Proxy):
+        async def claim_admin_trust_owner(self, *a, **k):
+            if not hit.is_set():
+                hit.set()
+                await gate.wait()
+            return await self._real.claim_admin_trust_owner(*a, **k)
+
+    app.state.cache = _PauseFirstClaim(cache)
+    try:
+        h = asyncio.create_task(client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr()))
+        await asyncio.wait_for(hit.wait(), 5)
+        await _terminate_lock_holder(spiffe)
+        app.state.cache = cache
+        b = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        app.state.cache = _PauseFirstClaim(cache)
+        gate.set()
+        h_resp = await asyncio.wait_for(h, 15)
+    finally:
+        app.state.cache = cache
+    assert b.status_code == 200 and h_resp.status_code == 503
+    assert await _durable(spiffe) == (True, None)
+    assert await _live(cache, spiffe) == (True, None), "a writer that lost its lock replaced a later freeze"

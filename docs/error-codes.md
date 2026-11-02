@@ -23,7 +23,7 @@ individually described.
 
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
-| API | 106 | `norviq/api/main.py`, `norviq/api/routers/*` |
+| API | 107 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/controller.go`, `webhook/injector.go` |
 | ENG | 54 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | MCP | 49 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
@@ -42,7 +42,7 @@ individually described.
 | SIEM | 6 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **537** (including `*-DEBUG-*` traces). Counted 2026-11-02 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
+Total unique codes: **538** (including `*-DEBUG-*` traces). Counted 2026-11-02 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
 
 ## API
 
@@ -140,9 +140,10 @@ Total unique codes: **537** (including `*-DEBUG-*` traces). Counted 2026-11-02 t
 | NRVQ-API-7143 | `nrvq.api.agent.deregister_refused` — `DELETE /agents/{id}` answered **409** because the agent is frozen or under a trust cap (`frozen`, `capped`, `actor`). Deleting the registry row would have lifted the control; lift it with `PUT /agents/{id}/trust` (score 1.0) first | `norviq/api/routers/agents.py` |
 | NRVQ-API-7144 | `nrvq.api.agent.deregister_check_failed` — `DELETE /agents/{id}` answered **503**. `committing=true`: the delete's commit failed or was not acknowledged, so the agent may have been deleted (check with GET). Otherwise nothing was deleted: the registry row or the live freeze/cap keys could not be read (store calls are cut off at 2 s), or no pooled connection was free. A contended lock is NRVQ-API-7149 | `norviq/api/routers/agents.py` |
 | NRVQ-API-7145 | `nrvq.api.agent.trust_reset` — the audit record of `POST /agents/{id}/trust/reset`: an admin cleared the agent's behavioural history and profile. Carries `actor`, `actor_role`, `score_before`, `violation_count` (the registry's cumulative count, which the reset keeps), `history_entries_cleared`, `history_blocks_cleared`, `keys_cleared`, and the `frozen`/`trust_cap` that stay in force | `norviq/api/routers/agents.py` |
-| NRVQ-API-7146 | `nrvq.api.agent.trust_reset_failed` — the reset answered **503**. `contended=true`: another admin write held the agent; nothing was cleared. `stage=lock`/`read`: the database failed before anything was cleared. `stage=multi`: Redis did not confirm the reset's MULTI (cut off at 2 s), so it may or may not have run; retry. Once the MULTI has answered the reset always reports and logs NRVQ-API-7145 | `norviq/api/routers/agents.py` |
-| NRVQ-API-7147 | `nrvq.api.agent.trust_live_failed` — `PUT /agents/{id}/trust` and the store did not take the change (store calls are cut off at 2 s; every store write is fenced on `agent_trust_owner:<id>`, and retried once under a fresh claim), **503**. `direction=tightening durable=true`: the freeze or cap is committed but NOT live — the store enforces the previous, looser state until the next successful change to this agent or the next API start (`warm_agent_overrides`); alert on it. `direction=loosening durable=true`: the registry took the loosening and the store did not confirm it: the store may have taken it, or holds whatever it held before — the previous, stricter state, unless an earlier change was itself reported NOT live (then older and looser than the registry); retry, or restart the API. `direction=loosening durable=false`: the store could not be fenced, so nothing was applied | `norviq/api/routers/agents.py` |
+| NRVQ-API-7146 | `nrvq.api.agent.trust_reset_failed` — the reset answered **503**. `contended=true`: another admin write held the agent; nothing was cleared. `stage=lock`/`read`: the database, or the store's read of the trust score, failed before anything was cleared. `stage=multi`: Redis did not confirm the reset's MULTI (cut off at 2 s), so it may or may not have run; retry. Once the MULTI has answered the reset always reports and logs NRVQ-API-7145 | `norviq/api/routers/agents.py` |
+| NRVQ-API-7147 | `nrvq.api.agent.trust_live_failed` — `PUT /agents/{id}/trust` and the store did not take the change (store calls are cut off at 2 s; every store write is fenced on `agent_trust_owner:<id>`, and retried once under a fresh claim), **503**. `direction=tightening durable=true`: the freeze or cap is committed but NOT confirmed live — the store may still enforce the previous, looser state until the next successful change to this agent or the next API start (`warm_agent_overrides`); alert on it. `direction=loosening durable=true`: the registry took the loosening and the store did not confirm it: the store may have taken it, or holds whatever it held before — the previous, stricter state, unless an earlier change was itself reported NOT confirmed live (then possibly older and looser than the registry); retry, or restart the API. `direction=loosening durable=false`: the store could not be fenced, so nothing was applied | `norviq/api/routers/agents.py` |
 | NRVQ-API-7150 | `nrvq.api.agent.trust_lock_release_failed` — releasing an agent's admin lock (`pg_advisory_unlock`) failed or did not answer true, so the connection was invalidated instead of going back to the pool, and Postgres dropped the lock with the backend. The request's answer stands. Frequent: look at the database connection | `norviq/api/routers/agents.py` |
+| NRVQ-API-7160 | **`nrvq.api.agent.overrides_warm_skipped`** (ERROR) — the boot warm could not write some frozen or capped agents back (`count=`, `spiffe_ids=` up to 10): their admin lock stayed held (for example by a backend whose API node vanished mid-transaction, ended by Postgres after the admin connection's idle timeouts) or their store fence would not take after re-claiming. Every other agent was written; the attempt fails so the retry tries only these, and NRVQ-API-7035 follows if they never take. Until then those agents are enforced as not frozen / uncapped | `norviq/api/routers/agents.py` |
 | NRVQ-API-7149 | `nrvq.api.agent.trust_write_contended` — another admin trust write held this agent for longer than the lock timeout (3 s, or `db_command_timeout` − 2 s when smaller, never under 0.2 s; waited for in-process first, then in Postgres), so `PUT /agents/{id}/trust`, `DELETE /agents/{id}` (`op=delete`) or the reset answered **503** and applied nothing — except a freeze (`live=true`), which claims the agent's store fence without the lock and is applied live, not persisted. That stops writes claimed before it; a change already under way that claims after it replaces it with the state that change commits | `norviq/api/routers/agents.py` |
 
 ## WHK
@@ -330,7 +331,7 @@ table stays unpartitioned for that range and retention pruning gets slower over 
 | NRVQ-ENG-2003 | `nrvq.engine.fallback` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2004 | `nrvq.engine.cache_hit` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2005 | `nrvq.engine.policy_loaded` | `norviq/engine/evaluator.py` |
-| NRVQ-ENG-2006 | `nrvq.engine.invalid_identity` (invalid SPIFFE id → named fail-closed `invalid_spiffe_identity`). Invalid means what no admin control could cover: not starting with `spiffe://`, empty or only whitespace after it, or over 512 characters — the rule `POST /api/v1/keys` and `PUT /agents/{id}/trust` also apply (`norviq/engine/identity.py::is_controllable_spiffe_id`). Like other fail-closed blocks it is softened in a namespace in monitor mode | `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2006 | `nrvq.engine.invalid_identity` (invalid SPIFFE id → named fail-closed `invalid_spiffe_identity`). Invalid means what no admin control could cover: not starting with `spiffe://`, empty or only whitespace after it, or over 2048 bytes (the SPIFFE limit) — the rule `POST /api/v1/keys` and `PUT /agents/{id}/trust` also apply (`norviq/engine/identity.py::is_controllable_spiffe_id`). Unlike other fail-closed blocks it is NOT softened in a monitor namespace (an identity-integrity failure, like `trust_frozen`), and no registry row is written for such an id | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2057 | `nrvq.engine.unattributed_block` (a block reached persist with empty/`default_allow` rule_id → clamped to `unattributed_block` + alarm) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2058 | `nrvq.engine.posture.mirror_unavailable` (per-ns settings mirror read failed → global posture) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2059 | `nrvq.engine.posture.monitor_softened` (ns audit/monitor mode softened a would-block/escalate to allow-but-log) | `norviq/engine/evaluator.py` |
@@ -412,7 +413,7 @@ NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-
 NRVQ-API-7131, NRVQ-API-7132, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7136, NRVQ-API-7137,
 NRVQ-API-7138, NRVQ-API-7139, NRVQ-API-7140, NRVQ-API-7141, NRVQ-API-7142, NRVQ-API-7143, NRVQ-API-7144,
 NRVQ-API-7145, NRVQ-API-7146, NRVQ-API-7147, NRVQ-API-7149, NRVQ-API-7150, NRVQ-API-7158, NRVQ-API-7159,
-NRVQ-API-7460
+NRVQ-API-7160, NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
 NRVQ-WHK-4007, NRVQ-WHK-4008, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,
