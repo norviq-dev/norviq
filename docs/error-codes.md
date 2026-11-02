@@ -6,13 +6,13 @@ the message text — messages get reworded, codes don't.
 Codes come from log/error literals in `norviq/**/*.py` (control plane, engine, sidecar, SDK, CLI),
 `webhook/*.go` (the Go admission webhook + CRD controller), and `ui/src/**` (one console-side guard).
 
-A code is a **stable identifier for a situation, not a 1:1 alias for one message**. 96 of them are
+A code is a **stable identifier for a situation, not a 1:1 alias for one message**. 95 of them are
 reused across two or more related events (noted inline below) — `NRVQ-DB-9002`, `NRVQ-DB-9003`,
 `NRVQ-API-7099` and `NRVQ-SDC-3032` are the ones most likely to surprise you.
 
 What a code will **never** do is cover both a security signal and ordinary traffic: if a code fires
 on something you would alert on, it does not also fire on a routine read. That is enforced by
-`tests/test_log_code_uniqueness.py`, which also freezes the 96 so the count can only fall. It used
+`tests/test_log_code_uniqueness.py`, which also freezes the 95 so the count can only fall. It used
 to be untrue — `NRVQ-API-7080` once covered `rate_limit.fail_open` alongside `cluster_info.served`,
 so alerting on the throttle failing open also fired on every dashboard view.
 
@@ -23,7 +23,7 @@ individually described.
 
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
-| API | 85 | `norviq/api/main.py`, `norviq/api/routers/*` |
+| API | 87 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | WHK | 55 | `webhook/main.go`, `webhook/handler.go`, `webhook/controller.go`, `webhook/injector.go` |
 | ENG | 46 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | DB | 42 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
@@ -109,7 +109,9 @@ Total unique codes: **410** (including `*-DEBUG-*` traces).
 | NRVQ-API-7024 | `nrvq.api.audit.export` (audit evidence export served) | `norviq/api/routers/audit.py` |
 | NRVQ-API-7032 | `nrvq.api.agents.registry_read_failed` | `norviq/api/routers/agents.py` |
 | NRVQ-API-7033 | `nrvq.api.agent.registry_read_failed` / `agent.trust_persist_failed` / `agents.last_seen_failed` (degraded registry writes; read paths still serve) | `norviq/api/routers/agents.py` |
-| NRVQ-API-7034 / 7035 | `nrvq.api.agent.overrides_warmed` / `overrides_warm_failed` (durable trust-override cache warm at boot and on write) | `norviq/api/routers/agents.py`, `norviq/api/main.py` |
+| NRVQ-API-7034 | `nrvq.api.agent.overrides_warmed` — the boot warm wrote the agent freezes and trust caps recorded in `agent_registry` into the store (`count=` how many). Fires once per API process start, including with `count=0`. It is the only thing besides an admin trust change that writes them, so after the store loses its data they are absent until an API process logs this again | `norviq/api/routers/agents.py` |
+| NRVQ-API-7035 | **`nrvq.startup.agent_overrides_warm_failed`** — every attempt of the boot warm of agent freezes and trust caps failed (`attempts=`, `error=`; 3 attempts, 1 s then 2 s apart, each cut off at 10 s). **Alert on this**: that process serves without having written them, so after a store loss frozen agents are enforced as not frozen and capped ones as uncapped until an API process starts and logs NRVQ-API-7034. Restart the API (`kubectl -n <namespace> rollout restart deployment/norviq-api`) once the cause is fixed. Through 0.2.5 a failed query or store write logged only a WARNING under this code, and the count it returned read like "nothing is frozen" | `norviq/api/routers/agents.py`, `norviq/startup_retry.py`, `norviq/api/main.py` |
+| NRVQ-API-7158 | `nrvq.startup.agent_overrides_warm_retry` — one attempt of the boot warm of agent freezes and trust caps failed, or ran past 10 s, and is retried (`attempt=`, `delay=`; 3 attempts, 1 s then 2 s apart, `norviq.startup_retry.warm_with_backoff`). Transient on its own; NRVQ-API-7035 follows if the last attempt fails too | `norviq/api/routers/agents.py`, `norviq/startup_retry.py` |
 | NRVQ-API-7040 / 7041 | `nrvq.api.ws_audit.open` / `close` (live audit WebSocket) | `norviq/api/main.py` |
 | NRVQ-API-7136 | `nrvq.api.body_too_large` — request body over `max_request_body_bytes` (256 KiB), rejected with **413** before parsing. Alertable: the sidecar turns any 4xx from `/evaluate` into a hard block, so a burst of these is a misconfigured client or an abuse probe, and this log is the only record the cap fired (the reject path returns before the metric) | `norviq/api/body_limit.py` |
 | NRVQ-API-7060 / 7060-ERR | `nrvq.attack_graph.computed` / `computed_all` / `compute_failed` (on-demand attack-path recompute) | `norviq/api/routers/attack_graph_compute.py` |
@@ -128,7 +130,8 @@ Total unique codes: **410** (including `*-DEBUG-*` traces).
 | NRVQ-API-7134 | **`nrvq.api.rate_limit.exceeded`** — the HTTP-layer throttle returned **429** for this route class | `norviq/api/rate_limit.py` |
 | NRVQ-API-7135 | `nrvq.api.policy.priority_band_denied` — a write tried to claim a priority band it isn't allowed to | `norviq/api/routers/policies.py` |
 | NRVQ-API-7137 | `nrvq.api.settings.mirror_failed` — an admin saved per-namespace posture, the row committed and the console shows it applied, but the Redis mirror the evaluator hot path reads did not update. **Alert on this**: enforcement is running on the previous or global posture while the UI claims otherwise | `norviq/api/routers/settings_router.py` |
-| NRVQ-API-7138 | `nrvq.startup.ns_settings_warm_failed` — the boot warm of per-namespace posture failed, so *every* persisted per-ns posture is absent from Redis and the evaluator falls back to global config. Wider blast radius than 7137, same meaning: saved posture is not the posture being enforced | `norviq/api/main.py` |
+| NRVQ-API-7138 | `nrvq.startup.ns_settings_warm_failed` — every attempt of the boot warm of per-namespace posture failed (`attempts=`, `error=`; same schedule as 7035), so after a store loss *every* persisted per-ns posture is absent from Redis and the evaluator falls back to global config until an API process starts and logs NRVQ-API-7063. Wider blast radius than 7137, same meaning: saved posture is not the posture being enforced. Restart the API once the cause is fixed | `norviq/api/routers/settings_router.py`, `norviq/startup_retry.py`, `norviq/api/main.py` |
+| NRVQ-API-7159 | `nrvq.startup.ns_settings_warm_retry` — one attempt of the boot warm of per-namespace posture failed, or ran past 10 s, and is retried (`attempt=`, `delay=`; 3 attempts, 1 s then 2 s apart). Transient on its own; NRVQ-API-7138 follows if the last attempt fails too | `norviq/api/routers/settings_router.py`, `norviq/startup_retry.py` |
 | NRVQ-API-7139 | `nrvq.api.baseline.rematerialized` — at startup, a namespace's saved baseline controls were re-compiled from their stored effects because the stored module differed from what this release compiles, or there was none (`had_module=false`: rows an earlier release saved without writing the module) | `norviq/api/routers/baseline_router.py` |
 | NRVQ-API-7140 | `nrvq.api.baseline.rematerialize_failed` — re-compiling one namespace's saved baseline controls at startup failed; that namespace keeps its old module, which cannot replace the chart's baseline (NRVQ-ENG-2068) | `norviq/api/routers/baseline_router.py` |
 | NRVQ-API-7141 | `nrvq.api.baseline.rematerialize_skipped_foreign` — a `__controls__` policy the baseline controls API did not write (its name is not `baseline-controls:<preset>`) was left as it is | `norviq/api/routers/baseline_router.py` |
@@ -398,7 +401,7 @@ NRVQ-API-7086, NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-
 NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7098, NRVQ-API-7099, NRVQ-API-7100, NRVQ-API-7101,
 NRVQ-API-7102, NRVQ-API-7103, NRVQ-API-7104, NRVQ-API-7105, NRVQ-API-7110, NRVQ-API-7111, NRVQ-API-7112,
 NRVQ-API-7113, NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-API-7123,
-NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7136, NRVQ-API-7137, NRVQ-API-7138, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7460
+NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7136, NRVQ-API-7137, NRVQ-API-7138, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7158, NRVQ-API-7159, NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
 NRVQ-WHK-4007, NRVQ-WHK-4008, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,

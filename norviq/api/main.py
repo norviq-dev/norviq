@@ -220,16 +220,19 @@ async def lifespan(app: FastAPI):
     app.state.audit_fanout_task = asyncio.create_task(_audit_fanout_loop())
     # Seed the per-ns posture mirror from persisted NamespaceSettings so pre-existing rows
     # enforce after a restart / Redis flush (best-effort; the evaluator falls back to global config on a miss).
+    # Retried like the freeze/cap warm below (norviq.startup_retry.warm_with_backoff), ERROR when exhausted.
     try:
-        await settings_router.warm_ns_settings(app.state.cache)
-    except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
+        await settings_router.warm_ns_settings_at_startup(app.state.cache)
+    except Exception as exc:  # noqa: BLE001 — never block startup; the helper itself does not raise
         log.error("nrvq.startup.ns_settings_warm_failed", error=str(exc), code="NRVQ-API-7138")
     # SECURITY (trust fail-open fix): re-seed durable admin freeze/cap from the DB into Redis so a Redis
     # restart/flush cannot leave a killed/capped agent running unpoliced.
+    # Retried with a bounded backoff (norviq.startup_retry.warm_with_backoff) and logged at ERROR
+    # (NRVQ-API-7035) when every attempt fails: nothing else writes these back while this process runs.
     try:
-        from norviq.api.routers.agents import warm_agent_overrides
-        await warm_agent_overrides(app.state.cache)
-    except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
+        from norviq.api.routers.agents import warm_agent_overrides_at_startup
+        await warm_agent_overrides_at_startup(app.state.cache)
+    except Exception as exc:  # noqa: BLE001 — never block startup; the helper itself does not raise
         log.error("nrvq.startup.agent_overrides_warm_failed", error=str(exc), code="NRVQ-API-7035")
     # Seed the evaluator's promoted-verb map. `_derived_input` is synchronous (it runs inside the hot
     # path's _build_input), so it can never await a DB read — the map has to be warmed out-of-band here

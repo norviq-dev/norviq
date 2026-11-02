@@ -18,6 +18,7 @@ from norviq.api.db.session import get_session
 from norviq.api.graph_maintenance import try_remove_graph_node
 from norviq.api.synthetic import is_synthetic_identity  # the ONE shared synthetic/probe classifier
 from norviq.sdk.core.trust import TrustScore
+from norviq.startup_retry import warm_with_backoff
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -513,8 +514,12 @@ async def update_trust(
 
 async def warm_agent_overrides(cache, session_factory=get_session) -> int:
     """SECURITY (fail-open fix): at startup, re-seed durable admin freeze/cap from agent_registry into Redis so
-    a Redis restart/flush (which loses the ephemeral agent_frozen:/override keys) can NEVER leave a killed or
-    capped agent running unpoliced. Mirrors settings_router.warm_ns_settings. Best-effort; returns count seeded."""
+    a Redis restart/flush (which loses the ephemeral agent_frozen:/override keys) does not leave a killed or
+    capped agent running unpoliced. Returns the count seeded.
+
+    RAISES on any failure. It used to catch its own error, log a WARNING and return the count reached (0 when
+    the query failed), which reads exactly like "nothing is frozen" while every freeze stayed absent until
+    the next restart. The SETs are idempotent, so the caller can simply run it again."""
     provider = session_factory()
     session = await provider.__anext__()
     seeded = 0
@@ -530,11 +535,23 @@ async def warm_agent_overrides(cache, session_factory=get_session) -> int:
                 await cache.set_trust_override(r["spiffe_id"], float(r["trust_cap"]))
                 seeded += 1
         log.info("nrvq.api.agent.overrides_warmed", count=seeded, code="NRVQ-API-7034")
-    except Exception as exc:  # noqa: BLE001 - warm is best-effort; a DB hiccup must not block startup
-        log.warning("nrvq.api.agent.overrides_warm_failed", error=str(exc), code="NRVQ-API-7035")
     finally:
         await provider.aclose()
     return seeded
+
+
+async def warm_agent_overrides_at_startup(cache, session_factory=get_session) -> int | None:
+    """warm_agent_overrides under norviq.startup_retry.warm_with_backoff: 3 attempts, 1 s then 2 s apart,
+    each cut off at 10 s, logging nrvq.startup.agent_overrides_warm_retry (WARNING, NRVQ-API-7158) per
+    failed attempt and nrvq.startup.agent_overrides_warm_failed (ERROR, NRVQ-API-7035) when all fail.
+    Returns the count seeded, or None. Never raises. Nothing else writes these back while this process
+    runs, so a transient failure here would otherwise leave them absent until the next restart."""
+    return await warm_with_backoff(
+        lambda: warm_agent_overrides(cache, session_factory),
+        "agent_overrides_warm",
+        retry_code="NRVQ-API-7158",
+        fail_code="NRVQ-API-7035",
+    )
 
 
 @router.delete("/agents/{spiffe_id:path}")

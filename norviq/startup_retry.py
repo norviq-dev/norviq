@@ -46,3 +46,38 @@ async def connect_with_backoff(
             await asyncio.sleep(delay)
             delay *= 2
     raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
+
+
+# Startup WARMS (copying state Postgres holds into the store the engine enforces from) are not
+# connections: by the time they run, both stores answered. A failed warm is retried, then logged at ERROR
+# and startup goes on, because refusing to start would not put the state back either. 3 attempts, 1 s
+# then 2 s apart, each cut off at 10 s, so one warm costs at most 3 x 10 + 3 = 33 s of startup and the
+# API's two warms 66 s. With the API lifespan's three connect_with_backoff steps (Postgres, Redis, the
+# revocation load) at their refused-store bound, about 15 s each, that is 111 s of the API
+# startupProbe's 160 s (10 + 30 x 5). The cut-off also bounds a store
+# that stops answering, which has no client-side timeout of its own.
+WARM_ATTEMPTS = 3
+WARM_ATTEMPT_TIMEOUT_S = 10.0
+
+
+async def warm_with_backoff(
+    coro_factory: Callable[[], Awaitable[T]],
+    name: str,
+    retry_code: str,
+    fail_code: str,
+    attempts: int = WARM_ATTEMPTS,
+    attempt_timeout_s: float | None = None,
+) -> T | None:
+    """connect_with_backoff for a startup warm: each attempt bounded by `attempt_timeout_s`, and None
+    instead of a raise once every attempt failed (connect_with_backoff has logged `fail_code` at ERROR).
+    The warm must be idempotent: an attempt cut off part-way is simply run again."""
+
+    timeout_s = WARM_ATTEMPT_TIMEOUT_S if attempt_timeout_s is None else attempt_timeout_s
+
+    async def _attempt() -> T:
+        return await asyncio.wait_for(coro_factory(), timeout_s)
+
+    try:
+        return await connect_with_backoff(_attempt, name, retry_code, fail_code, attempts)
+    except Exception:  # noqa: BLE001 - logged at ERROR by connect_with_backoff; startup goes on
+        return None

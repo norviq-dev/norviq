@@ -193,7 +193,10 @@ from `alpine:3.21` to `alpine:3.24`: Alpine 3.21 left security support on 2026-1
 
 **Fixed.** `global.imageRegistry` relocates the busybox init image. An agent that retries one refused
 call no longer loses trust on every attempt. Two security booleans no longer fall back to off when an
-overlay nulls them. The stdio MCP proxy warns when its pin store degrades.
+overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
+caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
+it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way
+before its ERROR, `NRVQ-API-7138`.
 
 ## [0.2.5] — 2026-08-20 — log codes that named two things at once
 

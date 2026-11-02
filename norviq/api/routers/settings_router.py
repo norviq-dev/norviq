@@ -15,6 +15,7 @@ from norviq.api.auth import get_current_user, require_admin, require_target_clus
 from norviq.api.db.models import NamespaceSettings
 from norviq.api.db.session import get_session
 from norviq.config import settings as app_settings
+from norviq.startup_retry import warm_with_backoff
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -44,6 +45,20 @@ async def warm_ns_settings(cache, session_factory=get_session) -> None:
         log.info("nrvq.api.settings.warmed", count=len(rows), code="NRVQ-API-7063")
     finally:
         await provider.aclose()
+
+
+async def warm_ns_settings_at_startup(cache, session_factory=get_session) -> bool:
+    """warm_ns_settings under norviq.startup_retry.warm_with_backoff, the same schedule as the freeze/cap
+    warm: 3 attempts, 1 s then 2 s apart, each cut off at 10 s. Logs nrvq.startup.ns_settings_warm_retry
+    (WARNING, NRVQ-API-7159) per failed attempt and nrvq.startup.ns_settings_warm_failed (ERROR,
+    NRVQ-API-7138) when all fail; it used to be one attempt. True when a warm completed. Never raises."""
+
+    async def _warm() -> bool:
+        await warm_ns_settings(cache, session_factory)
+        return True
+
+    return bool(await warm_with_backoff(_warm, "ns_settings_warm", retry_code="NRVQ-API-7159",
+                                        fail_code="NRVQ-API-7138"))
 
 
 class SettingsUpdate(BaseModel):

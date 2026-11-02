@@ -100,7 +100,6 @@ KNOWN_DUPLICATES: dict[str, tuple[str, ...]] = {
     "NRVQ-API-7019": ('nrvq.api.policy.overlay_audit_mode_refused', 'nrvq.api.policy.write_scope_denied'),
     "NRVQ-API-7020": ('nrvq.api.audit.listed', 'nrvq.api.deployments.listed'),
     "NRVQ-API-7033": ('nrvq.api.agent.registry_read_failed', 'nrvq.api.agent.trust_persist_failed', 'nrvq.api.agents.last_seen_failed'),
-    "NRVQ-API-7035": ('nrvq.api.agent.overrides_warm_failed', 'nrvq.startup.agent_overrides_warm_failed'),
     "NRVQ-API-7040": ('nrvq.api.tools.list', 'nrvq.api.ws_audit.open'),
     "NRVQ-API-7060": ('nrvq.attack_graph.computed', 'nrvq.attack_graph.computed_all'),
     "NRVQ-API-7080": ('nrvq.api.cluster_info.served', 'nrvq.api.mitre.generate_no_classes'),
