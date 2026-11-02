@@ -32,6 +32,7 @@ import asyncio
 import collections
 import contextlib
 import hashlib
+import http.cookiejar
 import json
 import uuid
 import weakref
@@ -774,10 +775,7 @@ class HttpProxy:
         # first_seen TOFU decision this pod would then never reconcile with the shared store.
         await self._install_pin_store()
         await self._install_server_registry()
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0, connect=5.0),
-            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
-        )
+        self._client = _upstream_client()
         app = Starlette(routes=[
             Route("/mcp", self._handle_post, methods=["POST"]),
             Route("/mcp", self._handle_get, methods=["GET"]),
@@ -898,6 +896,36 @@ class _EventIds:
         self.entries[minted] = (server_id, origin, stream)
         self.bytes += len(server_id)
         return minted
+
+
+class _NoCookies(http.cookiejar.DefaultCookiePolicy):
+    """Accept no cookie, return no cookie."""
+
+    def set_ok(self, cookie, request):  # noqa: D401 - CookiePolicy interface
+        return False
+
+    def return_ok(self, cookie, request):
+        return False
+
+
+def _upstream_client(transport: Any = None) -> httpx.AsyncClient:
+    """The one client the proxy talks to the upstream with — WITHOUT a cookie jar that remembers.
+
+    httpx keeps the cookies a server sets and sends them on every later request from the same client,
+    and this one client serves every caller of the proxy: a session cookie the server set for one
+    caller went out on another caller's requests, including the proxy's own self-lists and post-backs,
+    which are documented to carry no cookie. A client's own `Cookie` header still travels on that
+    client's forwarded requests, as any request header does.
+    """
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(60.0, connect=5.0),
+        limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+        transport=transport,
+    )
+    # On the client's own jar: httpx copies a jar passed as `cookies=` into a fresh default one, which
+    # would drop the policy.
+    client.cookies.jar.set_policy(_NoCookies())
+    return client
 
 
 def _connection_headers(request: Request) -> dict[str, str]:
