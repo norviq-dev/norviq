@@ -479,38 +479,93 @@ async def update_trust(
       score == 0    → FREEZE (block every call) + clear any cap.
       0 < score < 1 → a tighten-only trust CAP: the engine uses min(computed, score), so this can force a
                       misbehaving agent toward escalate/frozen but never RAISE trust above what behavior earns.
-      score == 1.0  → CLEAR both the freeze and the cap (back to purely behavioral trust)."""
+      score == 1.0  → CLEAR both the freeze and the cap (back to purely behavioral trust).
+
+    The route answers 200 only once ``agent_registry`` holds the new state; a failed database write is a 503.
+    An identity with no registry row (never called in) gets one carrying the freeze or cap: the evaluator's
+    first-call upsert (``upsert_agent_registry``) does not touch ``frozen``/``trust_cap``, so the control
+    survives that call, a Redis flush and an API restart (``warm_agent_overrides``)."""
     require_admin(user)
     cache = request.app.state.cache
-    if body.score == 0:
+    frozen = body.score == 0
+    cap = body.score if (0 < body.score < 1.0) else None
+    # Order. The freeze is the emergency kill-switch and only ever tightens, so it goes live in Redis BEFORE
+    # the database write: an outage of Postgres must not stop an admin stopping an agent, and the 503 below
+    # still tells them it is not durable yet. A cap or a clear can LOOSEN (it lifts a freeze), so it is
+    # persisted first and reaches Redis only after the commit — a failed write then changes nothing, rather
+    # than lifting a freeze live that the next restart (warm_agent_overrides) quietly puts back.
+    if frozen:
+        await _apply_live_trust(cache, spiffe_id, body.score)
+    try:
+        await _persist_trust_control(session, spiffe_id, frozen, cap, body.score)
+    except Exception as exc:  # noqa: BLE001 - any failure here means the control is not durable
+        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=str(exc),
+                    live=frozen, code="NRVQ-API-7033")
+        # Fail closed: before 0.2.6 this was swallowed and the route returned 200, so a "frozen" agent
+        # un-froze on the next Redis flush and the caller had been told it was done.
+        detail = ("Freeze applied live but NOT persisted; it is lost on a Redis flush or restart. Retry."
+                  if frozen else "Trust change not applied: the registry write failed. Retry.")
+        raise HTTPException(status_code=503, detail=detail) from exc
+    if not frozen:
+        await _apply_live_trust(cache, spiffe_id, body.score)
+    trust = TrustScore(score=body.score, category="frozen" if frozen else "")
+    await cache.set_trust(spiffe_id, trust)
+    log.info("nrvq.api.agent.trust_updated", spiffe_id=spiffe_id, score=body.score, frozen=frozen, cap=cap,
+             code="NRVQ-API-7031")
+    return {"spiffe_id": spiffe_id, "score": trust.score, "category": trust.category.lower()}
+
+
+async def _apply_live_trust(cache, spiffe_id: str, score: float) -> None:
+    """Mirror one PUT .../trust state into the Redis keys the trust calculator reads on every call."""
+    if score == 0:
         await cache._client().set(f"agent_frozen:{spiffe_id}", "1")
         await cache.clear_trust_override(spiffe_id)
-    elif body.score >= 1.0:
+    elif score >= 1.0:
         await cache._client().delete(f"agent_frozen:{spiffe_id}")
         await cache.clear_trust_override(spiffe_id)
     else:
         await cache._client().delete(f"agent_frozen:{spiffe_id}")
-        await cache.set_trust_override(spiffe_id, body.score)
-    trust = TrustScore(score=body.score, category="frozen" if body.score == 0 else "")
-    await cache.set_trust(spiffe_id, trust)
-    # SECURITY (fail-open fix): persist the freeze/cap DURABLY (source of truth). The engine enforces from Redis
-    # only; warm_agent_overrides writes this back when an API process starts. A Redis flush/restart/failover
-    # while the API runs lifts the kill-switch until the next API start (trust-score-design §5 known gap).
-    # Best-effort UPDATE of the registered agent's row; an unregistered agent gets its durable state stamped
-    # on its next registration path if needed — the common case (freezing a known misbehaving agent) is covered.
-    frozen = body.score == 0
-    cap = body.score if (0 < body.score < 1.0) else None
-    try:
-        await session.execute(
-            text("UPDATE agent_registry SET frozen = :f, trust_cap = :c WHERE spiffe_id = :s"),
-            {"f": frozen, "c": cap, "s": spiffe_id},
+        await cache.set_trust_override(spiffe_id, score)
+
+
+async def _persist_trust_control(session: AsyncSession, spiffe_id: str, frozen: bool, cap: float | None,
+                                 score: float) -> None:
+    """Write the freeze/cap to agent_registry, the durable copy warm_agent_overrides re-seeds Redis from.
+
+    A freeze or cap UPSERTS: the previous plain UPDATE matched no row for an identity that had never called
+    in (or had been deregistered), so the control lived only in Redis while the route said 200. A clear only
+    UPDATEs — with no row there is nothing durable to clear, and inserting one would list a phantom agent."""
+    from sqlalchemy.dialects.postgresql import insert
+
+    from norviq.api.db.models import AgentRegistryEntry
+
+    if frozen or cap is not None:
+        now = datetime.now(timezone.utc)
+        stmt = insert(AgentRegistryEntry).values(
+            spiffe_id=spiffe_id,
+            # The same fallbacks the evaluator's write-through uses, so its first call lands on this row.
+            namespace=_namespace_from_spiffe(spiffe_id) or "default",
+            agent_class=_class_from_spiffe(spiffe_id) or "",
+            # Display only, until the evaluator's first call overwrites them: a cap is the highest score
+            # the agent can have, so it is shown in the band the console would put that score in.
+            trust_score=score,
+            trust_category="Frozen" if frozen else ("High" if score >= 0.7 else "Medium" if score >= 0.4 else "Low"),
+            violation_count=0,
+            last_seen=now,
+            created_at=now,
+            frozen=frozen,
+            trust_cap=cap,
         )
-        await session.commit()
-    except Exception as exc:  # noqa: BLE001 - durability is best-effort; the Redis write already took effect
-        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=str(exc), code="NRVQ-API-7033")
-    log.info("nrvq.api.agent.trust_updated", spiffe_id=spiffe_id, score=body.score, frozen=frozen, cap=cap,
-             code="NRVQ-API-7031")
-    return {"spiffe_id": spiffe_id, "score": trust.score, "category": trust.category.lower()}
+        # Only the two control columns on conflict: the row's identity, score and counters belong to the
+        # evaluator's write-through and are not the admin's to overwrite.
+        stmt = stmt.on_conflict_do_update(index_elements=["spiffe_id"], set_={"frozen": frozen, "trust_cap": cap})
+        await session.execute(stmt)
+    else:
+        await session.execute(
+            text("UPDATE agent_registry SET frozen = false, trust_cap = NULL WHERE spiffe_id = :s"),
+            {"s": spiffe_id},
+        )
+    await session.commit()
 
 
 async def warm_agent_overrides(cache, session_factory=get_session) -> int:

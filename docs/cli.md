@@ -423,18 +423,18 @@ So `norviq agent reset-trust <id>`, with its default `--score 0.8`, *installs a 
 command that actually undoes a freeze or a cap is `norviq agent reset-trust <id> --score 1.0`. The
 name is misleading; the behavior above is what the endpoint does.
 
-Both writes are *intended* to be durable, and mostly are: after the Redis write the endpoint stamps
-`frozen`/`trust_cap` onto `agent_registry` (`norviq/api/routers/agents.py::update_trust`), and
+Both writes are durable. The endpoint answers `200` only once `agent_registry` holds the new
+`frozen`/`trust_cap` (`norviq/api/routers/agents.py::_persist_trust_control`), and
 `norviq/api/routers/agents.py::warm_agent_overrides` re-seeds those columns into Redis when an API
 process starts. Nothing re-seeds them while it runs, so a store flush, a restart without persistence or
 a failover lifts every freeze and cap until the API restarts
 (`kubectl -n <namespace> rollout restart deployment/norviq-api`; `docs/trust-score-design.md` §5).
-Two more limits before you rely on it. The DB write is
-**best-effort**: it sits inside a `try/except` that logs `NRVQ-API-7033` and lets the call return
-`200` anyway — a successful `Agent frozen:` line is not proof the freeze was persisted. And it is an
-`UPDATE … WHERE spiffe_id = :s`, so an agent that has no `agent_registry` row yet gets no durable
-record at all; the code's own note in `update_trust` says such an agent is stamped on its next
-registration path. Freezing an agent the registry already knows about is the covered case.
+An agent the registry has never seen gets a row carrying the freeze or cap; the engine's write-through
+on the agent's first call (`norviq/api/db/session.py::upsert_agent_registry`) does not touch those two
+columns. If the database write fails the command exits non-zero on a `503`: a freeze is then already in
+force but not yet durable (retry it), and a cap or a clear has changed nothing. The retention pruner
+never ages out a frozen or capped agent
+(`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
 
 One cosmetic wart: `reset-trust` echoes the category the endpoint returns, and the endpoint builds
 that response with `category=""` for any non-zero score (`norviq/api/routers/agents.py::update_trust`).
@@ -689,7 +689,6 @@ planned features; they are what the code does today.
 | `policy versions`/`rollback` see only the 10 newest versions the loader holds in memory | `norviq/engine/policy_loader.py::_MAX_VERSIONS`, `norviq/engine/policy_loader.py::PolicyLoader.rollback` |
 | `policy dry-run` never surfaces `newly_blocked` / `newly_blocked_samples` — the flips | `norviq/cli/main.py::policy_dry_run` |
 | `agent reset-trust` installs a cap at `--score` (default 0.8); only `--score 1.0` clears | `norviq/api/routers/agents.py::update_trust` |
-| A freeze/cap on an agent with no `agent_registry` row persists nowhere, and the DB write is best-effort | `norviq/api/routers/agents.py::update_trust` |
 | `config set` prints success and changes nothing | `norviq/cli/main.py::config_set` |
 | `audit list` includes red-team/synthetic rows that `audit stats` excludes | `norviq/cli/main.py::audit_list`, `norviq/api/routers/audit.py::audit_stats` |
 | `agent list` cannot filter by namespace or set a limit, though the endpoint supports both | `norviq/cli/main.py::agent_list` |

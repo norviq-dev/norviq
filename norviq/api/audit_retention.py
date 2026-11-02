@@ -146,12 +146,16 @@ class RetentionPruner:
     async def _prune_agent_registry(self, session) -> int:
         """agent_registry identities unseen for agent_registry_retention_days (<=0 disables). Removes
         decommissioned/churned agents that would otherwise be listed forever and surface as phantom
-        'awaiting' nodes on the asset graph."""
+        'awaiting' nodes on the asset graph.
+
+        Never a FROZEN or CAPPED identity: the row is the durable copy of the admin's freeze/cap, so aging it
+        out lifted the control as a side effect — the agent came back unfrozen after the next Redis restart.
+        A quarantined agent is quiet by design, which is exactly what `last_seen` reads as decommissioned."""
         days = int(getattr(settings, "agent_registry_retention_days", 0))
         if days <= 0:
             return 0
         result = await session.execute(
-            text("DELETE FROM agent_registry WHERE last_seen < :cutoff"),
+            text("DELETE FROM agent_registry WHERE last_seen < :cutoff AND frozen = false AND trust_cap IS NULL"),
             {"cutoff": datetime.now(timezone.utc) - timedelta(days=days)},
         )
         return result.rowcount or 0

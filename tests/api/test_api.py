@@ -191,6 +191,10 @@ class FakeSession:
         _replay_recent)."""
         return SimpleNamespace(all=lambda: self.rows)
 
+    async def commit(self) -> None:
+        """No-op commit. PUT /agents/{id}/trust commits its durable write and answers 503 when that fails;
+        before it did, a double without commit() passed only because the failure was swallowed."""
+
     async def close(self) -> None:
         """No-op close."""
 
