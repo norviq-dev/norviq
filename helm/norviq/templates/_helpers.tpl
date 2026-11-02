@@ -251,8 +251,9 @@ values.yaml made it worse by telling operators that with `existingSecret` the ot
 unused" — `host` was still being used, here.
 
 Skipping is safe. This gate is a convenience that avoids a few CrashLoopBackOffs while the bundled
-StatefulSets come up; it is not a correctness mechanism. The app retries its own connections, and a
-managed datastore is up before the release is installed. Waiting on a name that cannot resolve is
+StatefulSets come up; it is not a correctness mechanism. api and engine retry their own first
+connection to each store (5 attempts, 1/2/4/8 s apart, about 15 s; norviq/startup_retry.py) and then
+fail startup so the pod restarts, and a managed datastore is up before the release is installed. Waiting on a name that cannot resolve is
 strictly worse than not waiting.
 */}}
 {{- define "norviq.waitFor" -}}

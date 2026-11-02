@@ -108,6 +108,18 @@ async def init_db() -> None:
     log.info("nrvq.db.connected", pool_size=settings.pg_pool_size, code="NRVQ-DB-9000")
 
 
+async def ping_db() -> None:
+    """Open one connection and run `SELECT 1`: the API's first real contact with Postgres.
+
+    `init_db` builds the engine lazily and connects to nothing, so this is what the startup retry in
+    norviq/api/main.py wraps. Raises whatever the driver raises (refused, unresolvable, timeout, auth).
+    """
+    if _engine is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    async with _engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+
+
 # Schema init contends across EVERY api process, not every pod. The chart runs api.workers: 4 across
 # api.replicas: 2, so eight processes call create_tables() at once and seven of them queue on one
 # advisory lock — while the connection carries the ordinary NRVQ_DB_COMMAND_TIMEOUT (10s by default).

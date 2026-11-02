@@ -228,14 +228,16 @@ The datastore waits render only when the chart knows the host. Rendered with `he
 | `existingSecret` only | **none** | **none** | `wait-for-api` |
 | `existingSecret` + `postgresql.host=mydb.example.com` + `redis.host=mycache.example.com` | `nc -z mydb.example.com 5432`, `nc -z mycache.example.com 6379` | same | `wait-for-api` |
 
-Without the gate, startup against a datastore that is not reachable yet goes like this. The **API**
-connects to Postgres first, in schema init, which retries only a timeout (5 attempts, 3/6/9/12 s
-apart); a refused or unresolvable host fails startup at once (`NRVQ-DB-DEBUG-2-ERR`). It then retries
-the Redis connect 5 times, sleeping 1, 2, 4 and 8 s between attempts (about 15 s), and exits with
-`NRVQ-REG-9034`. The **engine** does not retry either connection: it exits on the first failure, and
-waits (up to 60 s) only for the API to create the schema. Either way the kubelet restarts the container
-with its usual backoff, so an unreachable or mistyped datastore shows as `CrashLoopBackOff` with those
-log lines, not as a pod waiting in `Init`. A managed datastore that is already up when you install is
+Without the gate, api and engine wait on their own. Each retries its first connection to each store
+5 times, sleeping 1, 2, 4 and 8 s between attempts, so a store that refuses connections is given up on
+after about 15 s (measured 15.1 s against a refused port): the API logs `NRVQ-DB-9035` / `NRVQ-REG-9035`
+per retry and `NRVQ-DB-9034` / `NRVQ-REG-9034` when it gives up, the engine `NRVQ-SDC-3045` and
+`NRVQ-SDC-3046`. (The engine's Postgres retry covers only an unreachable store; a wrong password there
+fails at once.) Startup then fails and the kubelet restarts the container with its usual backoff, so a
+datastore that stays unreachable or is mistyped shows as `CrashLoopBackOff` with those log lines, not as
+a pod waiting in `Init`. The engine's Postgres retries share one 60 s deadline with its wait for the
+API to create the schema; they do not add to it (a black-holed host, where one connect attempt can
+itself take 60 s, can overrun it). A managed datastore that is already up when you install is
 unaffected.
 
 To get the wait back, set `postgresql.host` / `redis.host` (and `port`, if not 5432 / 6379) next to

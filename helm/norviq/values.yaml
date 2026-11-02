@@ -629,7 +629,7 @@ redis:
   # history) or the chart's own Secret. Set `host` (and `port`, if not 6379) as well if you want the
   # readiness gate to wait on the cache before api/engine start — the chart cannot read an address out
   # of your Secret at template time, so with `existingSecret` alone the gate is skipped and the pods
-  # start at once (the API retries the connect for ~15s, the engine not at all; then the pod restarts).
+  # start at once (api and engine retry the connect for ~15s, then the pod restarts).
   # `host` only adds the gate; the URL still comes from the Secret, so keep the two in agreement or the
   # gate waits on the wrong address. Create it with e.g.:
   #   kubectl create secret generic my-redis --from-literal=url='rediss://:PW@host:6380/0'
@@ -694,7 +694,7 @@ postgresql:
   # The URL carries user/password/host/port/database. Set `host` as well if you want the readiness
   # gate to wait on the datastore before api/engine start — the chart cannot read an address out of
   # your Secret at template time, so with `existingSecret` alone the gate is skipped and the pods
-  # start at once (a refused connection fails startup and the pod restarts). `host` only adds the gate;
+  # start at once (api and engine retry the connect for ~15s, then the pod restarts). `host` only adds the gate;
   # keep it in agreement with the Secret's URL or the gate waits on the wrong address. (It previously
   # waited on the BUNDLED service name here, which `enabled: false` never creates, and pods sat in
   # Init:0/2 forever.) Every other key below is unused, except `port`, which the gate dials. Create it with:

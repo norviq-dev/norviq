@@ -25,9 +25,29 @@ from norviq.sdk.core.events import ToolCallEvent
 from norviq.telemetry.metrics import record_path_phase
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.sidecar.remote_evaluator import RemoteEvaluator
+from norviq.startup_retry import STARTUP_ATTEMPTS, connect_with_backoff
 
 log = structlog.get_logger()
 
+
+
+# SQLSTATE 57P03 cannot_connect_now: the server is up but still starting (or shutting down).
+_PG_NOT_READY_SQLSTATES = frozenset({"57P03"})
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """True when the datastore could not be reached YET, as opposed to answering with a real error.
+
+    Refused, unresolvable and timed-out connections are all OSError (TimeoutError is one since 3.3), raw
+    or as SQLAlchemy's `.orig`. A password failure (28P01) or a bad row is not: retrying those only delays
+    the same failure, so they surface at once.
+    """
+    for err in (exc, getattr(exc, "orig", None)):
+        if err is None:
+            continue
+        if isinstance(err, OSError) or getattr(err, "sqlstate", None) in _PG_NOT_READY_SQLSTATES:
+            return True
+    return False
 
 
 def _is_missing_schema(exc: BaseException) -> bool:
@@ -115,6 +135,7 @@ class SidecarProxy:
         """
         deadline = time.monotonic() + self._SCHEMA_WAIT_S
         attempt = 0
+        unreachable = 0
         while True:
             attempt += 1
             try:
@@ -125,6 +146,27 @@ class SidecarProxy:
                     )
                 return
             except Exception as exc:  # noqa: BLE001 — narrowed immediately below; anything else re-raises
+                if _is_unreachable(exc):
+                    # Postgres not reachable yet: the same bounded 1/2/4/8 s backoff as the API, sharing the
+                    # schema deadline. A refused or unresolvable store gives up in ~15 s, well inside the
+                    # injected sidecar's 90s startupProbe. Not guaranteed in the worst case: the deadline is
+                    # checked only between attempts, and a black-holed Postgres spends asyncpg's 60 s connect
+                    # timeout inside one attempt, so after a slow Redis the start can run ~110-127 s and the
+                    # kubelet restarts the container before NRVQ-SDC-3046 is logged. Same outcome: a restart.
+                    unreachable += 1
+                    if unreachable >= STARTUP_ATTEMPTS or time.monotonic() >= deadline:
+                        log.error(
+                            "nrvq.sidecar.datastore_unreachable", store="postgres", attempts=unreachable,
+                            error=str(exc), code="NRVQ-SDC-3046",
+                        )
+                        raise
+                    delay = 2 ** (unreachable - 1)
+                    log.warning(
+                        "nrvq.sidecar.datastore_retry", store="postgres", attempt=unreachable, delay=delay,
+                        error=str(exc), code="NRVQ-SDC-3045",
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 if not _is_missing_schema(exc) or time.monotonic() >= deadline:
                     raise
                 log.info(
@@ -140,7 +182,11 @@ class SidecarProxy:
         if settings.sidecar_mode == "embedded":
             # Air-gapped/edge: full local engine (needs NRVQ_REDIS_URL/NRVQ_PG_URL/NRVQ_OPA_* wired in).
             self._cache = RedisCache()
-            await self._cache.connect()
+            # Retried like the API's: with `existingSecret` and no `host` the chart renders no wait init
+            # container, and this used to raise on the first refused connection.
+            await connect_with_backoff(
+                self._cache.connect, "engine_cache_connect", retry_code="NRVQ-SDC-3045", fail_code="NRVQ-SDC-3046",
+            )
             self._evaluator = OPAEvaluator(self._cache)
             self._loader = PolicyLoader(self._cache, self._evaluator)
             await self._warm_cache_once_the_schema_exists()

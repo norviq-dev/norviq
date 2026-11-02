@@ -293,7 +293,7 @@ Multi-cluster fleet. Spoke relay + hub fleet-api. Distinct prefix from `NRVQ-AUT
 | NRVQ-DB-9010..9028 | cache connect/hit/set/invalidate + token-revocation + per-ns posture mirror + 9028 hashed-policy-key legacy-entry skip | `norviq/engine/cache.py` |
 | NRVQ-DB-9030..9031 | cache pubsub listen/receive | `norviq/engine/cache.py` |
 | NRVQ-DB-9032 | cache pubsub policy-mutation subscribe (`nrvq.cache.policy_mutations_listening`) | `norviq/engine/cache.py` |
-| NRVQ-DB-9034 / 9035 | `init_db` connect **exhausted** its backoff / a single connect attempt is being retried. The equivalent pair for the Redis cache connect is `NRVQ-REG-9034` / `NRVQ-REG-9035` — an inconsistent prefix, but that is what the code emits. | `norviq/api/main.py` |
+| NRVQ-DB-9034 / 9035 | The API's first Postgres connection (`ping_db`, a `SELECT 1` after `init_db` builds the engine) **exhausted** its backoff / one attempt failed and is being retried. 5 attempts, sleeping 1, 2, 4, 8 s between them: a refused Postgres gives up after about 15 s, then startup fails and the pod restarts. Event names keep the old `nrvq.startup.init_db_retry` / `_failed`. The equivalent pair for the Redis cache connect is `NRVQ-REG-9034` / `NRVQ-REG-9035` (same schedule) — an inconsistent prefix, but that is what the code emits. | `norviq/api/main.py`, `norviq/startup_retry.py` |
 | NRVQ-DB-DEBUG-* | startup/connect/create-table diagnostics | `norviq/api/main.py`, `norviq/api/db/session.py` |
 
 ### NRVQ-DB-9003 — `nrvq.db.partition_create_failed`
@@ -361,6 +361,7 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 | NRVQ-SDC-3032 | Two events, both about proxy mode: `nrvq.sidecar.mode.proxy` (startup, with the resolved `api_url`) and `nrvq.sidecar.remote_evaluator.mtls_enabled` (the injected client cert/CA were accepted and internal mTLS is active). Both are startup INFO. **`remote_evaluator.fail_open` was also on this code and is now `NRVQ-SDC-3036`** — a filter written for these two was silencing it | `norviq/sidecar/proxy.py`, `norviq/sidecar/remote_evaluator.py` |
 | NRVQ-SDC-3036 | **`nrvq.sidecar.remote_evaluator.fail_open`** — the control plane was unreachable (5xx/timeout/connect error) and `sdk_fallback_mode` is `allow`, so this tool call ran **unjudged** with `rule_id="thin_proxy_fail_open"`. This is the signal that agents are currently ungoverned. Deliberately not on 3032 with the startup INFO lines, because a filter written for those hides it | `norviq/sidecar/remote_evaluator.py` |
 | **NRVQ-SDC-3033** | `nrvq.sidecar.mode.embedded` — this workload evaluates **locally** with its own `RedisCache` + OPA + `PolicyLoader` instead of proxying to the central API. Expected on the `norviq-engine` Deployment, which pins `NRVQ_SIDECAR_MODE=embedded`, and on air-gapped/edge injected sidecars. Seeing it on a pod you expected to be a thin proxy means `NRVQ_SIDECAR_MODE` was overridden. | `norviq/sidecar/proxy.py` |
+| NRVQ-SDC-3045 / 3046 | Embedded engine startup could not reach a datastore: one attempt failed and is being retried (WARNING, `nrvq.startup.engine_cache_connect_retry` for Redis, `nrvq.sidecar.datastore_retry` with `store=postgres` for the policy warm) / the bounded backoff is **exhausted** and startup fails, so the pod restarts (ERROR, `…_failed` / `nrvq.sidecar.datastore_unreachable`). Same 1, 2, 4, 8 s schedule as the API (about 15 s per store). The Redis connect retries any error, like the API's; the Postgres warm retries only an unreachable store (refused, unresolvable, timed out, Postgres 57P03), so an auth failure or a bad row surfaces at once. | `norviq/sidecar/proxy.py`, `norviq/startup_retry.py` |
 
 ## REG / GRP / AUD / RED / TEL / CLI / SDK / IDT
 
@@ -446,7 +447,8 @@ NRVQ-REG-5022, NRVQ-REG-5023, NRVQ-REG-9034, NRVQ-REG-9035
 
 NRVQ-SDC-3000, NRVQ-SDC-3001, NRVQ-SDC-3002, NRVQ-SDC-3003, NRVQ-SDC-3004, NRVQ-SDC-3005, NRVQ-SDC-3006,
 NRVQ-SDC-3010, NRVQ-SDC-3011, NRVQ-SDC-3012, NRVQ-SDC-3013, NRVQ-SDC-3020, NRVQ-SDC-3021, NRVQ-SDC-3022,
-NRVQ-SDC-3023, NRVQ-SDC-3024, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3036, NRVQ-SDC-3033
+NRVQ-SDC-3023, NRVQ-SDC-3024, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3036, NRVQ-SDC-3033,
+NRVQ-SDC-3045, NRVQ-SDC-3046
 
 NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005,
 NRVQ-AUTH-14006, NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013,

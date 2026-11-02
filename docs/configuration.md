@@ -74,9 +74,9 @@ helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n no
 Add `--set postgresql.host=mydb.example.com --set redis.host=mycache.example.com` (the hosts in those
 URLs) if api and engine should wait for the datastores before they start. The chart cannot read the
 address out of your Secret, so with `existingSecret` alone it renders **no** wait init containers: api
-and engine start at once and rely on their own startup handling, which is short (the API retries Redis
-for about 15 s and does not retry a refused Postgres; the engine retries neither) and ends in a
-container restart, so a datastore that is not reachable yet shows as `CrashLoopBackOff` until it is.
+and engine start at once and rely on their own startup retry, which is short (5 attempts over about
+15 s per store) and ends in a container restart, so a datastore that is not reachable yet shows as
+`CrashLoopBackOff` until it is.
 `host` only adds the wait: the URL still comes from the Secret. A `host` that disagrees with the
 Secret's URL makes the wait watch the wrong address. See
 [deployment.md, "Dependency waits"](deployment.md#what-the-chart-actually-renders).

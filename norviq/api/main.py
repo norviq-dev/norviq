@@ -15,7 +15,7 @@ if sys.platform == "win32":
 
 from norviq.api.audit_hub import AuditHub, bind_peer_publisher
 from norviq.api.audit_retention import RetentionPruner
-from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
+from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db, ping_db
 from norviq.api.path_timing import PathTimingMiddleware
 from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
@@ -24,6 +24,7 @@ from norviq.fleet_puller import FleetPolicyPuller
 from norviq.api import session_revocation
 from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, baseline_router, cluster_info, compliance_view, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, tools, version
 from norviq.config import settings
+from norviq.startup_retry import connect_with_backoff
 from norviq.logging_setup import configure_logging
 from norviq.api.auth import warn_if_identity_binding_is_partial
 from norviq.engine.audit_emitter import AuditEmitter
@@ -52,27 +53,9 @@ log.info(
 )
 
 
-async def _connect_with_backoff(coro_factory, name: str, retry_code: str, fail_code: str, attempts: int = 5):
-    """Retry a startup connection: `attempts` tries, sleeping 1, 2, 4, 8 s between them (15 s at 5).
-
-    A backend may accept TCP before it is query-ready, so retry rather than crash. Raises after the
-    final attempt so the pod restarts. The chart's wait initContainers do not always run first: with
-    an external datastore given only by `existingSecret` the chart cannot name the host, renders no
-    gate, and this retry is the only wait there is (docs/deployment.md, "Dependency waits"). It does
-    not cover Postgres reachability: `init_db` only builds the engine, and the first connection is
-    `create_tables()`, which retries timeouts only.
-    """
-    delay = 1
-    for attempt in range(1, attempts + 1):
-        try:
-            return await coro_factory()
-        except Exception as exc:
-            if attempt == attempts:
-                log.error(f"nrvq.startup.{name}_failed", attempts=attempt, error=str(exc), code=fail_code)
-                raise
-            log.warning(f"nrvq.startup.{name}_retry", attempt=attempt, delay=delay, error=str(exc), code=retry_code)
-            await asyncio.sleep(delay)
-            delay *= 2
+# The shared bounded startup retry (1/2/4/8 s, then raise). Kept under this name: the call sites below
+# are what tests/api/test_revocation_durable.py reads to check the startup order.
+_connect_with_backoff = connect_with_backoff
 
 
 # SCHEMA OWNERSHIP: there is no Alembic in this product, deliberately. Schema comes from
@@ -128,7 +111,11 @@ async def lifespan(app: FastAPI):
                 "Set NRVQ_AUTH_ADMIN_PASSWORD (NRVQ_REQUIRE_STRONG_SECRET is enabled)."
             )
     log.info("nrvq.startup.db_engine_creating", code="NRVQ-DB-DEBUG-1")
-    await _connect_with_backoff(init_db, "init_db", retry_code="NRVQ-DB-9035", fail_code="NRVQ-DB-9034")
+    # init_db only builds SQLAlchemy's lazy engine and opens no socket, so retrying it could never fail:
+    # the first real connection used to be create_tables(), which retries a lock timeout only, and a
+    # refused Postgres killed startup in 0.28 s with no retry. ping_db opens one, under the backoff.
+    await init_db()
+    await _connect_with_backoff(ping_db, "init_db", retry_code="NRVQ-DB-9035", fail_code="NRVQ-DB-9034")
     log.info("nrvq.startup.db_engine_created", code="NRVQ-DB-DEBUG-2")
     await create_tables()
     app.state.cache = RedisCache()
