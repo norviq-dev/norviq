@@ -18,6 +18,7 @@ the product's own routes, writers and warm path. Every identity is unique per te
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -429,3 +430,292 @@ async def test_the_trust_update_log_line_names_the_admin_who_made_it(env) -> Non
     assert resp.status_code == 200
     line = [entry for entry in logs if entry.get("code") == "NRVQ-API-7031"][0]
     assert (line["actor"], line["actor_role"], line["frozen"]) == ("carol", "admin", True)
+
+
+# --- Admin trust writes for one agent are serialized (per-agent advisory lock) -----------------------------
+#
+# Found by independent review of the first version of these fixes: each route was correct alone, but two
+# admin writes for the same agent could interleave so that Postgres and Redis disagreed with both callers
+# told 200. These pause one request at a fixed point, run the other, and check the end state.
+
+
+class _Proxy:
+    """The real cache, with hooks. Everything not overridden goes to the real object."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+async def test_a_freeze_crossing_a_clear_leaves_postgres_and_redis_agreeing(env) -> None:
+    """FAIL-ON-BUG (review B1). The clear is paused just before its Redis write. Unserialized, the freeze ran
+    to completion meanwhile (row frozen, agent_frozen set, 200), then the clear's write deleted agent_frozen:
+    the registry said frozen and the agent ran unfrozen until the next API restart. The agent has no row, so
+    no row lock exists to serialize them; only the per-agent lock does."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "b1")
+    gate, hit = asyncio.Event(), asyncio.Event()
+
+    class _PauseClear(_Proxy):
+        async def apply_admin_trust_control(self, spiffe_id, *, frozen, cap, display=None):
+            if not frozen and cap is None and not hit.is_set():
+                hit.set()
+                await gate.wait()
+            await self._real.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display)
+
+    app.state.cache = _PauseClear(cache)
+    try:
+        clear = asyncio.create_task(client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr()))
+        await asyncio.wait_for(hit.wait(), 5)
+        freeze = asyncio.create_task(client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr()))
+        await asyncio.sleep(0.3)
+        freeze_waited = not freeze.done()
+        gate.set()
+        responses = await asyncio.wait_for(asyncio.gather(clear, freeze), 10)
+    finally:
+        app.state.cache = cache
+    assert [r.status_code for r in responses] == [200, 200]
+    row = await _row(spiffe)
+    live = await cache._client().get(f"agent_frozen:{spiffe}")
+    assert (row is not None and row["frozen"], live) == (True, "1"), f"registry {row and dict(row)} vs live {live}"
+    assert freeze_waited, "the freeze did not wait for the clear holding the agent's lock"
+
+
+async def test_a_delete_crossing_a_freeze_never_loses_the_freeze(env) -> None:
+    """FAIL-ON-BUG (review B2). DELETE is paused after it read the row and the live keys. Unserialized, a
+    freeze committed onto that row meanwhile, then DELETE removed it by primary key and logged 7121
+    frozen=false: the durable freeze was gone. Now the freeze waits for DELETE's lock (and DELETE's own
+    delete is conditional on the row carrying no control), so whichever order wins, the freeze survives."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "b2")
+    await _seed_registered(spiffe)
+    gate, hit = asyncio.Event(), asyncio.Event()
+    real_client = cache._client()
+
+    class _PausedClient(_Proxy):
+        async def get(self, key):
+            value = await self._real.get(key)
+            if key.startswith("agent_trust_override:") and not hit.is_set():
+                hit.set()
+                await gate.wait()
+            return value
+
+    class _PauseDeleteCheck(_Proxy):
+        def _client(self):
+            return _PausedClient(real_client)
+
+    app.state.cache = _PauseDeleteCheck(cache)
+    try:
+        delete = asyncio.create_task(client.delete(f"/api/v1/agents/{spiffe}", headers=_hdr()))
+        await asyncio.wait_for(hit.wait(), 5)
+        app.state.cache = cache
+        freeze = asyncio.create_task(client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr()))
+        await asyncio.sleep(0.3)
+        gate.set()
+        d, f = await asyncio.wait_for(asyncio.gather(delete, freeze), 10)
+    finally:
+        app.state.cache = cache
+    assert f.status_code == 200 and d.status_code in (200, 409)
+    row = await _row(spiffe)
+    assert row is not None and row["frozen"] is True, "the freeze was deleted with the row"
+    assert await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+
+
+async def test_freeze_to_cap_never_leaves_an_agent_with_neither(env) -> None:
+    """FAIL-ON-BUG (review N1). The cap was written as DEL agent_frozen: then SET agent_trust_override:; a
+    Redis error between the two left the agent with no control at all. Here every plain SET to an override
+    key fails: the change now goes in one MULTI, so it either lands whole or not at all."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "n1")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    real_client = cache._client()
+
+    class _SetFails(_Proxy):
+        async def set(self, key, *a, **k):
+            if key.startswith("agent_trust_override:"):
+                raise ConnectionError("redis dropped")
+            return await self._real.set(key, *a, **k)
+
+    class _Cache(_Proxy):
+        def _client(self):
+            return _SetFails(real_client)
+
+        async def set_trust_override(self, spiffe_id, score):
+            raise ConnectionError("redis dropped")
+
+    app.state.cache = _Cache(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.3}, headers=_hdr())
+    except Exception:  # noqa: BLE001 - before the fix this surfaced as an unhandled error
+        resp = None
+    finally:
+        app.state.cache = cache
+    frozen = await cache._client().get(f"agent_frozen:{spiffe}")
+    cap = await cache._client().get(f"agent_trust_override:{spiffe}")
+    assert frozen is not None or cap is not None, "the agent was left neither frozen nor capped"
+    row = await _row(spiffe)
+    if resp is not None and resp.status_code == 200:
+        assert (frozen, float(cap), row["trust_cap"]) == (None, 0.3, pytest.approx(0.3))
+
+
+async def test_freeze_with_the_store_down_is_persisted_and_applied_at_the_next_start(env) -> None:
+    """FAIL-ON-BUG (review N2). With Redis down a freeze was an unhandled 500 and nothing reached Postgres.
+    It is durable now and the 503 says it is not live yet; warm_agent_overrides applies it at the next
+    start. A cap with the store down changes nothing."""
+    app, client, cache, ids = env
+    spiffe, capped = _agent(ids, "n2"), _agent(ids, "n2cap")
+    await _seed_registered(spiffe)
+    await _seed_registered(capped)
+
+    class _Down(_Proxy):
+        def _client(self):
+            raise ConnectionError("redis down")
+
+        async def apply_admin_trust_control(self, *a, **k):
+            raise ConnectionError("redis down")
+
+    app.state.cache = _Down(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        cap_resp = await client.put(f"/api/v1/agents/{capped}/trust", json={"score": 0.3}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+    assert resp.status_code == 503 and "persisted but NOT live" in resp.json()["detail"]
+    assert (await _row(spiffe))["frozen"] is True
+    await warm_agent_overrides(cache)
+    assert await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+    assert cap_resp.status_code == 503
+    assert (await _row(capped))["trust_cap"] is None, "a cap the store did not take was left durable"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "*",
+        "%20",
+        "not-a-spiffe-id",
+        "spiffe://norviq/ns/a/sa/b%2A",
+        "spiffe://norviq/ns/%2E%2E/sa/x",
+        "spiffe://Norviq/ns/a/sa/b",
+        "spiffe://norviq/ns/a/sa/" + "x" * 600,
+    ],
+)
+async def test_admin_trust_routes_refuse_an_id_that_is_not_a_spiffe_id(env, bad) -> None:
+    """FAIL-ON-BUG (review N3). The upsert wrote a frozen registry row for any string, '*' and '../../x'
+    included. PUT, reset and DELETE validate the id's shape first (422) and write nothing."""
+    _, client, cache, _ = env
+    resp = await client.put(f"/api/v1/agents/{bad}/trust", json={"score": 0}, headers=_hdr())
+    assert resp.status_code == 422, resp.text
+    assert (await client.post(f"/api/v1/agents/{bad}/trust/reset", headers=_hdr())).status_code == 422
+    assert (await client.delete(f"/api/v1/agents/{bad}", headers=_hdr())).status_code == 422
+    async with _session() as session:
+        n = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM agent_registry WHERE spiffe_id NOT LIKE 'spiffe://%/%' "
+                    "OR spiffe_id LIKE '%*%' OR spiffe_id LIKE '% %' OR length(spiffe_id) > 500"
+                )
+            )
+        ).scalar()
+    assert n == 0
+
+
+async def test_reset_counts_every_history_entry_it_deletes(env) -> None:
+    """FAIL-ON-BUG (review N4). The counts came from get_history — the 1-hour window, read before the DEL —
+    while the DEL removed the whole key, so an entry outside the window (or recorded between read and DEL)
+    was wiped without being counted. They are read in the same MULTI as the DEL now."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "n4")
+    await _seed_registered(spiffe)
+    await cache._client().zadd(
+        f"agent_history:{spiffe}",
+        {'{"decision": "block", "n": 1}': time.time() - 7200, '{"decision": "allow", "n": 2}': time.time()},
+    )
+    resp = await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=_hdr())
+    assert resp.status_code == 200
+    assert (resp.json()["history_entries_cleared"], resp.json()["history_blocks_cleared"]) == (2, 1)
+
+
+async def test_reset_never_touches_a_cap_and_is_all_or_nothing(env) -> None:
+    """Review N5: the cap key survives a reset; a reset whose MULTI fails clears nothing; the cluster guard
+    refuses a reset aimed at another cluster before anything is cleared."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "n5")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.3}, headers=_hdr())).status_code == 200
+    await cache._client().zadd(f"agent_history:{spiffe}", {'{"decision": "block"}': time.time()})
+    await cache._client().hset(f"agent_profile:{spiffe}", "known_tools", '["t"]')
+
+    other_cluster = {**_hdr(), "X-Nrvq-Target-Cluster": "cluster-b"}
+    assert (await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=other_cluster)).status_code == 409
+    assert await cache._client().exists(f"agent_history:{spiffe}", f"agent_profile:{spiffe}") == 2
+
+    real_client = cache._client()
+
+    class _FailingPipe:
+        def __init__(self, pipe):
+            self._pipe = pipe
+
+        def __getattr__(self, name):
+            return getattr(self._pipe, name)
+
+        async def execute(self):
+            raise ConnectionError("redis dropped mid-MULTI")
+
+    class _PipeCtx:
+        def __init__(self, ctx):
+            self._ctx = ctx
+
+        async def __aenter__(self):
+            return _FailingPipe(await self._ctx.__aenter__())
+
+        async def __aexit__(self, *exc):
+            return await self._ctx.__aexit__(*exc)
+
+    class _Client(_Proxy):
+        def pipeline(self, *a, **k):
+            return _PipeCtx(self._real.pipeline(*a, **k))
+
+    class _Cache(_Proxy):
+        def _client(self):
+            return _Client(real_client)
+
+    app.state.cache = _Cache(cache)
+    try:
+        assert (await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=_hdr())).status_code == 503
+    finally:
+        app.state.cache = cache
+    assert await cache._client().exists(f"agent_history:{spiffe}", f"agent_profile:{spiffe}") == 2
+
+    assert (await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=_hdr())).status_code == 200
+    assert await cache._client().exists(f"agent_history:{spiffe}", f"agent_profile:{spiffe}") == 0
+    assert float(await cache._client().get(f"agent_trust_override:{spiffe}")) == pytest.approx(0.3)
+
+
+async def test_a_cap_is_not_applied_live_when_its_durable_write_fails(env) -> None:
+    """Review N5: a cap (which can lift a freeze) reaches Redis only after its registry write succeeded."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "n5cap")
+
+    async def _broken():
+        yield _BrokenSession()
+
+    app.dependency_overrides[get_session] = _broken
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.3}, headers=_hdr())
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+    assert resp.status_code == 503
+    assert await cache._client().get(f"agent_trust_override:{spiffe}") is None
+
+
+async def test_delete_refuses_a_cap_that_exists_only_in_redis(env) -> None:
+    """Review N5: the live cap key counts, as the live freeze key does."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "n5redis")
+    await _seed_registered(spiffe)
+    await cache._client().set(f"agent_trust_override:{spiffe}", "0.3")
+    resp = await client.delete(f"/api/v1/agents/{spiffe}", headers=_hdr())
+    assert resp.status_code == 409 and "trust cap" in resp.json()["detail"]
+    assert await _row(spiffe) is not None

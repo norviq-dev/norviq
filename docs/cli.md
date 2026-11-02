@@ -432,9 +432,16 @@ a failover lifts every freeze and cap until the API restarts
 (`kubectl -n <namespace> rollout restart deployment/norviq-api`; `docs/trust-score-design.md` §5).
 An agent the registry has never seen gets a row carrying the freeze or cap; the engine's write-through
 on the agent's first call (`norviq/api/db/session.py::upsert_agent_registry`) does not touch those two
-columns. If the database write fails the command exits non-zero on a `503`: a freeze is then already in
-force but not yet durable (retry it), and a cap or a clear has changed nothing. The retention pruner
-never ages out a frozen or capped agent
+columns. Every admin trust write for one agent — `reset-trust`, `freeze`, `reset-history` and
+`DELETE /api/v1/agents/{spiffe_id}` — runs under one per-agent Postgres lock
+(`norviq/api/routers/agents.py::_lock_agent`), so two of them on different replicas cannot interleave
+and leave the registry and Redis disagreeing. A write that waits on that lock for longer than the
+database command timeout (`NRVQ_DB_COMMAND_TIMEOUT`, 10 s) fails like any other database error. Failures
+are a non-zero exit on a `503` and only ever err toward the freeze: with the database down, a freeze is
+in force but not durable (retry it) and a cap or clear changed nothing; with Redis down, a freeze is
+durable and takes effect at the next API start, and a cap or clear changed nothing. The SPIFFE ID must be
+well formed (`spiffe://<trust-domain>/<path>`, at most 512 characters; `422` otherwise). The retention
+pruner never ages out a frozen or capped agent
 (`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
 
 **`reset-history` clears the behavioural record, and nothing else.** It deletes the agent's rolling
@@ -444,8 +451,11 @@ entropy baselines, 7 days), so trust is recomputed from the agent's next call
 is `reset-trust --score 1.0`, a separate logged action — and it keeps the registry's cumulative
 violation count and the audit log. Admin only. Each reset logs `NRVQ-API-7145` with the actor, the score
 and violation count before, how many history entries and blocks it removed, and the keys it cleared;
-the command prints the same, and says so when the agent is still frozen or capped. `404` for an identity
-with no registry row, trust entry, history or profile; `503` (nothing cleared) when Redis cannot answer.
+the command prints the score before, the violation count and the keys cleared (`-o json` prints every
+field of that record), and says so when the agent is still frozen or capped. The counts are read in the
+same Redis transaction as the delete, so they are exactly what was removed. `404` for an identity with no
+registry row, trust entry, history or profile; `503` (nothing cleared) when Redis or the database cannot
+answer.
 A pod running the opt-in in-process cache (`config.inprocCacheTtlS`) may score from its cached copy
 until that TTL expires.
 

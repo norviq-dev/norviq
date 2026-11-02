@@ -102,13 +102,16 @@ def test_admin_reads_namespaceless_agent() -> None:
 
 def _session_override(app, row):
     class _FakeSession:
-        async def execute(self, _stmt):
-            return SimpleNamespace(scalar_one_or_none=lambda: row)
+        async def execute(self, _stmt, _params=None):
+            return SimpleNamespace(scalar_one_or_none=lambda: row, rowcount=1)
 
         async def delete(self, _row) -> None:
             return None
 
         async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
             return None
 
     async def _override():

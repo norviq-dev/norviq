@@ -123,6 +123,21 @@ class FakeCache:
         """Remove the admin trust cap."""
         await self.delete(f"agent_trust_override:{spiffe_id}")
 
+    async def apply_admin_trust_control(
+        self, spiffe_id: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
+    ) -> None:
+        """RedisCache's one-MULTI admin control write, over the same generic keys."""
+        if frozen:
+            await self.set(f"agent_frozen:{spiffe_id}", "1")
+        else:
+            await self.delete(f"agent_frozen:{spiffe_id}")
+        if cap is not None:
+            await self.set_trust_override(spiffe_id, cap)
+        else:
+            await self.clear_trust_override(spiffe_id)
+        if display is not None:
+            await self.set_trust(spiffe_id, display)
+
 
 class FakeEvaluator:
     """Policy evaluator stub."""
@@ -148,7 +163,7 @@ class FakeSession:
     def __init__(self, rows: list[SimpleNamespace]) -> None:
         self.rows = rows
 
-    async def execute(self, stmt):
+    async def execute(self, stmt, params=None):
         """Return canned scalar and grouped results."""
         sql = str(stmt)
         # audit_stats' real-traffic-only aggregation groups by framework/agent_class/rule_id too and reads the

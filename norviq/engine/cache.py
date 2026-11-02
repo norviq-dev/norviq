@@ -643,3 +643,24 @@ class RedisCache:
     async def clear_trust_override(self, spiffe_id: str) -> None:
         """Remove the admin trust cap (score cleared / set to 1.0 / frozen)."""
         await self._client().delete(f"agent_trust_override:{spiffe_id}")
+
+    async def apply_admin_trust_control(
+        self, spiffe_id: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
+    ) -> None:
+        """Write one agent's whole admin control state — freeze flag, cap, and optionally the displayed score —
+        in ONE MULTI. Set as separate commands, a freeze-to-cap change deleted agent_frozen: before writing the
+        cap, so there was an instant with neither, and a Redis error between the two left neither for good."""
+        frozen_key, cap_key = f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}"
+        async with self._client().pipeline(transaction=True) as pipe:
+            if frozen:
+                await pipe.set(frozen_key, "1")
+            else:
+                await pipe.delete(frozen_key)
+            if cap is not None:
+                await pipe.set(cap_key, str(float(cap)))
+            else:
+                await pipe.delete(cap_key)
+            if display is not None:
+                await pipe.setex(f"trust:{spiffe_id}", self._jitter_ttl(settings.redis_ttl_trust_s),
+                                 display.model_dump_json())
+            await pipe.execute()
