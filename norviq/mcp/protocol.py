@@ -135,7 +135,15 @@ class JsonRpcMessage:
 
     @property
     def method(self) -> str:
-        return self.data.get("method", "") if isinstance(self.data, dict) else ""
+        # Only a STRING is a method. A non-string `method` (1, true, ["x"], {}) used to be returned
+        # as is, so it was truthy and the message read as a request — forwarded verbatim — while the
+        # Python SDK, whose JSONRPCRequest needs `method: str`, read the same message as a response.
+        value = self.data.get("method", "") if isinstance(self.data, dict) else ""
+        return value if isinstance(value, str) else ""
+
+    @property
+    def _carries_answer(self) -> bool:
+        return isinstance(self.data, dict) and ("result" in self.data or "error" in self.data)
 
     @property
     def id(self) -> Any:
@@ -145,17 +153,30 @@ class JsonRpcMessage:
     def has_id(self) -> bool:
         return isinstance(self.data, dict) and "id" in self.data and self.data["id"] is not None
 
+    # CLASSIFICATION, FAIL CLOSED. Each shape is accepted only where every reference SDK agrees on
+    # it, and a message the SDKs would read differently is none of the three (malformed, dropped by
+    # the caller). The SDKs disagree exactly on messages that mix the shapes:
+    #   * TypeScript SDK 1.32 (`types.js`): JSONRPCRequest/Notification/ResultResponse/ErrorResponse
+    #     schemas are all `.strict()`, so a message carrying `method` AND `result`/`error` matches
+    #     none of them and is rejected.
+    #   * Python SDK 1.30 (`types.py`): `JSONRPCMessage` is a union of models that allow extra
+    #     fields. `{"id":3,"method":"x","result":{}}` validates as a JSONRPCRequest,
+    #     `{"id":3,"method":"x","error":{...}}` as a JSONRPCError, and a non-string `method` with a
+    #     `result` as a JSONRPCResponse — which resolves the pending request 3.
+    # So: a request/notification has a STRING method and no result/error; a response has an id, a
+    # result or an error, and no `method` key at all. Anything else is malformed.
     @property
     def is_request(self) -> bool:
-        return bool(self.method) and self.has_id
+        return bool(self.method) and self.has_id and not self._carries_answer
 
     @property
     def is_notification(self) -> bool:
-        return bool(self.method) and not self.has_id
+        return bool(self.method) and not self.has_id and not self._carries_answer
 
     @property
     def is_response(self) -> bool:
-        return isinstance(self.data, dict) and not self.method and "id" in self.data
+        return (isinstance(self.data, dict) and "method" not in self.data and "id" in self.data
+                and self._carries_answer)
 
     @property
     def params(self) -> dict:

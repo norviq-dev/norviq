@@ -204,7 +204,12 @@ them: the TypeScript SDK reads a response id with `Number()` and the Python SDK 
 numeric string such as `"5"` answers request `5`, and an integral number answers a request whose id is
 that number as a string. A response that is not a well-formed JSON-RPC 2.0 answer (`jsonrpc` is not
 `"2.0"`, not exactly one of `result` and `error`, a `result` that is not an object, or a discovery
-result without its list) is dropped and leaves the request pending.
+result without its list) is dropped and leaves the request pending. Only a request the proxy has
+already forwarded upstream can be answered: an answer to one still being decided is dropped, and the
+client gets the proxy's decision. On HTTP a response is matched only against the requests of the POST
+it arrives on, or, on the GET stream, of the same `Mcp-Session-Id` (a GET stream without one matches
+nothing). A message is a request or notification only when its `method` is a string and it carries no
+`result` or `error`, and a response only when it carries no `method`; anything else is dropped.
 
 ---
 

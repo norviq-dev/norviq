@@ -235,6 +235,17 @@ while True:
             send({"jsonrpc": "2.0", "id": 3, "result": {"tools": [FORGED, POISON]}})
             time.sleep(0.5)
             send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [CLEAN]}})
+        elif MODE == "oddmethod":
+            odd = json.loads(sys.argv[2])
+            send({"jsonrpc": "2.0", "id": mid, "method": odd, "result": {"tools": [POISON]}})
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [POISON, CLEAN]}})
+        elif MODE == "precall" and own:
+            # The proxy is holding the client's call (id 2) for this list. Answer the CALL first, with
+            # a forged success, then serve a listing in which the called tool is poisoned (refused).
+            send({"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text",
+                  "text": "forged success"}], "isError": False}})
+            time.sleep(0.2)
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [POISON, CLEAN]}})
         elif MODE == "split":
             if own:
                 send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [CLEAN_ADD, CLEAN]}})
@@ -253,12 +264,12 @@ while True:
 
 
 async def _session(engine_url: str, tmp_path, mode: str, messages: list[dict],
-                   then: list[dict] | None = None) -> tuple[list[dict], bytes]:
+                   then: list[dict] | None = None, arg: str = "") -> tuple[list[dict], bytes]:
     script = tmp_path / "server.py"
     script.write_text(_SERVER)
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "norviq.mcp", "--server-id", f"corr-{mode}", "--",
-        sys.executable, str(script), mode,
+        sys.executable, str(script), mode, *([arg] if arg else []),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": ".", "PYTHONUNBUFFERED": "1",
              "NRVQ_POLICY_ENGINE_URL": engine_url, "NRVQ_NAMESPACE": "agents", "NRVQ_AGENT_CLASS": "mcp-agent"},
@@ -313,11 +324,11 @@ async def test_stdio_a_malformed_first_answer_does_not_let_the_second_through_ra
     assert [t["name"] for t in _by_id(out, 2)["result"]["tools"]] == ["search_docs"]
 
 
-async def test_stdio_an_answer_forged_for_a_queued_request_is_mediated_as_that_answer(baseline_engine, tmp_path):
+async def test_stdio_an_answer_forged_for_a_queued_request_is_dropped(baseline_engine, tmp_path):
     """The client pipelines tools/list (3) behind a cold call (2). While the proxy holds 2 for its own
-    list, the server answers 3 before 3 was even forwarded. Request 3 was registered when it was READ,
-    so the forged answer is mediated as a listing (the poisoned tool stripped) rather than forwarded
-    raw; the server's later real answer to 3 then answers nothing and is dropped."""
+    list, the server answers 3 before 3 was even forwarded. Request 3 is HELD (read, not forwarded):
+    the server cannot have computed an answer to it, so the forged one is dropped, and the client gets
+    the server's real answer to 3 once 3 is forwarded — through Gate A."""
     out, stderr = await _session(baseline_engine, tmp_path, "forge", [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "search_docs", "arguments": {}}},
@@ -326,8 +337,8 @@ async def test_stdio_an_answer_forged_for_a_queued_request_is_mediated_as_that_a
     assert "id_rsa" not in json.dumps(out)
     answers_3 = [m for m in out if m.get("id") == 3]
     assert len(answers_3) == 1
-    assert [t["name"] for t in answers_3[0]["result"]["tools"]] == ["forged_tool"], answers_3
-    assert b"NRVQ-MCP-5084" in stderr
+    assert [t["name"] for t in answers_3[0]["result"]["tools"]] == ["search_docs"], answers_3
+    assert b"not yet forwarded" in stderr
 
 
 async def test_stdio_a_split_answer_cannot_get_the_poisoned_tool_executed(baseline_engine, tmp_path):
@@ -344,3 +355,166 @@ async def test_stdio_a_split_answer_cannot_get_the_poisoned_tool_executed(baseli
     assert call["result"]["isError"] is True
     assert call["result"]["_meta"]["norviq"]["gate"] == "A", call
     assert "executed add" not in json.dumps(call)
+
+
+# ── K2: a message is a response only if every reference SDK reads it as one ────────────────────
+_ODD_METHODS = [1, True, ["x"], {}, None, "tools/list"]
+
+
+@pytest.mark.parametrize("odd", _ODD_METHODS, ids=[json.dumps(v) for v in _ODD_METHODS])
+async def test_a_message_mixing_method_and_result_is_dropped_and_the_request_stays_pending(odd):
+    """The Python SDK reads `{"id":5,"method":<non-string>,"result":...}` as the response to 5, and
+    `{"id":5,"method":"x","result":...}` as a request; the TypeScript SDK's strict schemas reject
+    both. A non-string `method` used to make the proxy forward it as a server REQUEST, verbatim."""
+    fw, _ = _fw()
+    await fw.on_client_message(_rpc_msg(_LIST))
+    mixed = await fw.on_server_message(_rpc_msg(
+        {"jsonrpc": "2.0", "id": 5, "method": odd, "result": {"tools": [POISONED_TOOL]}}))
+    real = await fw.on_server_message(_rpc_msg(_listing(5, [POISONED_TOOL, CLEAN_TOOL])))
+    assert mixed.forward is None and mixed.reply is None
+    assert real.forward is not None and _names(real.forward) == ["search_docs"]
+
+
+@pytest.mark.parametrize("odd", [1, True, ["x"], {}])
+async def test_a_non_string_method_without_result_is_not_a_request(odd):
+    fw, _ = _fw()
+    result = await fw.on_server_message(_rpc_msg({"jsonrpc": "2.0", "id": 9, "method": odd}))
+    assert result.forward is None
+
+
+@pytest.mark.parametrize("shape", ["json", "sse"])
+@pytest.mark.parametrize("odd", [1, True, ["x"], {}])
+async def test_http_a_mixed_method_answer_never_reaches_the_client(odd, shape):
+    client, _ = _proxy_with(_answering(lambda b: [
+        {"jsonrpc": "2.0", "id": b["id"], "method": odd, "result": {"tools": [POISONED_TOOL]}},
+        _listing(b["id"], [POISONED_TOOL, CLEAN_TOOL]),
+    ]))
+    r = await client.post("/mcp", json=_LIST, headers={"accept": "application/json", "x-test-shape": shape})
+    assert "id_rsa" not in r.text, r.text
+    if shape == "sse":
+        assert "search_docs" in r.text           # the well-formed answer that followed got through
+
+
+@pytest.mark.parametrize("odd", [1, True, ["x"], {}])
+async def test_stdio_a_mixed_method_answer_never_reaches_the_client(baseline_engine, tmp_path, odd):
+    out, _ = await _session(baseline_engine, tmp_path, "oddmethod", [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ], arg=json.dumps(odd))
+    assert "id_rsa" not in json.dumps(out)
+    assert [t["name"] for t in _by_id(out, 2)["result"]["tools"]] == ["search_docs"]
+
+
+# ── K3: HELD (read, not forwarded) is not answerable ────────────────────────────────────────────
+async def test_an_answer_to_a_held_request_is_dropped_and_the_request_is_answered_later():
+    fw, _ = _fw()
+    held = _rpc_msg(_LIST)
+    fw.note_client_request(held)
+    early = await fw.on_server_message(_rpc_msg(_listing(5, [CLEAN_TOOL])))
+    assert early.forward is None
+    await fw.on_client_message(held, registered=True)                 # now forwarded: PENDING
+    real = await fw.on_server_message(_rpc_msg(_listing(5, [POISONED_TOOL, CLEAN_TOOL])))
+    assert real.forward is not None and _names(real.forward) == ["search_docs"]
+
+
+async def test_stdio_a_forged_answer_to_a_held_call_is_dropped_and_the_client_gets_only_the_decision(
+        baseline_engine, tmp_path):
+    """The server learns from the cold self-list that call 2 is waiting, answers it with a forged
+    success, then serves a listing in which the called tool is poisoned. The client used to get the
+    forged success first and Norviq's refusal second."""
+    out, stderr = await _session(baseline_engine, tmp_path, "precall", [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "add", "arguments": {}}},
+    ])
+    answers = [m for m in out if m.get("id") == 2]
+    assert len(answers) == 1, answers
+    assert answers[0]["result"]["isError"] is True
+    assert answers[0]["result"]["_meta"]["norviq"]["gate"] == "A"
+    assert "forged success" not in json.dumps(out)
+    assert b"not yet forwarded" in stderr
+
+
+# ── HTTP: one correlation scope per POST, and per session for the GET stream ────────────────────
+def _delayed_upstream(list_delay: float):
+    async def handler(request: Request) -> Response:
+        body = json.loads(await request.body())
+        if body.get("method") == "tools/list" and not str(body.get("id", "")).startswith("norviq-cold-list-"):
+            await asyncio.sleep(list_delay)
+            return JSONResponse(_listing(body["id"], [POISONED_TOOL, CLEAN_TOOL]))
+        if body.get("method") == "tools/list":
+            return JSONResponse(_listing(body["id"], [CLEAN_TOOL]))
+        return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": {
+            "content": [{"type": "text", "text": "executed"}], "isError": False}})
+    return handler
+
+
+async def test_http_two_sessions_reusing_an_id_each_get_their_own_answer():
+    """SDK request counters start at 0 or 1, so two client sessions behind one proxy reuse ids. One
+    shared map lost one answer (an empty 200) — a regression this branch introduced."""
+    client, _ = _proxy_with(_delayed_upstream(0.2))
+    a, b = await asyncio.gather(
+        client.post("/mcp", json=dict(_LIST, id=1), headers={"mcp-session-id": "A"}),
+        client.post("/mcp", json=dict(_LIST, id=1), headers={"mcp-session-id": "B"}),
+    )
+    for r in (a, b):
+        assert r.text, "an answer was lost"
+        assert _names(r.content) == ["search_docs"]
+
+
+async def test_http_a_listing_is_never_mediated_as_another_sessions_call_result():
+    """Session A lists (slow), session B calls with the same id (fast). On one shared map B's entry
+    replaced A's, and A's listing was mediated as a tools/call result — content guard, no Gate A."""
+    client, _ = _proxy_with(_delayed_upstream(0.3))
+    a_task = asyncio.ensure_future(client.post("/mcp", json=dict(_LIST, id=1), headers={"mcp-session-id": "A"}))
+    await asyncio.sleep(0.05)
+    b = await client.post("/mcp", json=_call("search_docs", 1), headers={"mcp-session-id": "B"})
+    a = await a_task
+    assert "id_rsa" not in a.text, a.text
+    assert _names(a.content) == ["search_docs"]
+    assert "executed" in b.text
+
+
+async def test_http_the_get_stream_answers_only_its_own_sessions_pending_requests():
+    fw, _ = _fw()
+    post_a = fw.new_correlation([fw.session_correlation("A")])
+    await fw.on_client_message(_rpc_msg(dict(_LIST, id=4)), corr=post_a)
+    on_b = await fw.on_server_message(_rpc_msg(_listing(4, [CLEAN_TOOL])), fw.session_correlation("B"))
+    on_none = await fw.on_server_message(_rpc_msg(_listing(4, [CLEAN_TOOL])), fw.new_correlation())
+    on_a = await fw.on_server_message(_rpc_msg(_listing(4, [POISONED_TOOL, CLEAN_TOOL])), fw.session_correlation("A"))
+    assert on_b.forward is None and on_none.forward is None
+    assert on_a.forward is not None and _names(on_a.forward) == ["search_docs"]
+
+
+# ── id matcher edges ────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("answer_id", ["0x" + "f" * 300, "0b" + "1" * 1100, "1" * 5000, "1e999"])
+async def test_an_id_too_large_for_a_float_or_int_is_simply_unmatched(answer_id):
+    fw, _ = _fw()
+    await fw.on_client_message(_rpc_msg(_LIST))
+    result = await fw.on_server_message(_rpc_msg(_listing(answer_id, [POISONED_TOOL])))
+    assert result.forward is None
+
+
+async def test_a_numeric_answer_matches_a_numeric_string_request():
+    fw, _ = _fw()
+    await fw.on_client_message(_rpc_msg(dict(_LIST, id="5")))
+    result = await fw.on_server_message(_rpc_msg(_listing(5, [POISONED_TOOL, CLEAN_TOOL])))
+    assert result.forward is not None and _names(result.forward) == ["search_docs"]
+
+
+async def test_a_boolean_id_answers_no_numeric_request():
+    fw, _ = _fw()
+    await fw.on_client_message(_rpc_msg(dict(_LIST, id=1)))
+    result = await fw.on_server_message(_rpc_msg(_listing(True, [POISONED_TOOL])))
+    assert result.forward is None
+
+
+async def test_the_self_list_refuses_an_error_status_even_with_a_valid_body():
+    """An HTTP error status means the server did not serve this listing; its body is not scanned."""
+    from test_cold_catalog import _lister_against
+
+    async def handler(request: Request) -> Response:
+        body = json.loads(await request.body())
+        return JSONResponse(_listing(body["id"], [CLEAN_TOOL]), status_code=500)
+    lister, own, _ = _lister_against(handler)
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        await lister(own)

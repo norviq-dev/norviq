@@ -354,7 +354,9 @@ def _js_number(text: str) -> float | None:
     if body == "":
         return 0.0
     if _JS_RADIX.match(body):
-        return float(int(body[2:], {"x": 16, "o": 8, "b": 2}[body[1].lower()]))
+        value = int(body[2:], {"x": 16, "o": 8, "b": 2}[body[1].lower()])
+        # JS gives Infinity past the double range; Python's float() raises instead.
+        return float(value) if value.bit_length() <= 1023 else math.inf
     if _JS_DECIMAL.match(body):
         return float(body.replace("Infinity", "inf"))
     return None
@@ -372,13 +374,19 @@ def _numeric_readings(text: str) -> set[int]:
     response the client WILL accept as the answer to request N must be mediated as that answer.
     """
     readings: set[int] = set()
+    # Any exception is "no reading", never a crash: the id is the server's, and an exception here
+    # would escape `on_server_message` and end the pump (an id of "0x" + 300 hex digits overflowed
+    # float()). An id with no reading is simply unmatched, and dropped.
     try:
         readings.add(int(text))         # Python: whitespace, sign, underscores, Unicode digits
-    except ValueError:
+    except Exception:  # noqa: BLE001 — ValueError, and the int-digits limit, alike
         pass
-    js = _js_number(text)
-    if js is not None and math.isfinite(js) and js.is_integer():
-        readings.add(int(js))           # JavaScript: Number() semantics, double precision
+    try:
+        js = _js_number(text)
+        if js is not None and math.isfinite(js) and js.is_integer():
+            readings.add(int(js))       # JavaScript: Number() semantics, double precision
+    except Exception:  # noqa: BLE001
+        pass
     return readings
 
 
@@ -471,6 +479,38 @@ class _PendingMap:
         return found[1]
 
 
+class Correlation:
+    """Where the client's requests are tracked, and so which server responses can answer them.
+
+    Two states, because "the client sent it" and "the server has it" are different facts:
+
+    * HELD — read from the client, not (yet) forwarded upstream: still in Gate B, or held behind the
+      proxy's own cold-catalog list. The server has not seen it, so nothing the server sends under
+      its id is an answer to it. Such a response is dropped, never forwarded, and does not consume
+      anything: the client gets the proxy's own decision, or later the real answer.
+    * PENDING — forwarded upstream. Only these can be answered.
+
+    One scope per place answers can arrive. stdio has one client and one stream: the firewall's
+    default scope. Streamable HTTP has one per POST (its response body answers its own request and
+    nothing else — two client sessions reuse JSON-RPC ids, since SDK counters start at 0 or 1), plus
+    one per `Mcp-Session-Id` for the GET stream, where a resumed stream may carry a response. A
+    request forwarded with a session id is PENDING in both; an answer on the POST consumes both, one
+    on the GET stream consumes the session's entry (a later answer on the POST is then still
+    mediated, never forwarded raw). A GET stream without a session id correlates nothing.
+    """
+
+    __slots__ = ("held", "pending", "peers")
+
+    def __init__(self, cap: int, peers: list[Correlation] | None = None) -> None:
+        self.held = _PendingMap(cap)
+        self.pending = _PendingMap(cap)
+        self.peers = list(peers or [])
+
+
+# How many client sessions' GET-stream scopes one firewall keeps (see `Correlation`).
+_MAX_SESSION_SCOPES = 256
+
+
 # The list each discovery result must carry. A result without it is not a well-formed answer to that
 # method, and is dropped rather than forwarded (see `_response_defect`).
 _LIST_RESULT_KEYS = {
@@ -490,6 +530,8 @@ def _response_defect(msg: P.JsonRpcMessage, method: str) -> str:
     pending, so whatever answer the client does accept is the one that is mediated.
     """
     data = msg.data
+    if "method" in data:
+        return "a response carries a method"
     if data.get("jsonrpc") != "2.0":
         return "jsonrpc is not \"2.0\""
     if ("result" in data) == ("error" in data):
@@ -553,7 +595,10 @@ class McpFirewall:
         self._prefix = tool_name_prefix
         self._catalog: dict[str, CatalogEntry] = {}
         self._skeletons: dict[str, str] = {}   # folded name -> canonical name, for shadowing detection
-        self._client_pending = _PendingMap(settings.mcp_max_pending_requests)
+        # The default correlation scope: the whole session on stdio, and any caller that passes none.
+        # The HTTP driver passes one per POST (see `Correlation`).
+        self._corr = Correlation(settings.mcp_max_pending_requests)
+        self._session_corrs: dict[str, Correlation] = {}
         self._server_pending = _PendingMap(settings.mcp_max_pending_requests)
         # (tool, rule) -> (monotonic of last report, refusals suppressed since). Rate-limits the
         # PEP-denial REPORT only; Gate A's decision never consults it.
@@ -634,9 +679,24 @@ class McpFirewall:
         ]
 
     # ============================================================ CLIENT -> SERVER
+    def new_correlation(self, peers: list[Correlation] | None = None) -> Correlation:
+        """A correlation scope for one place answers arrive (an HTTP POST, a session's GET stream)."""
+        return Correlation(settings.mcp_max_pending_requests, peers)
+
+    def session_correlation(self, session_id: str) -> Correlation:
+        """The scope of one client session's GET stream, created on first use. Bounded: the session
+        id is the client's to choose, so the oldest session's scope is evicted past the cap."""
+        corr = self._session_corrs.get(session_id)
+        if corr is None:
+            corr = self.new_correlation()
+            if len(self._session_corrs) >= _MAX_SESSION_SCOPES:
+                self._session_corrs.pop(next(iter(self._session_corrs)), None)
+            self._session_corrs[session_id] = corr
+        return corr
+
     async def on_client_message(
         self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None = None,
-        *, registered: bool = False,
+        *, registered: bool = False, corr: Correlation | None = None,
     ) -> MediationResult:
         """Mediate one message travelling from the MCP client to the upstream server.
 
@@ -662,26 +722,31 @@ class McpFirewall:
         # `registered`: the driver already called `note_client_request` when it read this message.
         # Registering again here would re-open an entry an answer has consumed in between, and a
         # second answer to the same request would then be mediated and forwarded as well.
+        corr = corr or self._corr
         if not registered:
-            self.note_client_request(msg)
+            self.note_client_request(msg, corr)
         result = await self._on_client_message(msg, list_upstream)
-        if msg.is_request and result.forward is None:
-            # Answered here (refused, or malformed): the server never sees this request, so nothing
-            # it sends under this id later is an answer to it.
-            self._client_pending.discard(msg.id)
+        if msg.is_request:
+            # HELD until now. Forwarded: the server will have it, so its answer can be accepted —
+            # here and in every peer scope. Answered here (refused, malformed): the server never sees
+            # it, so nothing it sends under this id is an answer; it leaves HELD and goes nowhere.
+            corr.held.discard(msg.id)
+            if result.forward is not None:
+                for scope in (corr, *corr.peers):
+                    scope.pending.put(msg.id, msg.method)
         return result
 
-    def note_client_request(self, msg: P.JsonRpcMessage) -> None:
-        """Record a client request as pending. Idempotent.
+    def note_client_request(self, msg: P.JsonRpcMessage, corr: Correlation | None = None) -> None:
+        """Record a client request as HELD. Idempotent.
 
         The drivers call this the moment they READ a message, before anything awaits — on stdio the
-        pump holds a call while the proxy's own list is in flight, and the requests the client sends
-        meanwhile must already be pending: a server answer for one of them is then matched and
-        mediated as that answer, and one that precedes the request is unmatched and dropped. Neither
-        is forwarded unexamined.
+        pump holds a call while the proxy's own list is in flight, and the server learns from that
+        list's timing that a call is waiting. An answer to a HELD request is an answer to something
+        the server has not been sent: it is dropped and the client gets the proxy's decision. It
+        becomes PENDING (answerable) only when `on_client_message` forwards it.
         """
         if msg.is_request:
-            self._client_pending.put(msg.id, msg.method)
+            (corr or self._corr).held.put(msg.id, msg.method)
 
     async def _on_client_message(
         self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None,
@@ -705,8 +770,14 @@ class McpFirewall:
         return MediationResult(forward=msg.framed)
 
     # ============================================================ SERVER -> CLIENT
-    async def on_server_message(self, msg: P.JsonRpcMessage) -> MediationResult:
-        """Mediate one message travelling from the upstream server to the MCP client."""
+    async def on_server_message(self, msg: P.JsonRpcMessage,
+                                corr: Correlation | None = None) -> MediationResult:
+        """Mediate one message travelling from the upstream server to the MCP client.
+
+        `corr` is the scope the message arrived in (see `Correlation`); a response can answer only a
+        request PENDING there.
+        """
+        corr = corr or self._corr
         if msg.is_batch:
             self._bump("batch_refused")
             return MediationResult(blocked=True, note="batch_refused_from_server")
@@ -762,14 +833,19 @@ class McpFirewall:
             # request was registered. Matching is now as liberal as the client's (see
             # `_PendingMap._candidates`), a malformed answer leaves the request pending, and anything
             # still unmatched is dropped.
-            found = self._client_pending.match(msg.id)
+            found = corr.pending.match(msg.id)
             if found is None:
+                if corr.held.match(msg.id) is not None:
+                    # An answer to a request the proxy has not forwarded. The server cannot have
+                    # computed it; forwarding it would let the server pre-empt Gate B with a result.
+                    return self._drop_unmatched(msg, "it answers a request not yet forwarded upstream")
                 return self._drop_unmatched(msg, "it answers no pending client request")
             pending_key, requested = found
             defect = _response_defect(msg, requested)
             if defect:
                 return self._drop_unmatched(msg, f"not a well-formed answer: {defect}")
-            self._client_pending.pop(pending_key)
+            for scope in (corr, *corr.peers):
+                scope.pending.pop(pending_key)
             # `server/discover` replaces the initialize handshake and is the FIRST thing a 2026-07-28
             # client asks. It advertises the server's identity and capabilities as free text, so it is
             # a discovery surface exactly like tools/list — and Gate A never saw it.

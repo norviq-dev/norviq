@@ -113,7 +113,7 @@ async def test_the_sse_media_type_is_matched_case_insensitively():
     """`Text/Event-Stream` is an SSE stream. Read as a JSON body it was buffered to its end."""
     _, _, _, proxy, _ = _make()
     fw = await proxy._firewall_for_caller()                            # noqa: SLF001
-    fw.note_client_request(_rpc_msg({"jsonrpc": "2.0", "id": 5, "method": "ping"}))
+    fw._corr.pending.put(5, "ping")                                    # noqa: SLF001
 
     class _Resp:
         headers = {"content-type": "Text/Event-Stream; charset=utf-8"}

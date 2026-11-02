@@ -849,7 +849,7 @@ async def test_the_sse_pump_splits_crlf_frames_as_they_complete():
     client, upstream, _, proxy, _ = _make()
     del client, upstream
     fw = await proxy._firewall_for_caller()                            # noqa: SLF001
-    fw._client_pending.put(5, P.M_TOOLS_LIST)                         # noqa: SLF001
+    fw._corr.pending.put(5, P.M_TOOLS_LIST)                           # noqa: SLF001
 
     class _Resp:
         headers = {"content-type": "text/event-stream"}

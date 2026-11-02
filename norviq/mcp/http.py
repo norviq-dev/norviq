@@ -44,7 +44,7 @@ from starlette.routing import Route
 from norviq.config import settings
 from norviq.engine.identity import SPIFFEResolver
 from norviq.mcp import protocol as P
-from norviq.mcp.firewall import McpFirewall, MediationResult
+from norviq.mcp.firewall import Correlation, McpFirewall, MediationResult
 from norviq.mcp.pins import ControlPlanePinStore, PinRegistry, build_store, effective_store_kind
 from norviq.mcp.servers import ControlPlaneServerStore
 from norviq.sdk.client.engine import PolicyEngineClient
@@ -323,7 +323,13 @@ class HttpProxy:
         if msg is None:
             return JSONResponse(P.error_response(None, P.E_PARSE, "invalid JSON-RPC payload"), status_code=400)
 
-        mediation = await fw.on_client_message(msg, list_upstream=self._upstream_lister(request))
+        # This POST's own correlation scope: its response body answers its request and nothing else.
+        # With a session id, the session's GET-stream scope is a peer (a resumed stream may carry the
+        # answer). See `Correlation`.
+        session = request.headers.get("mcp-session-id")
+        corr = fw.new_correlation([fw.session_correlation(session)] if session else None)
+        mediation = await fw.on_client_message(msg, list_upstream=self._upstream_lister(request),
+                                               corr=corr)
         if mediation.catalog_scanned:
             # The proxy listed a cold catalog itself; report it exactly as a forwarded tools/list.
             self._report_catalog(fw, mediation)
@@ -351,8 +357,8 @@ class HttpProxy:
         # Opening the response as a stream lets the content-type be read BEFORE the body is consumed,
         # so one request serves both shapes.
         if _wants_stream(request):
-            return await self._stream_through(fw, "POST", request, mediation.forward)
-        return await self._post_once(fw, request, mediation.forward)
+            return await self._stream_through(fw, "POST", request, mediation.forward, corr)
+        return await self._post_once(fw, request, mediation.forward, corr)
 
     def _upstream_lister(self, request: Request):
         """The firewall's way to send its own `tools/list` upstream for a cold catalog.
@@ -428,7 +434,12 @@ class HttpProxy:
 
     async def _handle_get(self, request: Request) -> Response:
         """Standalone SSE stream: server -> client, including server-initiated requests."""
-        return await self._stream_through(await self._firewall_for_caller(), "GET", request, None)
+        fw = await self._firewall_for_caller()
+        # The GET stream answers only what this client session has pending. Without a session id
+        # there is no session to belong to, and it answers nothing (a fresh, empty scope).
+        session = request.headers.get("mcp-session-id")
+        corr = fw.session_correlation(session) if session else fw.new_correlation()
+        return await self._stream_through(fw, "GET", request, None, corr)
 
     async def _handle_delete(self, request: Request) -> Response:
         """Session teardown.
@@ -446,7 +457,7 @@ class HttpProxy:
 
     # ------------------------------------------------------------------ streaming
     async def _stream_through(self, fw: McpFirewall, method: str, request: Request,
-                              body: bytes | None) -> Response:
+                              body: bytes | None, corr: Correlation) -> Response:
         headers = self._forward_headers(request.headers)
         if body is not None:
             headers["content-type"] = "application/json"
@@ -456,13 +467,14 @@ class HttpProxy:
             async with self._client.stream(
                 method, self._upstream, headers=headers, content=body, timeout=None
             ) as resp:
-                async for out in self._pump_frames(fw, resp):
+                async for out in self._pump_frames(fw, resp, corr):
                     yield out
             del req
 
         return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
 
-    async def _pump_frames(self, fw: McpFirewall, resp: Any) -> AsyncIterator[bytes]:
+    async def _pump_frames(self, fw: McpFirewall, resp: Any,
+                           corr: Correlation | None = None) -> AsyncIterator[bytes]:
         """Mediate an SSE body frame by frame. One implementation, two callers.
 
         `_stream_through` and `_post_once` both consume SSE, and duplicating this loop is how the two
@@ -479,7 +491,7 @@ class HttpProxy:
             body = await self._read_capped(resp, "stream path, non-stream body")
             if body is None:
                 return
-            mediated = await self._mediate_server_bytes(fw, body) if body.strip() else b""
+            mediated = await self._mediate_server_bytes(fw, body, corr) if body.strip() else b""
             if mediated:
                 yield b"event: message\ndata: " + _one_line(mediated) + b"\n\n"
             return
@@ -499,14 +511,14 @@ class HttpProxy:
                     scan_from = max(0, len(buffer) - 1)
                     break
                 frame, buffer, scan_from = buffer[:end], buffer[end + 2:], 0
-                yield await self._mediate_frame(fw, frame) + b"\n\n"
+                yield await self._mediate_frame(fw, frame, corr) + b"\n\n"
             if len(buffer) > limit:
                 # One frame larger than any message the proxy will hold. Ending the stream is the
                 # only fail-closed choice: the frame cannot be mediated without being held whole.
                 self._over_limit("stream path, one SSE frame", limit)
                 return
         if buffer.strip():
-            yield await self._mediate_frame(fw, buffer)
+            yield await self._mediate_frame(fw, buffer, corr)
 
     async def _read_capped(self, resp: Any, where: str) -> bytes | None:
         """The whole body, or None (logged) once it passes `mcp_http_max_message_bytes`."""
@@ -527,7 +539,8 @@ class HttpProxy:
                     hint="raise NRVQ_MCP_HTTP_MAX_MESSAGE_BYTES only if the server's messages are "
                          "legitimately this large")
 
-    async def _post_once(self, fw: McpFirewall, request: Request, body: bytes) -> Response:
+    async def _post_once(self, fw: McpFirewall, request: Request, body: bytes,
+                         corr: Correlation | None = None) -> Response:
         """POST upstream exactly once and serve whichever shape comes back.
 
         The context manager is entered by hand because the decision — buffer or stream — depends on a
@@ -548,7 +561,7 @@ class HttpProxy:
                         sent.id if sent is not None else None, P.E_INTERNAL,
                         "Norviq MCP proxy: the upstream response exceeded the size limit and was not "
                         "forwarded")), status_code=502, media_type="application/json")
-                out = await self._mediate_server_bytes(fw, raw)
+                out = await self._mediate_server_bytes(fw, raw, corr)
                 return Response(out, status_code=resp.status_code,
                                 headers=_passthrough(resp.headers), media_type="application/json")
             finally:
@@ -556,14 +569,15 @@ class HttpProxy:
 
         async def events() -> AsyncIterator[bytes]:
             try:
-                async for out in self._pump_frames(fw, resp):
+                async for out in self._pump_frames(fw, resp, corr):
                     yield out
             finally:
                 await cm.__aexit__(None, None, None)
 
         return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
 
-    async def _mediate_frame(self, fw: McpFirewall, frame: bytes) -> bytes:
+    async def _mediate_frame(self, fw: McpFirewall, frame: bytes,
+                             corr: Correlation | None = None) -> bytes:
         """Mediate the JSON payload of one SSE frame, preserving the SSE fields a client acts on.
 
         Only `data` carries the JSON-RPC message; `event:`, `id:`, `retry:` and comments are transport
@@ -578,11 +592,12 @@ class HttpProxy:
                         detail="lines in a server SSE frame that are neither data nor a known field "
                                "were not forwarded")
         if data is not None:
-            mediated = await self._mediate_server_bytes(fw, data)
+            mediated = await self._mediate_server_bytes(fw, data, corr)
             keep.append(b"data: " + _one_line(mediated) if mediated else b"data: ")
         return b"\n".join(keep)
 
-    async def _mediate_server_bytes(self, fw: McpFirewall, payload: bytes) -> bytes:
+    async def _mediate_server_bytes(self, fw: McpFirewall, payload: bytes,
+                                    corr: Correlation | None = None) -> bytes:
         msg = P.decode(payload)
         if msg is None:
             # FAIL CLOSED, like stdio does (`nrvq.mcp.server.undecodable_dropped`). This used to
@@ -597,7 +612,7 @@ class HttpProxy:
             log.warning("nrvq.mcp.server.undecodable_dropped", bytes=len(payload),
                         transport="http", code="NRVQ-MCP-5004")
             return b""
-        result = await fw.on_server_message(msg)
+        result = await fw.on_server_message(msg, corr)
         if result.reply is not None:
             # A server-initiated request we refused. On this transport the reply travels back as a
             # separate POST rather than inline, so it is dispatched without blocking the stream.
