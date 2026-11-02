@@ -461,8 +461,10 @@ the state it commits and answers for itself, so check the agent (`agent get`) an
 backend whose API side vanished while holding an agent's lock is ended by Postgres after its
 `idle_session_timeout` (set on the admin connection to the fence's lifetime, at least 30 s), which frees
 the agent. The id must start with `spiffe://`, not be empty or only whitespace after it, and be at most 512
-characters (`422` otherwise; 512 is the registry column, and what `POST /api/v1/keys` stores). Any other
-character, glob characters included, is accepted. The retention
+characters (`422` otherwise). That is one rule for the whole product
+(`norviq/engine/identity.py::is_controllable_spiffe_id`): `POST /api/v1/keys` refuses to bind a key to any
+other id, and the evaluator blocks any other id with `invalid_spiffe_identity`, so every identity that
+gets a decision can be frozen. Any other character, glob characters included, is accepted. The retention
 pruner never ages out a frozen or capped agent
 (`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
 

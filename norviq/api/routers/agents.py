@@ -472,17 +472,15 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
     }
 
 
-# The agent ids the product itself accepts: POST /keys mints any spiffe_id up to 512 characters (keys.py) and
-# the evaluator requires only the "spiffe://" prefix (Evaluator._validate_spiffe), so an operator-chosen id
-# such as "spiffe://acme-agent", ".../sa/agent:v2" or one with a space or "*" in it is registered, enforced
-# and listed — and must stay freezable. These routes refuse an id without the prefix, an id that is empty or
-# only whitespace after it, and one over 512 characters: the registry column's width, so a longer id could
-# never be persisted (POST /keys also stores at most 512; the evaluator itself takes longer ones from admin
-# callers, which no admin control can then cover — stated, not fixed here). The id only ever names Redis keys
-# used with GET/SET/DEL/EVAL, never a SCAN or KEYS pattern, so glob characters in it are inert.
+# The agent ids the product accepts — one rule, norviq/engine/identity.py::is_controllable_spiffe_id, shared
+# with POST /keys and the evaluator, so every identity that can get a decision can be frozen. Operator-chosen
+# ids such as "spiffe://acme-agent", ".../sa/agent:v2" or ones with a space or "*" are accepted; the id only
+# ever names Redis keys used with GET/SET/DEL/EVAL, never a SCAN or KEYS pattern, so glob characters are inert.
 def _require_agent_id(spiffe_id: str) -> None:
-    """422 unless ``spiffe_id`` is an agent id the key API mints and the evaluator enforces."""
-    if not spiffe_id.startswith("spiffe://") or not spiffe_id[len("spiffe://"):].strip() or len(spiffe_id) > 512:
+    """422 unless ``spiffe_id`` is an agent id: the one rule the key API, the evaluator and these routes share."""
+    from norviq.engine.identity import is_controllable_spiffe_id
+
+    if not is_controllable_spiffe_id(spiffe_id):
         raise HTTPException(status_code=422, detail="Not a valid agent id (spiffe://..., at most 512 characters)")
 
 

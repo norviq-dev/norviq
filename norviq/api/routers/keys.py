@@ -17,6 +17,7 @@ from norviq.api.auth import _required_bound_fields, get_current_user, require_ad
 from norviq.api.db.models import ApiKey
 from norviq.api.db.session import get_session
 from norviq.config import settings
+from norviq.engine.identity import SPIFFE_ID_MAX_LEN, is_controllable_spiffe_id
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -118,6 +119,16 @@ async def create_key(
                     "for its own agent_class. Pass spiffe_id, or set spiffe_mode=workload-api."
                 ),
             )
+    # The same identity rule as the evaluator and the admin trust routes: a key bound to an id they refuse
+    # could never be evaluated (invalid_spiffe_identity on every call) or frozen.
+    if body.spiffe_id and not is_controllable_spiffe_id(body.spiffe_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "spiffe_id must start with spiffe://, not be empty after it, and be at most "
+                f"{SPIFFE_ID_MAX_LEN} characters"
+            ),
+        )
     if body.role == "service" and not body.agent_class.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

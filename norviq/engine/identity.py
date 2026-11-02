@@ -37,6 +37,26 @@ class SpiffeResolutionError(RuntimeError):
     """Raised in workload-api mode when an SVID cannot be fetched/validated (fail-closed)."""
 
 
+# The one rule for an agent identity, shared by everything that mints, evaluates or controls one: POST /keys
+# (binding a key to it), the evaluator (deciding for it) and the admin trust routes (freezing it). They used
+# to disagree — the evaluator took any "spiffe://..." string, the key API any up to 512 characters including
+# the bare prefix, while the admin routes refused the bare prefix and anything longer than the registry's
+# 512-character column — so an identity could make decisions that no freeze could reach.
+SPIFFE_ID_MAX_LEN = 512
+
+
+def is_controllable_spiffe_id(spiffe_id: object) -> bool:
+    """True when ``spiffe_id`` starts with "spiffe://", is not empty or only whitespace after it, and is at
+    most SPIFFE_ID_MAX_LEN characters. Any other character, whitespace and glob characters included, is
+    accepted: the id only names registry rows and Redis keys used with GET/SET/DEL/EVAL."""
+    return (
+        isinstance(spiffe_id, str)
+        and spiffe_id.startswith("spiffe://")
+        and bool(spiffe_id[len("spiffe://"):].strip())
+        and len(spiffe_id) <= SPIFFE_ID_MAX_LEN
+    )
+
+
 def _parse_norviq_spiffe_id(spiffe_id: str) -> tuple[str, str] | None:
     """Parse spiffe://norviq/ns/<ns>/sa/<sa> -> (namespace, service_account); None if not ours."""
     prefix = f"spiffe://{_TRUST_DOMAIN}/"

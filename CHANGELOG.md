@@ -14,6 +14,15 @@ because they should be installed.
 
 **Upgrade impact — read before `helm upgrade`.**
 
+- **An agent identity must be one an admin can freeze.** The key API, the evaluator and the admin trust
+  routes now share one rule: the id starts with `spiffe://`, is not empty or only whitespace after it, and
+  is at most 512 characters. `POST /api/v1/keys` refuses (`422`) a `spiffe_id` outside it. The evaluator
+  blocks a call from such an identity with `invalid_spiffe_identity` (`NRVQ-ENG-2006`; softened in a
+  namespace in monitor mode, like other fail-closed blocks) instead of deciding for it. It used to check
+  only the prefix; with the admin routes now refusing these ids, such an identity would get decisions that
+  no freeze could reach. **Existing keys bound to such an
+  id keep authenticating, but every evaluation for them now blocks**: re-issue them with a valid
+  `spiffe_id`. Look for `NRVQ-ENG-2006` after the upgrade. Registry rows are unaffected.
 - **The namespace baseline now blocks.** `baselineClusterPolicy.enforcementMode` defaults to `block`
   (it was `audit`). 20 of its 21 controls act on the call: 17 refuse it, `llm06_excessive_agency` refuses
   destructive tools and holds elevated ones for approval, and `mcp_definition_drift` and

@@ -3061,6 +3061,11 @@ class OPAEvaluator:
         )
 
     def _validate_spiffe(self, spiffe_id: str) -> None:
-        """Validate SPIFFE identifier format before trust operations."""
-        if not spiffe_id.startswith("spiffe://"):
+        """Validate SPIFFE identifier format before trust operations: the same rule the key API and the admin
+        trust routes apply (identity.is_controllable_spiffe_id), so every identity that gets a decision can be
+        frozen. It used to check only the "spiffe://" prefix, which let the bare prefix and ids over 512
+        characters be decided for while PUT /agents/{id}/trust answered 422 for them."""
+        from norviq.engine.identity import is_controllable_spiffe_id
+
+        if not is_controllable_spiffe_id(spiffe_id):
             raise InvalidSpiffeIdentity("invalid spiffe_id")

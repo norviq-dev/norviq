@@ -330,7 +330,7 @@ table stays unpartitioned for that range and retention pruning gets slower over 
 | NRVQ-ENG-2003 | `nrvq.engine.fallback` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2004 | `nrvq.engine.cache_hit` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2005 | `nrvq.engine.policy_loaded` | `norviq/engine/evaluator.py` |
-| NRVQ-ENG-2006 | `nrvq.engine.invalid_identity` (invalid SPIFFE id → named fail-closed `invalid_spiffe_identity`) | `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2006 | `nrvq.engine.invalid_identity` (invalid SPIFFE id → named fail-closed `invalid_spiffe_identity`). Invalid means what no admin control could cover: not starting with `spiffe://`, empty or only whitespace after it, or over 512 characters — the rule `POST /api/v1/keys` and `PUT /agents/{id}/trust` also apply (`norviq/engine/identity.py::is_controllable_spiffe_id`). Like other fail-closed blocks it is softened in a namespace in monitor mode | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2057 | `nrvq.engine.unattributed_block` (a block reached persist with empty/`default_allow` rule_id → clamped to `unattributed_block` + alarm) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2058 | `nrvq.engine.posture.mirror_unavailable` (per-ns settings mirror read failed → global posture) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2059 | `nrvq.engine.posture.monitor_softened` (ns audit/monitor mode softened a would-block/escalate to allow-but-log) | `norviq/engine/evaluator.py` |
