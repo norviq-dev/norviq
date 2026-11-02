@@ -74,6 +74,9 @@ _DRAIN_TIMEOUT_S = 5.0
 # How many client messages may be read (and registered as pending) ahead of the one being mediated.
 # Bounded so a client cannot buffer without limit while mediation is held; the reader then waits.
 _READ_AHEAD = 256
+# ...and how many BYTES. 256 messages of up to `_MAX_LINE` each is 2 GiB; this caps what reading
+# ahead can hold. One message larger than the budget is still read when nothing else is queued.
+_READ_AHEAD_BYTES = 16 * 1024 * 1024
 
 
 def configure_stdio_logging() -> None:
@@ -339,8 +342,11 @@ class StdioProxy:
         """
         firewall = self._firewall
         queue: asyncio.Queue = asyncio.Queue(maxsize=_READ_AHEAD)
+        queued_bytes = 0
+        room = asyncio.Condition()
 
         async def _read() -> None:
+            nonlocal queued_bytes
             try:
                 while True:
                     line = await _read_line(client_in)
@@ -353,8 +359,13 @@ class StdioProxy:
                         log.warning("nrvq.mcp.client.undecodable_dropped", bytes=len(line),
                                     code="NRVQ-MCP-5003")
                         continue
+                    size = len(line)
+                    async with room:
+                        await room.wait_for(
+                            lambda: queued_bytes == 0 or queued_bytes + size <= _READ_AHEAD_BYTES)
+                        queued_bytes += size
                     firewall.note_client_request(msg)
-                    await queue.put(msg)
+                    await queue.put((msg, size))
             except Exception as exc:  # noqa: BLE001 — end the session the way EOF does, loudly
                 log.error("nrvq.mcp.proxy.pump_failed", task="c2s-read", error=str(exc),
                           code="NRVQ-MCP-5001")
@@ -364,9 +375,13 @@ class StdioProxy:
         reader = asyncio.create_task(_read(), name="c2s-read")
         try:
             while True:
-                msg = await queue.get()
-                if msg is None:
+                item = await queue.get()
+                if item is None:
                     break
+                msg, size = item
+                async with room:
+                    queued_bytes -= size
+                    room.notify_all()
                 result = await firewall.on_client_message(msg, list_upstream=self._list_upstream,
                                                           registered=True)
                 if result.catalog_scanned:

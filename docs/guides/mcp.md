@@ -208,7 +208,9 @@ result without its list) is dropped and leaves the request pending. Only a reque
 already forwarded upstream can be answered: an answer to one still being decided is dropped, and the
 client gets the proxy's decision. On HTTP a response is matched only against the requests of the POST
 it arrives on, or, on the GET stream, of the same `Mcp-Session-Id` (a GET stream without one matches
-nothing). A message is a request or notification only when its `method` is a string and it carries no
+nothing). Two requests in one session with the same id are answered only on their own POSTs, and a
+session id the server issued to two `initialize` exchanges answers nothing on its GET stream
+(`NRVQ-MCP-5086`). A string id longer than 64 characters is not read as a number. A message is a request or notification only when its `method` is a string and it carries no
 `result` or `error`, and a response only when it carries no `method`; anything else is dropped.
 
 ---
@@ -747,9 +749,9 @@ schema violation, `5070` schema not fully enforceable, `5079` cold catalog liste
 `5080` the proxy's cold-catalog list failed, `5081` a late or duplicate answer to it dropped,
 `5082` SSE lines dropped, `5083` the proxy's list superseded by a client listing, `5084` a server
 response dropped because it matches no well-formed answer to a client request, `5085` an upstream
-message over the HTTP size limit. Latency is recorded as
+message over the HTTP size limit, `5086` one session id issued to two sessions. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
-`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` are
+`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5086` are
 listed in [Error Codes](../error-codes.md) so far.
 
 ---

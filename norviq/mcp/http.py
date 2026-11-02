@@ -357,8 +357,10 @@ class HttpProxy:
         # Opening the response as a stream lets the content-type be read BEFORE the body is consumed,
         # so one request serves both shapes.
         if _wants_stream(request):
-            return await self._stream_through(fw, "POST", request, mediation.forward, corr)
-        return await self._post_once(fw, request, mediation.forward, corr)
+            return await self._stream_through(fw, "POST", request, mediation.forward, corr,
+                                              initialize=msg.method == P.M_INITIALIZE)
+        return await self._post_once(fw, request, mediation.forward, corr,
+                                     initialize=msg.method == P.M_INITIALIZE)
 
     def _upstream_lister(self, request: Request):
         """The firewall's way to send its own `tools/list` upstream for a cold catalog.
@@ -457,7 +459,7 @@ class HttpProxy:
 
     # ------------------------------------------------------------------ streaming
     async def _stream_through(self, fw: McpFirewall, method: str, request: Request,
-                              body: bytes | None, corr: Correlation) -> Response:
+                              body: bytes | None, corr: Correlation, initialize: bool = False) -> Response:
         headers = self._forward_headers(request.headers)
         if body is not None:
             headers["content-type"] = "application/json"
@@ -467,6 +469,8 @@ class HttpProxy:
             async with self._client.stream(
                 method, self._upstream, headers=headers, content=body, timeout=None
             ) as resp:
+                if initialize:
+                    _note_session(fw, resp, corr)
                 async for out in self._pump_frames(fw, resp, corr):
                     yield out
             del req
@@ -540,7 +544,7 @@ class HttpProxy:
                          "legitimately this large")
 
     async def _post_once(self, fw: McpFirewall, request: Request, body: bytes,
-                         corr: Correlation | None = None) -> Response:
+                         corr: Correlation | None = None, initialize: bool = False) -> Response:
         """POST upstream exactly once and serve whichever shape comes back.
 
         The context manager is entered by hand because the decision — buffer or stream — depends on a
@@ -551,6 +555,8 @@ class HttpProxy:
         headers = {**self._forward_headers(request.headers), "content-type": "application/json"}
         cm = self._client.stream("POST", self._upstream, headers=headers, content=body, timeout=None)
         resp = await cm.__aenter__()
+        if initialize and corr is not None:
+            _note_session(fw, resp, corr)
 
         if not _is_sse(resp.headers):
             try:
@@ -737,6 +743,14 @@ def _split_frame(frame: bytes) -> tuple[list[bytes], bytes | None, int]:
         elif line:
             dropped += 1
     return keep, (b"\n".join(data) if data else None), dropped
+
+
+def _note_session(fw: McpFirewall, resp: Any, corr: Correlation) -> None:
+    """Tell the firewall which session id the server issued to this `initialize` (see
+    `McpFirewall.note_session_issued`)."""
+    session = resp.headers.get("mcp-session-id")
+    if session:
+        fw.note_session_issued(session, corr)
 
 
 def _is_sse(headers: Any) -> bool:
