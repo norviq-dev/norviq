@@ -181,8 +181,10 @@ because they should be installed.
   DELETE, the reset) are serialized by a per-agent Postgres lock, so two of them on different replicas
   no longer leave the registry and Redis disagreeing, and a starting API's write-back of freezes and
   caps takes the same lock per agent, so it no longer restores a cap or freeze another replica changed
-  while it ran. The three routes answer `422` for an id that is
-  not a well-formed SPIFFE ID. `NRVQ-API-7031` names the actor.
+  while it ran. The three routes answer `422` for an id that is not
+  safe to write under (no `spiffe://` prefix, empty, whitespace, `* ? [ ]`, over 512 characters). A
+  change that finds the agent locked by another for over 5 s is a `503` that applies nothing
+  (`NRVQ-API-7149`). `NRVQ-API-7031` names the actor.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck
 reports 47 standard-library advisories, 29 of them reachable from the webhook. An older Go fetches
@@ -231,6 +233,12 @@ any such event run `kubectl -n <namespace> rollout restart deployment/norviq-api
 freeze or cap lifted since: the restart adds what Postgres holds and removes nothing, so lift it again
 with `norviq agent reset-trust <id> --score 1.0` (which clears a cap too; `--score <cap>` lifts the
 freeze and keeps that cap). Details in docs/trust-score-design.md §5.
+
+An admin trust change (`PUT /api/v1/agents/{spiffe_id}/trust`) writes Redis under the agent's lock and
+then commits, because the lock ends with the transaction. If that commit fails, Redis is set from the
+registry under a new lock. If neither Postgres nor Redis can then be confirmed, the answer is a `503`
+starting "State uncertain" and `NRVQ-API-7148` is logged at ERROR: a cap or clear may be live without
+its durable copy. Retry the change, or restart the API, which writes the registry's state back.
 
 ## [0.2.5] — 2026-08-20 — log codes that named two things at once
 

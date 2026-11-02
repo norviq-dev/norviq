@@ -435,12 +435,16 @@ on the agent's first call (`norviq/api/db/session.py::upsert_agent_registry`) do
 columns. Every admin trust write for one agent — `reset-trust`, `freeze`, `reset-history` and
 `DELETE /api/v1/agents/{spiffe_id}` — runs under one per-agent Postgres lock
 (`norviq/api/routers/agents.py::_lock_agent`), so two of them on different replicas cannot interleave
-and leave the registry and Redis disagreeing. A write that waits on that lock for longer than the
-database command timeout (`NRVQ_DB_COMMAND_TIMEOUT`, 10 s) fails like any other database error. Failures
-are a non-zero exit on a `503` and only ever err toward the freeze: with the database down, a freeze is
-in force but not durable (retry it) and a cap or clear changed nothing; with Redis down, a freeze is
-durable and takes effect at the next API start, and a cap or clear changed nothing. The SPIFFE ID must be
-well formed (`spiffe://<trust-domain>/<path>`, at most 512 characters; `422` otherwise). The retention
+and leave the registry and Redis disagreeing. A write that finds the agent locked by another one for
+more than 5 s exits non-zero on a `503` ("another admin change ... is in progress") and applies nothing.
+Every store call made under the lock is cut off at 2 s. Other failures are a `503` too and err toward
+the freeze: with the database down, a freeze is in force but not durable (retry it) and a cap or clear
+changed nothing; with Redis down, a freeze is durable and takes effect at the next API start, and a cap
+or clear changed nothing. A `503` that starts "State uncertain" (`NRVQ-API-7148`) means the store could
+not be confirmed to match the registry after a failure: retry, then check the agent with `agent get`.
+The id must start with `spiffe://`, as the evaluator requires, be at most 512 characters, and contain
+no whitespace or `*` `?` `[` `]` (`422` otherwise); any other id an API key was minted for, such as
+`spiffe://acme-agent`, is accepted. The retention
 pruner never ages out a frozen or capped agent
 (`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
 

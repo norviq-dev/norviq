@@ -58,13 +58,22 @@ class _Session:
         self._rows = rows or []
         self._boom = boom
 
-    async def execute(self, *_a, **_k):
+    async def execute(self, stmt=None, params=None, *_a, **_k):
         if self._boom is not None:
             raise self._boom
+        sql, params = str(stmt), params or {}
+        if "spiffe_id > :after" in sql:  # the warm's batch cursor: ORDER BY spiffe_id, LIMIT n
+            rows = sorted((r for r in self._rows if r["spiffe_id"] > params["after"]), key=lambda r: r["spiffe_id"])
+            return _Rows(rows[: params["n"]])
+        if "ANY(:ids)" in sql:
+            return _Rows([r for r in self._rows if r["spiffe_id"] in params["ids"]])
         return _Rows(self._rows)
 
     async def commit(self) -> None:
-        """warm_agent_overrides commits once per agent, releasing that agent's admin lock."""
+        """warm_agent_overrides commits once per batch, releasing that batch's admin locks."""
+
+    async def rollback(self) -> None:
+        """Ends the warm's last (empty) transaction."""
 
 
 def _factory(*sessions):
@@ -86,6 +95,29 @@ class _Client:
         if self._fail_after is not None and len(self._store) >= self._fail_after:
             raise ConnectionError("store connection reset")
         self._store[key] = value
+
+    def pipeline(self, transaction=True):
+        return _Pipe(self)
+
+
+class _Pipe:
+    """The warm writes each batch through one pipeline; the SETs land, in order, at execute()."""
+
+    def __init__(self, client):
+        self._client, self._ops = client, []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def set(self, key, value):
+        self._ops.append((key, value))
+
+    async def execute(self):
+        for key, value in self._ops:
+            await self._client.set(key, value)
 
 
 class _Cache:

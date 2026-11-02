@@ -23,7 +23,7 @@ individually described.
 
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
-| API | 104 | `norviq/api/main.py`, `norviq/api/routers/*` |
+| API | 106 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/controller.go`, `webhook/injector.go` |
 | ENG | 54 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | MCP | 49 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
@@ -42,7 +42,7 @@ individually described.
 | SIEM | 6 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **535** (including `*-DEBUG-*` traces). Counted 2026-11-02 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
+Total unique codes: **537** (including `*-DEBUG-*` traces). Counted 2026-11-02 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
 
 ## API
 
@@ -109,7 +109,7 @@ Total unique codes: **535** (including `*-DEBUG-*` traces). Counted 2026-11-02 t
 | NRVQ-API-7019 | `nrvq.api.policy.write_scope_denied` (caller's namespace claim does not cover the write target) | `norviq/api/routers/policies.py` |
 | NRVQ-API-7024 | `nrvq.api.audit.export` (audit evidence export served) | `norviq/api/routers/audit.py` |
 | NRVQ-API-7032 | `nrvq.api.agents.registry_read_failed` | `norviq/api/routers/agents.py` |
-| NRVQ-API-7033 | `nrvq.api.agent.registry_read_failed` / `agent.trust_persist_failed` / `agents.last_seen_failed` (degraded registry reads and writes; read paths still serve. `trust_persist_failed` means `PUT /agents/{id}/trust` answered **503** because the registry write, the per-agent lock or the commit failed: a freeze is live but not durable (`live=true`), a cap or clear was not applied (`restored=true` when Redis was put back after a failed commit)) | `norviq/api/routers/agents.py` |
+| NRVQ-API-7033 | `nrvq.api.agent.registry_read_failed` / `agent.trust_persist_failed` / `agents.last_seen_failed` (degraded registry reads and writes; read paths still serve). `trust_persist_failed` is `PUT /agents/{id}/trust` failing in Postgres, with a **503** unless noted: the registry write failed (a freeze is live but not durable when `live=true`; a cap or clear was not applied), or the commit failed and Redis was set from the registry row re-read under a fresh lock (`reconciled=true`; `applied=true` means the commit had landed and the answer is 200) | `norviq/api/routers/agents.py` |
 | NRVQ-API-7034 | `nrvq.api.agent.overrides_warmed` — the boot warm wrote the agent freezes and trust caps recorded in `agent_registry` into the store (`count=` how many). Fires once per API process start whose warm completes, including with `count=0`; a start whose every attempt failed logs NRVQ-API-7035 instead. It is the only thing besides an admin trust change that writes them, so after the store loses its data they are absent until an API process logs this again | `norviq/api/routers/agents.py` |
 | NRVQ-API-7035 | **`nrvq.startup.agent_overrides_warm_failed`** — every attempt of the boot warm of agent freezes and trust caps failed (`attempts=`, `error=`; 3 attempts, 1 s then 2 s apart, each cut off at 10 s). **Alert on this**: that process serves without having written them, so after a store loss frozen agents are enforced as not frozen and capped ones as uncapped until an API process starts and logs NRVQ-API-7034. Restart the API (`kubectl -n <namespace> rollout restart deployment/norviq-api`) once the cause is fixed. Through 0.2.5 a failed query or store write logged only a WARNING under this code, and the count it returned read like "nothing is frozen" | `norviq/api/routers/agents.py`, `norviq/startup_retry.py`, `norviq/api/main.py` |
 | NRVQ-API-7158 | `nrvq.startup.agent_overrides_warm_retry` — one attempt of the boot warm of agent freezes and trust caps failed, or ran past 10 s, and is retried (`attempt=`, `delay=`; 3 attempts, 1 s then 2 s apart, `norviq.startup_retry.warm_with_backoff`). Transient on its own; NRVQ-API-7035 follows if the last attempt fails too | `norviq/api/routers/agents.py`, `norviq/startup_retry.py` |
@@ -138,10 +138,12 @@ Total unique codes: **535** (including `*-DEBUG-*` traces). Counted 2026-11-02 t
 | NRVQ-API-7141 | `nrvq.api.baseline.rematerialize_skipped_foreign` — a `__controls__` policy the baseline controls API did not write (its name is not `baseline-controls:<preset>`) was left as it is | `norviq/api/routers/baseline_router.py` |
 | NRVQ-API-7142 | `nrvq.startup.baseline_controls_rematerialize_failed` — the startup re-compile of saved baseline controls failed as a whole (for example the database was unreachable); no namespace was re-compiled | `norviq/api/main.py` |
 | NRVQ-API-7143 | `nrvq.api.agent.deregister_refused` — `DELETE /agents/{id}` answered **409** because the agent is frozen or under a trust cap (`frozen`, `capped`, `actor`). Deleting the registry row would have lifted the control; lift it with `PUT /agents/{id}/trust` (score 1.0) first | `norviq/api/routers/agents.py` |
-| NRVQ-API-7144 | `nrvq.api.agent.deregister_check_failed` — `DELETE /agents/{id}` could not take the per-agent lock, read the registry row or the live freeze/cap keys, or commit, and answered **503** without deleting anything | `norviq/api/routers/agents.py` |
+| NRVQ-API-7144 | `nrvq.api.agent.deregister_check_failed` — `DELETE /agents/{id}` could not read the registry row or the live freeze/cap keys (store calls are cut off at 2 s), or commit, and answered **503** without deleting anything. A contended lock is NRVQ-API-7149 | `norviq/api/routers/agents.py` |
 | NRVQ-API-7145 | `nrvq.api.agent.trust_reset` — the audit record of `POST /agents/{id}/trust/reset`: an admin cleared the agent's behavioural history and profile. Carries `actor`, `actor_role`, `score_before`, `violation_count` (the registry's cumulative count, which the reset keeps), `history_entries_cleared`, `history_blocks_cleared`, `keys_cleared`, and the `frozen`/`trust_cap` that stay in force | `norviq/api/routers/agents.py` |
-| NRVQ-API-7146 | `nrvq.api.agent.trust_reset_failed` — the reset could not take the per-agent lock or run its Redis transaction and answered **503**; the counts and the delete are one MULTI, so nothing was cleared | `norviq/api/routers/agents.py` |
-| NRVQ-API-7147 | `nrvq.api.agent.trust_live_failed` — `PUT /agents/{id}/trust` wrote the registry but Redis did not take the change, and answered **503**. `durable=true`: a freeze is committed and takes effect at the next API start (`warm_agent_overrides`), so alert on it — the agent is not frozen yet. `durable=false`: a cap or clear was rolled back, nothing changed | `norviq/api/routers/agents.py` |
+| NRVQ-API-7146 | `nrvq.api.agent.trust_reset_failed` — the reset answered **503**. `contended=true`: another admin write held the agent, nothing was cleared. Otherwise the store did not confirm the reset's MULTI (cut off at 2 s), so it may or may not have run; retry. Once the MULTI has answered the reset always reports and logs NRVQ-API-7145 | `norviq/api/routers/agents.py` |
+| NRVQ-API-7147 | `nrvq.api.agent.trust_live_failed` — `PUT /agents/{id}/trust` wrote the registry but Redis did not confirm the change (store calls are cut off at 2 s), and answered **503**. `durable=true`: a freeze is committed and takes effect at the next API start (`warm_agent_overrides`), so alert on it — the agent is not frozen yet. `durable=false`: a cap or clear was rolled back and Redis was set back to the registry's state under the lock; nothing changed | `norviq/api/routers/agents.py` |
+| NRVQ-API-7148 | **`nrvq.api.agent.trust_state_uncertain`** (ERROR) — after a failed `PUT /agents/{id}/trust`, Redis could not be confirmed to match the registry, and the route answered **503** "State uncertain". `outcome=store_not_reset_after_failed_write`: a cap or clear may be live while Postgres rolled back. `outcome=commit_unconfirmed_stricter_state_live`: the commit's result is unknown and Postgres could not be reached to re-read it, so the stricter of the old and new control was put live. `outcome=commit_failed_store_not_set_from_registry`: the commit failed, the registry was re-read under a fresh lock, but Redis did not take its state. `outcome=commit_failed_registry_unreachable_store_unset`: neither store could be confirmed. **Alert on this**: retry the change, then check the agent (`GET /agents/{id}`); an API restart writes the registry's state back | `norviq/api/routers/agents.py` |
+| NRVQ-API-7149 | `nrvq.api.agent.trust_write_contended` — another admin trust write held this agent's lock for more than 5 s (`lock_timeout`), so `PUT /agents/{id}/trust` or `DELETE /agents/{id}` (`op=delete`) answered **503** and applied nothing. Nothing is applied live either: a contended freeze is not an outage | `norviq/api/routers/agents.py` |
 
 ## WHK
 
@@ -399,15 +401,18 @@ NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-
 NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7016, NRVQ-API-7017, NRVQ-API-7018, NRVQ-API-7019, NRVQ-API-7020,
 NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032,
 NRVQ-API-7033, NRVQ-API-7034, NRVQ-API-7035, NRVQ-API-7040, NRVQ-API-7041, NRVQ-API-7050, NRVQ-API-7050-ERR,
-NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7052, NRVQ-API-7060, NRVQ-API-7060-ERR, NRVQ-API-7061,
-NRVQ-API-7062, NRVQ-API-7063, NRVQ-API-7064, NRVQ-API-7070, NRVQ-API-7070-ERR, NRVQ-API-7071, NRVQ-API-7072,
-NRVQ-API-7073, NRVQ-API-7074, NRVQ-API-7075, NRVQ-API-7076, NRVQ-API-7077, NRVQ-API-7078, NRVQ-API-7079,
-NRVQ-API-7080, NRVQ-API-7081, NRVQ-API-7081-ERR, NRVQ-API-7082, NRVQ-API-7083, NRVQ-API-7084, NRVQ-API-7085,
-NRVQ-API-7086, NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-API-7093, NRVQ-API-7094,
-NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7098, NRVQ-API-7099, NRVQ-API-7100, NRVQ-API-7101,
-NRVQ-API-7102, NRVQ-API-7103, NRVQ-API-7104, NRVQ-API-7105, NRVQ-API-7110, NRVQ-API-7111, NRVQ-API-7112,
-NRVQ-API-7113, NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-API-7123,
-NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7136, NRVQ-API-7137, NRVQ-API-7138, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7143, NRVQ-API-7144, NRVQ-API-7145, NRVQ-API-7146, NRVQ-API-7147, NRVQ-API-7158, NRVQ-API-7159, NRVQ-API-7460
+NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7052, NRVQ-API-7060, NRVQ-API-7060-ERR, NRVQ-API-7061, NRVQ-API-7062,
+NRVQ-API-7063, NRVQ-API-7064, NRVQ-API-7070, NRVQ-API-7070-ERR, NRVQ-API-7071, NRVQ-API-7072, NRVQ-API-7073,
+NRVQ-API-7074, NRVQ-API-7075, NRVQ-API-7076, NRVQ-API-7077, NRVQ-API-7078, NRVQ-API-7079, NRVQ-API-7080,
+NRVQ-API-7081, NRVQ-API-7081-ERR, NRVQ-API-7082, NRVQ-API-7083, NRVQ-API-7084, NRVQ-API-7085, NRVQ-API-7086,
+NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-API-7093, NRVQ-API-7094, NRVQ-API-7095,
+NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7098, NRVQ-API-7099, NRVQ-API-7100, NRVQ-API-7101, NRVQ-API-7102,
+NRVQ-API-7103, NRVQ-API-7104, NRVQ-API-7105, NRVQ-API-7110, NRVQ-API-7111, NRVQ-API-7112, NRVQ-API-7113,
+NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-API-7123, NRVQ-API-7124,
+NRVQ-API-7131, NRVQ-API-7132, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7136, NRVQ-API-7137,
+NRVQ-API-7138, NRVQ-API-7139, NRVQ-API-7140, NRVQ-API-7141, NRVQ-API-7142, NRVQ-API-7143, NRVQ-API-7144,
+NRVQ-API-7145, NRVQ-API-7146, NRVQ-API-7147, NRVQ-API-7148, NRVQ-API-7149, NRVQ-API-7158, NRVQ-API-7159,
+NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
 NRVQ-WHK-4007, NRVQ-WHK-4008, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,
@@ -416,38 +421,47 @@ NRVQ-WHK-4025, NRVQ-WHK-4026, NRVQ-WHK-4027, NRVQ-WHK-4028, NRVQ-WHK-4029, NRVQ-
 NRVQ-WHK-4032, NRVQ-WHK-4033, NRVQ-WHK-4034, NRVQ-WHK-4035, NRVQ-WHK-4036, NRVQ-WHK-4037, NRVQ-WHK-4038,
 NRVQ-WHK-4039, NRVQ-WHK-4040, NRVQ-WHK-4041, NRVQ-WHK-4042, NRVQ-WHK-4043, NRVQ-WHK-4044, NRVQ-WHK-4045,
 NRVQ-WHK-4046, NRVQ-WHK-4047, NRVQ-WHK-4048, NRVQ-WHK-4049, NRVQ-WHK-4050, NRVQ-WHK-4051, NRVQ-WHK-4052,
-NRVQ-WHK-4053, NRVQ-WHK-4054, NRVQ-WHK-4055, NRVQ-WHK-4056, NRVQ-WHK-4057, NRVQ-WHK-4058,
-NRVQ-WHK-4059
+NRVQ-WHK-4053, NRVQ-WHK-4054, NRVQ-WHK-4055, NRVQ-WHK-4056, NRVQ-WHK-4057, NRVQ-WHK-4058, NRVQ-WHK-4059,
+NRVQ-WHK-4060, NRVQ-WHK-4061, NRVQ-WHK-4062
 
-NRVQ-ENG-DEBUG-1, NRVQ-ENG-DEBUG-2, NRVQ-ENG-DEBUG-3, NRVQ-ENG-DEBUG-4, NRVQ-ENG-DEBUG-5, NRVQ-ENG-2000,
-NRVQ-ENG-2001, NRVQ-ENG-2002, NRVQ-ENG-2003, NRVQ-ENG-2004, NRVQ-ENG-2005, NRVQ-ENG-2006, NRVQ-ENG-2010,
-NRVQ-ENG-2015, NRVQ-ENG-2020, NRVQ-ENG-2021, NRVQ-ENG-2030, NRVQ-ENG-2031, NRVQ-ENG-2040, NRVQ-ENG-2041,
-NRVQ-ENG-2042, NRVQ-ENG-2043, NRVQ-ENG-2044, NRVQ-ENG-2045, NRVQ-ENG-2046, NRVQ-ENG-2047, NRVQ-ENG-2048,
-NRVQ-ENG-2049, NRVQ-ENG-2050, NRVQ-ENG-2051, NRVQ-ENG-2052, NRVQ-ENG-2053, NRVQ-ENG-2054, NRVQ-ENG-2055,
-NRVQ-ENG-2056, NRVQ-ENG-2057, NRVQ-ENG-2058, NRVQ-ENG-2059, NRVQ-ENG-2060, NRVQ-ENG-2070, NRVQ-ENG-2071,
-NRVQ-ENG-DEBUG-ERR,
-NRVQ-ENG-DEBUG-INPUT, NRVQ-ENG-DEBUG-OPA, NRVQ-ENG-DEBUG-OPA-IN, NRVQ-ENG-DEBUG-QUERY
+NRVQ-ENG-2000, NRVQ-ENG-2001, NRVQ-ENG-2002, NRVQ-ENG-2003, NRVQ-ENG-2004, NRVQ-ENG-2005, NRVQ-ENG-2006,
+NRVQ-ENG-2010, NRVQ-ENG-2015, NRVQ-ENG-2020, NRVQ-ENG-2021, NRVQ-ENG-2030, NRVQ-ENG-2031, NRVQ-ENG-2040,
+NRVQ-ENG-2041, NRVQ-ENG-2042, NRVQ-ENG-2043, NRVQ-ENG-2044, NRVQ-ENG-2045, NRVQ-ENG-2046, NRVQ-ENG-2047,
+NRVQ-ENG-2048, NRVQ-ENG-2049, NRVQ-ENG-2050, NRVQ-ENG-2051, NRVQ-ENG-2052, NRVQ-ENG-2053, NRVQ-ENG-2054,
+NRVQ-ENG-2055, NRVQ-ENG-2056, NRVQ-ENG-2057, NRVQ-ENG-2058, NRVQ-ENG-2059, NRVQ-ENG-2060, NRVQ-ENG-2061,
+NRVQ-ENG-2062, NRVQ-ENG-2063, NRVQ-ENG-2064, NRVQ-ENG-2065, NRVQ-ENG-2066, NRVQ-ENG-2067, NRVQ-ENG-2068,
+NRVQ-ENG-2069, NRVQ-ENG-2070, NRVQ-ENG-2071, NRVQ-ENG-DEBUG-1, NRVQ-ENG-DEBUG-2, NRVQ-ENG-DEBUG-3, NRVQ-ENG-DEBUG-4,
+NRVQ-ENG-DEBUG-5, NRVQ-ENG-DEBUG-INPUT, NRVQ-ENG-DEBUG-OPA, NRVQ-ENG-DEBUG-OPA-IN, NRVQ-ENG-DEBUG-QUERY
 
-NRVQ-DB-DEBUG-1, NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C,
-NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-5, NRVQ-DB-DEBUG-6, NRVQ-DB-9000,
-NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012, NRVQ-DB-9013,
-NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019, NRVQ-DB-9020,
-NRVQ-DB-9021, NRVQ-DB-9022, NRVQ-DB-9023, NRVQ-DB-9024, NRVQ-DB-9025, NRVQ-DB-9026, NRVQ-DB-9027,
-NRVQ-DB-9028, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9034, NRVQ-DB-9035,
-NRVQ-DB-DEBUG-CONNECT-ARGS, NRVQ-DB-DEBUG-METADATA
+NRVQ-MCP-5000, NRVQ-MCP-5001, NRVQ-MCP-5002, NRVQ-MCP-5003, NRVQ-MCP-5004, NRVQ-MCP-5005, NRVQ-MCP-5006,
+NRVQ-MCP-5010, NRVQ-MCP-5011, NRVQ-MCP-5020, NRVQ-MCP-5021, NRVQ-MCP-5022, NRVQ-MCP-5023, NRVQ-MCP-5030,
+NRVQ-MCP-5031, NRVQ-MCP-5032, NRVQ-MCP-5033, NRVQ-MCP-5034, NRVQ-MCP-5035, NRVQ-MCP-5036, NRVQ-MCP-5037,
+NRVQ-MCP-5040, NRVQ-MCP-5041, NRVQ-MCP-5042, NRVQ-MCP-5043, NRVQ-MCP-5044, NRVQ-MCP-5045, NRVQ-MCP-5046,
+NRVQ-MCP-5047, NRVQ-MCP-5048, NRVQ-MCP-5060, NRVQ-MCP-5061, NRVQ-MCP-5062, NRVQ-MCP-5063, NRVQ-MCP-5064,
+NRVQ-MCP-5065, NRVQ-MCP-5066, NRVQ-MCP-5067, NRVQ-MCP-5068, NRVQ-MCP-5069, NRVQ-MCP-5070, NRVQ-MCP-5071,
+NRVQ-MCP-5072, NRVQ-MCP-5073, NRVQ-MCP-5074, NRVQ-MCP-5075, NRVQ-MCP-5076, NRVQ-MCP-5077, NRVQ-MCP-5078
 
-NRVQ-FLT-15000, NRVQ-FLT-15001, NRVQ-FLT-15002, NRVQ-FLT-15003, NRVQ-FLT-15004, NRVQ-FLT-15005,
-NRVQ-FLT-15009, NRVQ-FLT-15010, NRVQ-FLT-15011, NRVQ-FLT-15012, NRVQ-FLT-15013, NRVQ-FLT-15014,
-NRVQ-FLT-15015, NRVQ-FLT-15016, NRVQ-FLT-15017, NRVQ-FLT-15018, NRVQ-FLT-15019, NRVQ-FLT-15020,
-NRVQ-FLT-15021, NRVQ-FLT-15022, NRVQ-FLT-15023, NRVQ-FLT-15024, NRVQ-FLT-15025, NRVQ-FLT-15026,
-NRVQ-FLT-15027, NRVQ-FLT-15028, NRVQ-FLT-15029, NRVQ-FLT-15030, NRVQ-FLT-15031, NRVQ-FLT-15032,
-NRVQ-FLT-15033, NRVQ-FLT-15034, NRVQ-FLT-15035, NRVQ-FLT-15040, NRVQ-FLT-15041, NRVQ-FLT-15042
+NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012,
+NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019,
+NRVQ-DB-9020, NRVQ-DB-9021, NRVQ-DB-9022, NRVQ-DB-9023, NRVQ-DB-9024, NRVQ-DB-9025, NRVQ-DB-9026,
+NRVQ-DB-9027, NRVQ-DB-9028, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9033, NRVQ-DB-9034,
+NRVQ-DB-9035, NRVQ-DB-9036, NRVQ-DB-9037, NRVQ-DB-9038, NRVQ-DB-9039, NRVQ-DB-9040, NRVQ-DB-DEBUG-1,
+NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C, NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-5,
+NRVQ-DB-DEBUG-6, NRVQ-DB-DEBUG-CONNECT-ARGS, NRVQ-DB-DEBUG-METADATA
 
-NRVQ-SDK-1000, NRVQ-SDK-1002, NRVQ-SDK-1010, NRVQ-SDK-1011, NRVQ-SDK-1012, NRVQ-SDK-1013, NRVQ-SDK-1020,
-NRVQ-SDK-1021, NRVQ-SDK-1022, NRVQ-SDK-1030, NRVQ-SDK-1031, NRVQ-SDK-1032, NRVQ-SDK-1040, NRVQ-SDK-1041,
-NRVQ-SDK-1042, NRVQ-SDK-1043, NRVQ-SDK-1044, NRVQ-SDK-1050, NRVQ-SDK-1051, NRVQ-SDK-1052, NRVQ-SDK-1053,
-NRVQ-SDK-1060, NRVQ-SDK-1061, NRVQ-SDK-1062, NRVQ-SDK-1063, NRVQ-SDK-1070, NRVQ-SDK-1071, NRVQ-SDK-1072,
-NRVQ-SDK-1073
+NRVQ-FLT-15000, NRVQ-FLT-15001, NRVQ-FLT-15002, NRVQ-FLT-15003, NRVQ-FLT-15004, NRVQ-FLT-15005, NRVQ-FLT-15009,
+NRVQ-FLT-15010, NRVQ-FLT-15011, NRVQ-FLT-15012, NRVQ-FLT-15013, NRVQ-FLT-15014, NRVQ-FLT-15015, NRVQ-FLT-15016,
+NRVQ-FLT-15017, NRVQ-FLT-15018, NRVQ-FLT-15019, NRVQ-FLT-15020, NRVQ-FLT-15021, NRVQ-FLT-15022, NRVQ-FLT-15023,
+NRVQ-FLT-15024, NRVQ-FLT-15025, NRVQ-FLT-15026, NRVQ-FLT-15027, NRVQ-FLT-15028, NRVQ-FLT-15029, NRVQ-FLT-15030,
+NRVQ-FLT-15031, NRVQ-FLT-15032, NRVQ-FLT-15033, NRVQ-FLT-15034, NRVQ-FLT-15035, NRVQ-FLT-15040, NRVQ-FLT-15041,
+NRVQ-FLT-15042, NRVQ-FLT-15043, NRVQ-FLT-15044, NRVQ-FLT-15045
+
+NRVQ-SDK-1000, NRVQ-SDK-1002, NRVQ-SDK-1010, NRVQ-SDK-1011, NRVQ-SDK-1012, NRVQ-SDK-1013, NRVQ-SDK-1014,
+NRVQ-SDK-1015, NRVQ-SDK-1020, NRVQ-SDK-1021, NRVQ-SDK-1022, NRVQ-SDK-1030, NRVQ-SDK-1031, NRVQ-SDK-1032,
+NRVQ-SDK-1040, NRVQ-SDK-1041, NRVQ-SDK-1042, NRVQ-SDK-1043, NRVQ-SDK-1044, NRVQ-SDK-1045, NRVQ-SDK-1050,
+NRVQ-SDK-1051, NRVQ-SDK-1052, NRVQ-SDK-1053, NRVQ-SDK-1060, NRVQ-SDK-1061, NRVQ-SDK-1062, NRVQ-SDK-1063,
+NRVQ-SDK-1064, NRVQ-SDK-1070, NRVQ-SDK-1071, NRVQ-SDK-1072, NRVQ-SDK-1073, NRVQ-SDK-1074, NRVQ-SDK-1080,
+NRVQ-SDK-1081, NRVQ-SDK-1082, NRVQ-SDK-1083
 
 NRVQ-REG-5000, NRVQ-REG-5001, NRVQ-REG-5002, NRVQ-REG-5003, NRVQ-REG-5004, NRVQ-REG-5005, NRVQ-REG-5006,
 NRVQ-REG-5007, NRVQ-REG-5008, NRVQ-REG-5010, NRVQ-REG-5011, NRVQ-REG-5012, NRVQ-REG-5013, NRVQ-REG-5014,
@@ -456,33 +470,34 @@ NRVQ-REG-5022, NRVQ-REG-5023, NRVQ-REG-9034, NRVQ-REG-9035
 
 NRVQ-SDC-3000, NRVQ-SDC-3001, NRVQ-SDC-3002, NRVQ-SDC-3003, NRVQ-SDC-3004, NRVQ-SDC-3005, NRVQ-SDC-3006,
 NRVQ-SDC-3010, NRVQ-SDC-3011, NRVQ-SDC-3012, NRVQ-SDC-3013, NRVQ-SDC-3020, NRVQ-SDC-3021, NRVQ-SDC-3022,
-NRVQ-SDC-3023, NRVQ-SDC-3024, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3036, NRVQ-SDC-3033,
+NRVQ-SDC-3023, NRVQ-SDC-3024, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3033, NRVQ-SDC-3034,
+NRVQ-SDC-3035, NRVQ-SDC-3036, NRVQ-SDC-3040, NRVQ-SDC-3041, NRVQ-SDC-3042, NRVQ-SDC-3043, NRVQ-SDC-3044,
 NRVQ-SDC-3045, NRVQ-SDC-3046
 
-NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005,
-NRVQ-AUTH-14006, NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013,
-NRVQ-AUTH-14014, NRVQ-AUTH-14015, NRVQ-AUTH-14016, NRVQ-AUTH-14017, NRVQ-AUTH-14018, NRVQ-AUTH-14019, NRVQ-AUTH-14020,
-NRVQ-AUTH-14024, NRVQ-AUTH-14025, NRVQ-AUTH-14026, NRVQ-AUTH-14027, NRVQ-AUTH-14028, NRVQ-AUTH-14029,
+NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005, NRVQ-AUTH-14006,
+NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013, NRVQ-AUTH-14014, NRVQ-AUTH-14015,
+NRVQ-AUTH-14016, NRVQ-AUTH-14017, NRVQ-AUTH-14018, NRVQ-AUTH-14019, NRVQ-AUTH-14020, NRVQ-AUTH-14021, NRVQ-AUTH-14022,
+NRVQ-AUTH-14023, NRVQ-AUTH-14024, NRVQ-AUTH-14025, NRVQ-AUTH-14026, NRVQ-AUTH-14027, NRVQ-AUTH-14028, NRVQ-AUTH-14029,
 NRVQ-AUTH-14031
 
 NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-AUD-6005, NRVQ-AUD-6006,
 NRVQ-AUD-6007, NRVQ-AUD-6008, NRVQ-AUD-6009, NRVQ-AUD-6010, NRVQ-AUD-6012, NRVQ-AUD-6013
 
-NRVQ-GRP-11000, NRVQ-GRP-11001, NRVQ-GRP-11010, NRVQ-GRP-11011, NRVQ-GRP-11012, NRVQ-GRP-11013,
-NRVQ-GRP-11014, NRVQ-GRP-11015, NRVQ-GRP-11016, NRVQ-GRP-11017
+NRVQ-GRP-11000, NRVQ-GRP-11001, NRVQ-GRP-11010, NRVQ-GRP-11011, NRVQ-GRP-11012, NRVQ-GRP-11013, NRVQ-GRP-11014,
+NRVQ-GRP-11015, NRVQ-GRP-11016, NRVQ-GRP-11017
 
-NRVQ-RED-13000, NRVQ-RED-13001, NRVQ-RED-13002, NRVQ-RED-13003, NRVQ-RED-13004, NRVQ-RED-13005,
-NRVQ-RED-13006, NRVQ-RED-13007, NRVQ-RED-13008, NRVQ-RED-13009
+NRVQ-RED-13000, NRVQ-RED-13001, NRVQ-RED-13002, NRVQ-RED-13003, NRVQ-RED-13004, NRVQ-RED-13005, NRVQ-RED-13006,
+NRVQ-RED-13007, NRVQ-RED-13008, NRVQ-RED-13009, NRVQ-RED-13010, NRVQ-RED-13011
 
-NRVQ-TEL-12000, NRVQ-TEL-12001, NRVQ-TEL-12002, NRVQ-TEL-12003, NRVQ-TEL-12004, NRVQ-TEL-12005,
-NRVQ-TEL-12006, NRVQ-TEL-12007
+NRVQ-TEL-12000, NRVQ-TEL-12001, NRVQ-TEL-12002, NRVQ-TEL-12003, NRVQ-TEL-12004, NRVQ-TEL-12005, NRVQ-TEL-12006,
+NRVQ-TEL-12007
 
-NRVQ-IDT-10000, NRVQ-IDT-10001, NRVQ-IDT-10002, NRVQ-IDT-10003, NRVQ-IDT-10004, NRVQ-IDT-10005,
-NRVQ-IDT-10006
+NRVQ-IDT-10000, NRVQ-IDT-10001, NRVQ-IDT-10002, NRVQ-IDT-10003, NRVQ-IDT-10004, NRVQ-IDT-10005, NRVQ-IDT-10006,
+NRVQ-IDT-10007
 
 NRVQ-CLI-8000, NRVQ-CLI-8001, NRVQ-CLI-8002, NRVQ-CLI-8003, NRVQ-CLI-8004
 
-NRVQ-SIEM-14000, NRVQ-SIEM-14001, NRVQ-SIEM-14002
+NRVQ-SIEM-14000, NRVQ-SIEM-14001, NRVQ-SIEM-14002, NRVQ-SIEM-14003, NRVQ-SIEM-14004, NRVQ-SIEM-14005
 
 NRVQ-UI-4601
 ```

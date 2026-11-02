@@ -186,6 +186,7 @@ class FakeSession:
             return SimpleNamespace(scalar=lambda: len(self.rows))
         return SimpleNamespace(
             scalars=lambda: SimpleNamespace(all=lambda: self.rows),
+            mappings=lambda: SimpleNamespace(first=lambda: None, all=lambda: []),
         )
 
     async def scalar(self, stmt):
