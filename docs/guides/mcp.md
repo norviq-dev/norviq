@@ -196,7 +196,8 @@ through to the ordinary call gate — one message, two decisions.
 JSON-RPC **batches are refused in both directions** (`firewall.py:392-401`). MCP removed batching in
 2025-06-18, and a proxy that forwarded an array it did not inspect would let a `tools/call` ride
 inside it ungoverned. A message the proxy cannot classify or decode is dropped, not forwarded — on
-both transports (`firewall.py:489-492`, `http.py:296-310`).
+both transports, and a JSON object that names a key twice counts as undecodable, since parsers
+disagree on which value wins (`firewall.py:489-492`, `http.py:296-310`).
 
 A server response is mediated as the answer to the client request it answers, and a response that
 answers none is dropped (`NRVQ-MCP-5084`). Ids are matched the way the reference client SDKs match

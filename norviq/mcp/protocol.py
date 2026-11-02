@@ -274,9 +274,24 @@ def decode(line: bytes) -> JsonRpcMessage | None:
     if not stripped:
         return None
     try:
-        return JsonRpcMessage(json.loads(stripped), stripped)
+        return JsonRpcMessage(json.loads(stripped, object_pairs_hook=_unique_keys), stripped)
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """An object with a key named twice is not decoded at all.
+
+    JSON leaves duplicate names to the parser, and parsers disagree: Python's `json` and JavaScript's
+    `JSON.parse` keep the LAST, others keep the first. Allowed messages are forwarded as their original
+    bytes, so `{"method":"tools/call",...,"method":"ping"}` was decided as a ping here and could be read
+    as a tools/call by a first-wins peer. A message both ends cannot agree on is refused, in both
+    directions, like any other undecodable input.
+    """
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise ValueError("duplicate key in a JSON object")
+    return obj
 
 
 def encode(payload: Any) -> bytes:

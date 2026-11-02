@@ -671,9 +671,15 @@ class HttpProxy:
                                "were not forwarded")
         # Event ids: the client is handed one the proxy minted (see `_mint_event_id`). An empty `id:`
         # (which resets the client's last id) is passed as it is.
+        # Only the LAST `id:` of a frame sets the client's last event id (each one overwrites the
+        # buffer before dispatch), so only that one is kept and minted; minting every one let a server
+        # cost the proxy a mint and a map entry per line of an 8 MiB frame.
+        id_lines = [i for i, line in enumerate(keep) if line.partition(b":")[0] == b"id"]
+        for i in id_lines[:-1]:
+            keep[i] = b""
         for i, line in enumerate(keep):
             name, _, value = line.partition(b":")
-            if name == b"id":
+            if name == b"id" and line:
                 raw_id = value[1:] if value.startswith(b" ") else value
                 if len(raw_id) > _MAX_SERVER_EVENT_ID_BYTES:
                     # Held in memory until evicted, so bounded: an id this long is not one the proxy
