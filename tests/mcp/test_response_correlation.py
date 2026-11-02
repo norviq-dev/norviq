@@ -474,15 +474,20 @@ async def test_http_a_listing_is_never_mediated_as_another_sessions_call_result(
     assert "executed" in b.text
 
 
-async def test_http_the_get_stream_answers_only_its_own_sessions_pending_requests():
+async def test_a_get_stream_answers_no_request():
+    """A server MUST NOT send a response on the GET stream unless resuming; one that does is dropped,
+    whatever it claims to answer."""
     fw, _ = _fw()
-    post_a = fw.new_correlation([fw.session_correlation("A")])
-    await fw.on_client_message(_rpc_msg(dict(_LIST, id=4)), corr=post_a)
-    on_b = await fw.on_server_message(_rpc_msg(_listing(4, [CLEAN_TOOL])), fw.session_correlation("B"))
-    on_none = await fw.on_server_message(_rpc_msg(_listing(4, [CLEAN_TOOL])), fw.new_correlation())
-    on_a = await fw.on_server_message(_rpc_msg(_listing(4, [POISONED_TOOL, CLEAN_TOOL])), fw.session_correlation("A"))
-    assert on_b.forward is None and on_none.forward is None
-    assert on_a.forward is not None and _names(on_a.forward) == ["search_docs"]
+    post = fw.new_correlation()
+    await fw.on_client_message(_rpc_msg(dict(_LIST, id=4)), corr=post)
+    fw._corr.pending.put(4, "tools/call")                               # noqa: SLF001 - the default scope too
+    with capture_logs() as logs:
+        on_get = await fw.on_server_message(_rpc_msg(_listing(4, [CLEAN_TOOL])),
+                                            fw.new_correlation(get_stream=True))
+    assert on_get.forward is None
+    assert any(e.get("reason") == "response on GET stream" for e in logs)
+    on_post = await fw.on_server_message(_rpc_msg(_listing(4, [POISONED_TOOL, CLEAN_TOOL])), post)
+    assert on_post.forward is not None and _names(on_post.forward) == ["search_docs"]
 
 
 # ── id matcher edges ────────────────────────────────────────────────────────────────────────────

@@ -205,7 +205,12 @@ def test_sse_framing_fields_survive_mediation():
                        headers={"accept": "text/event-stream"}) as r:
         body = b"".join(r.iter_bytes()).decode()
     assert "event: message" in body
-    assert "id: 42" in body
+    # REWRITTEN: this asserted the server's `id: 42` reached the client. The id still survives — it is
+    # what resumption is keyed on — but the client is now handed an id the PROXY minted for it, which
+    # maps back to 42 when the client resumes (a server's own ids cannot say which stream they belong
+    # to; see `HttpProxy._mint_event_id`).
+    minted = next(line[4:] for line in body.splitlines() if line.startswith("id: "))
+    assert proxy._event_ids[minted][0] == "42"                          # noqa: SLF001
     assert body.rstrip().endswith("}") or "\n\n" in body
 
 

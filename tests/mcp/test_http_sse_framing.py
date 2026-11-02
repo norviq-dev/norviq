@@ -175,9 +175,13 @@ def test_data_split_over_several_lines_is_joined_and_mediated_as_one_message():
 
 
 def test_event_id_retry_and_comments_still_pass_for_normal_frames():
-    client, _ = _with_upstream(_streamed([b": keepalive\n\nevent: message\nid: 42\nretry: 1000\ndata: $PAYLOAD\n\n"]))
+    client, proxy = _with_upstream(_streamed([b": keepalive\n\nevent: message\nid: 42\nretry: 1000\ndata: $PAYLOAD\n\n"]))
     text = _sse_only_post(client, _rpc("tools/list", mid=5))
-    assert ": keepalive" in text and "event: message" in text and "id: 42" in text and "retry: 1000" in text
+    assert ": keepalive" in text and "event: message" in text and "retry: 1000" in text
+    # The event id is kept as one the proxy minted, mapped back to the server's (see
+    # test_sse_framing_fields_survive_mediation for why it is not passed verbatim any more).
+    minted = next(line[4:] for line in text.splitlines() if line.startswith("id: "))
+    assert proxy._event_ids[minted][0] == "42"                          # noqa: SLF001
     _assert_listing_mediated(text)
 
 

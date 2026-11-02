@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import itertools
 import json
 import math
 import re
@@ -490,9 +489,6 @@ class _PendingMap:
         return found[1]
 
 
-_CORRELATION_TOKENS = itertools.count(1)
-
-
 class Correlation:
     """Where the client's requests are tracked, and so which server responses can answer them.
 
@@ -504,65 +500,35 @@ class Correlation:
       anything: the client gets the proxy's own decision, or later the real answer.
     * PENDING — forwarded upstream. Only these can be answered.
 
-    One scope per place answers can arrive. stdio has one client and one stream: the firewall's
-    default scope. Streamable HTTP has one per POST (its response body answers its own request and
-    nothing else — two client sessions reuse JSON-RPC ids, since SDK counters start at 0 or 1), plus
-    one per `Mcp-Session-Id` for the GET stream, where a resumed stream may carry a response. A
-    request forwarded with a session id is PENDING in both; an answer on the POST consumes both, one
-    on the GET stream consumes the session's entry (a later answer on the POST is then still
-    mediated, never forwarded raw). A GET stream without a session id correlates nothing.
+    One scope per place answers can arrive, and NO scope is shared between requests that did not
+    arrive together. stdio has one client and one stream: the firewall's default scope. Streamable
+    HTTP has one per POST: its response body answers its own request and nothing else.
+
+    A GET stream answers no request (`get_stream`): the transport says a server MUST NOT send a
+    response there unless resuming a stream associated with a previous request, and what a client
+    SDK does with a response it did not expect is not something mediation can depend on — the
+    Python SDK 1.30 rewrites the id of a response on a resumed stream to its pending request's id,
+    and the TypeScript SDK 1.32 adopts any Mcp-Session-Id it is sent. A GET that resumes one of the
+    proxy's POST streams (Last-Event-ID) gets that POST's scope, `resumed`: a response on it is
+    mediated as the answer to THAT POST's request, under that request's id, at most once.
     """
 
-    __slots__ = ("held", "pending", "peers", "owners", "ambiguous", "shared", "token", "_cap")
+    __slots__ = ("held", "pending", "get_stream", "resumed", "request_id")
 
-    def __init__(self, cap: int, peers: list[Correlation] | None = None, shared: bool = False) -> None:
+    def __init__(self, cap: int, *, get_stream: bool = False) -> None:
         self.held = _PendingMap(cap)
         self.pending = _PendingMap(cap)
-        self.peers = list(peers or [])
-        # SHARED scopes only (a session's GET stream): which POST scope registered each pending key,
-        # and the keys more than one POST registered. The session id is the SERVER's choice, so two
-        # client sessions can be handed the same one; their requests then meet in one scope, where
-        # `put` would let the second request with an id silently replace the first — and a GET-stream
-        # answer would be mediated as whichever came last (a listing as a tool result: no Gate A).
-        # Such a key is AMBIGUOUS: it leaves this scope and is answerable only on its own POST.
-        self.owners: dict[str, int] = {}
-        self.ambiguous: dict[str, None] = {}
-        self.shared = shared
-        # Identity of this scope for `owners`. A counter, not id(): a finished POST's object can be
-        # freed and its address reused by the next POST, which would then read as the same owner.
-        self.token = next(_CORRELATION_TOKENS)
-        self._cap = max(16, cap)
+        self.get_stream = get_stream
+        self.resumed = False
+        # The id of the request a POST scope forwarded (one POST, one message; batches are refused).
+        self.request_id: Any = None
 
-    def share(self, msg_id: Any, method: str, owner: Correlation) -> None:
-        """Register a request forwarded by `owner` (a POST scope) in this shared scope."""
-        key = _PendingMap._key(msg_id)
-        if key in self.ambiguous:
-            return
-        holder = self.owners.get(key)
-        if holder is not None and holder != owner.token and key in self.pending._map:
-            self.pending.pop(key)
-            self.owners.pop(key, None)
-            if len(self.ambiguous) >= self._cap:
-                self.ambiguous.pop(next(iter(self.ambiguous)), None)
-            self.ambiguous[key] = None
-            return
-        self.pending.put(msg_id, method)
-        if len(self.owners) >= self._cap:
-            self.owners.pop(next(iter(self.owners)), None)
-        self.owners[key] = owner.token
-
-    def release(self, key: str, owner: Correlation) -> None:
-        """`owner` got its answer: forget its entry here, and only its own."""
-        if self.owners.get(key) == owner.token:
-            self.pending.pop(key)
-            self.owners.pop(key, None)
-
-    def is_ambiguous(self, msg_id: Any) -> bool:
-        return any(k in self.ambiguous for k in self.pending._candidates(msg_id))
-
-
-# How many client sessions' GET-stream scopes one firewall keeps (see `Correlation`).
-_MAX_SESSION_SCOPES = 256
+    def resumption(self) -> Correlation:
+        """This POST's scope as seen from a GET that resumes its stream: same entries, `resumed`."""
+        view = Correlation(0)
+        view.held, view.pending, view.request_id, view.resumed = (
+            self.held, self.pending, self.request_id, True)
+        return view
 
 
 # The list each discovery result must carry. A result without it is not a well-formed answer to that
@@ -610,12 +576,6 @@ def _response_defect(msg: P.JsonRpcMessage, method: str) -> str:
 _COLD_LIST_MAX_CREDENTIALS = 64
 
 
-def _bounded_insert(mapping: dict, key: str, value: Any, cap: int) -> None:
-    if key not in mapping and len(mapping) >= cap:
-        mapping.pop(next(iter(mapping)), None)
-    mapping[key] = value
-
-
 def _bounded_put(mapping: dict, key: str, value: Any) -> None:
     if key not in mapping and len(mapping) >= _COLD_LIST_MAX_CREDENTIALS:
         mapping.pop(next(iter(mapping)), None)
@@ -658,9 +618,6 @@ class McpFirewall:
         # The default correlation scope: the whole session on stdio, and any caller that passes none.
         # The HTTP driver passes one per POST (see `Correlation`).
         self._corr = Correlation(settings.mcp_max_pending_requests)
-        self._session_corrs: dict[str, Correlation] = {}
-        self._session_issuers: dict[str, int] = {}
-        self._poisoned_sessions: dict[str, None] = {}
         self._server_pending = _PendingMap(settings.mcp_max_pending_requests)
         # (tool, rule) -> (monotonic of last report, refusals suppressed since). Rate-limits the
         # PEP-denial REPORT only; Gate A's decision never consults it.
@@ -741,44 +698,9 @@ class McpFirewall:
         ]
 
     # ============================================================ CLIENT -> SERVER
-    def new_correlation(self, peers: list[Correlation] | None = None) -> Correlation:
-        """A correlation scope for one place answers arrive (an HTTP POST, a session's GET stream)."""
-        return Correlation(settings.mcp_max_pending_requests, peers)
-
-    def note_session_issued(self, session_id: str, initialize: Correlation) -> None:
-        """The server answered the `initialize` exchanged in `initialize` with this session id.
-
-        A session id is the server's to assign and is meant to name ONE session. The same id handed
-        to two initialize exchanges is two sessions merged under one name, so its GET stream cannot
-        say whose request it answers: the scope is POISONED and answers nothing from then on. The
-        requests are still answered on their own POSTs.
-        """
-        issuer = self._session_issuers.get(session_id)
-        if issuer is not None and issuer != initialize.token:
-            if session_id not in self._poisoned_sessions:
-                self._bump("session_id_reused")
-                log.warning("nrvq.mcp.http.session_id_reused", server=self._server_id,
-                            session=session_id[:64], code="NRVQ-MCP-5086",
-                            detail="the server issued one session id to two initialize exchanges; "
-                                   "that session's GET stream answers no request")
-            _bounded_insert(self._poisoned_sessions, session_id, None, _MAX_SESSION_SCOPES)
-            self._session_corrs.pop(session_id, None)
-            return
-        _bounded_insert(self._session_issuers, session_id, initialize.token, _MAX_SESSION_SCOPES)
-
-    def session_correlation(self, session_id: str) -> Correlation:
-        """The scope of one client session's GET stream, created on first use. Bounded: the session
-        id is the client's to choose, so the oldest session's scope is evicted past the cap. A
-        poisoned session (see `note_session_issued`) gets a fresh empty scope every time."""
-        if session_id in self._poisoned_sessions:
-            return self.new_correlation()
-        corr = self._session_corrs.get(session_id)
-        if corr is None:
-            corr = Correlation(settings.mcp_max_pending_requests, shared=True)
-            if len(self._session_corrs) >= _MAX_SESSION_SCOPES:
-                self._session_corrs.pop(next(iter(self._session_corrs)), None)
-            self._session_corrs[session_id] = corr
-        return corr
+    def new_correlation(self, *, get_stream: bool = False) -> Correlation:
+        """A correlation scope for one place answers arrive: an HTTP POST, or a GET stream."""
+        return Correlation(settings.mcp_max_pending_requests, get_stream=get_stream)
 
     async def on_client_message(
         self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None = None,
@@ -819,8 +741,7 @@ class McpFirewall:
             corr.held.discard(msg.id)
             if result.forward is not None:
                 corr.pending.put(msg.id, msg.method)
-                for peer in corr.peers:
-                    peer.share(msg.id, msg.method, corr)
+                corr.request_id = msg.id
         return result
 
     def note_client_request(self, msg: P.JsonRpcMessage, corr: Correlation | None = None) -> None:
@@ -920,12 +841,18 @@ class McpFirewall:
             # request was registered. Matching is now as liberal as the client's (see
             # `_PendingMap._candidates`), a malformed answer leaves the request pending, and anything
             # still unmatched is dropped.
+            if corr.get_stream:
+                return self._drop_unmatched(msg, "response on GET stream")
+            if corr.resumed:
+                # A resumed POST stream answers that POST's request and nothing else. The client SDK
+                # puts the response under its pending request's id whatever id the server wrote, so
+                # it is mediated as that request — and goes out under that id — or not at all.
+                if corr.request_id is None or corr.pending.match(corr.request_id) is None:
+                    return self._drop_unmatched(msg, "resumed stream: its request is already answered")
+                msg = P.JsonRpcMessage({**msg.data, "id": corr.request_id},
+                                       P.encode({**msg.data, "id": corr.request_id}).rstrip(b"\n"))
             found = corr.pending.match(msg.id)
             if found is None:
-                if corr.is_ambiguous(msg.id):
-                    return self._drop_unmatched(
-                        msg, "ambiguous: two requests in this session scope share the id; each is "
-                             "answerable only on its own POST")
                 if corr.held.match(msg.id) is not None:
                     # An answer to a request the proxy has not forwarded. The server cannot have
                     # computed it; forwarding it would let the server pre-empt Gate B with a result.
@@ -935,15 +862,7 @@ class McpFirewall:
             defect = _response_defect(msg, requested)
             if defect:
                 return self._drop_unmatched(msg, f"not a well-formed answer: {defect}")
-            if corr.shared:
-                # A shared (session) scope: the answer arrived on the GET stream. Its entry goes; the
-                # owning POST's entry stays, so a later answer there is still mediated, never raw.
-                corr.pending.pop(pending_key)
-                corr.owners.pop(pending_key, None)
-            else:
-                corr.pending.pop(pending_key)
-                for peer in corr.peers:
-                    peer.release(pending_key, corr)
+            corr.pending.pop(pending_key)
             # `server/discover` replaces the initialize handshake and is the FIRST thing a 2026-07-28
             # client asks. It advertises the server's identity and capabilities as free text, so it is
             # a discovery surface exactly like tools/list — and Gate A never saw it.

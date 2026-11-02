@@ -32,6 +32,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import uuid
 from typing import Any, AsyncIterator
 
 import httpx
@@ -63,6 +64,9 @@ _HOP_HEADERS = frozenset({
 # puts on one JSON-RPC line: far above a real catalogue, and it keeps a server from streaming without
 # end into memory while a client's call waits.
 _OWN_LIST_MAX_BYTES = 8 * 1024 * 1024
+# How many minted SSE event ids are remembered for resumption. A resume with an evicted id resumes
+# nothing (its responses are dropped), which is the fail-closed direction.
+_MAX_EVENT_IDS = 4096
 # The client headers the proxy's own `tools/list` carries: what identifies the connection, nothing
 # that describes the call that triggered it. See `HttpProxy._upstream_lister`.
 _MCP_METHOD_HEADER = "mcp-method"
@@ -83,6 +87,9 @@ class HttpProxy:
         self._engine: PolicyEngineClient | None = None
         # Keyed by ATTESTED identity, never by anything the caller sends. See _firewall_for.
         self._firewalls: dict[str, McpFirewall] = {}
+        # Minted SSE event id -> (the server's event id, the POST scope it came from, or None for a
+        # GET stream). See `_mint_event_id`.
+        self._event_ids: dict[str, tuple[str, Correlation | None]] = {}
         self._identity_key: str | None = None
         # Pins are per-SERVER, not per-session: a rug pull that reset itself every time a client
         # reconnected would not be detectable at all.
@@ -323,11 +330,9 @@ class HttpProxy:
         if msg is None:
             return JSONResponse(P.error_response(None, P.E_PARSE, "invalid JSON-RPC payload"), status_code=400)
 
-        # This POST's own correlation scope: its response body answers its request and nothing else.
-        # With a session id, the session's GET-stream scope is a peer (a resumed stream may carry the
-        # answer). See `Correlation`.
-        session = request.headers.get("mcp-session-id")
-        corr = fw.new_correlation([fw.session_correlation(session)] if session else None)
+        # This POST's own correlation scope: its response body answers its request and nothing else,
+        # and a GET that resumes this POST's stream answers it at most once more. See `Correlation`.
+        corr = fw.new_correlation()
         mediation = await fw.on_client_message(msg, list_upstream=self._upstream_lister(request),
                                                corr=corr)
         if mediation.catalog_scanned:
@@ -356,11 +361,11 @@ class HttpProxy:
         #
         # Opening the response as a stream lets the content-type be read BEFORE the body is consumed,
         # so one request serves both shapes.
+        initialize = msg.method == P.M_INITIALIZE
         if _wants_stream(request):
             return await self._stream_through(fw, "POST", request, mediation.forward, corr,
-                                              initialize=msg.method == P.M_INITIALIZE)
-        return await self._post_once(fw, request, mediation.forward, corr,
-                                     initialize=msg.method == P.M_INITIALIZE)
+                                              initialize=initialize)
+        return await self._post_once(fw, request, mediation.forward, corr, initialize=initialize)
 
     def _upstream_lister(self, request: Request):
         """The firewall's way to send its own `tools/list` upstream for a cold catalog.
@@ -435,13 +440,26 @@ class HttpProxy:
         return _list
 
     async def _handle_get(self, request: Request) -> Response:
-        """Standalone SSE stream: server -> client, including server-initiated requests."""
+        """Standalone SSE stream: server -> client, including server-initiated requests.
+
+        A plain GET stream answers NO request: the transport says a server MUST NOT send a response
+        on it unless resuming a stream associated with a previous client request, and every response
+        there is dropped (`Correlation.get_stream`). A GET carrying a Last-Event-ID the proxy minted on
+        one of its POST streams resumes THAT stream: it is mediated in that POST's scope, and the
+        server is sent its own event id back. An id the proxy did not mint resumes nothing.
+        """
         fw = await self._firewall_for_caller()
-        # The GET stream answers only what this client session has pending. Without a session id
-        # there is no session to belong to, and it answers nothing (a fresh, empty scope).
-        session = request.headers.get("mcp-session-id")
-        corr = fw.session_correlation(session) if session else fw.new_correlation()
-        return await self._stream_through(fw, "GET", request, None, corr)
+        corr = fw.new_correlation(get_stream=True)
+        server_last_id: str | None = None
+        last = request.headers.get("last-event-id")
+        if last is not None:
+            known = self._event_ids.get(last)
+            if known is not None:
+                server_last_id, origin = known
+                if origin is not None:
+                    corr = origin.resumption()
+        return await self._stream_through(fw, "GET", request, None, corr,
+                                          last_event_id=server_last_id)
 
     async def _handle_delete(self, request: Request) -> Response:
         """Session teardown.
@@ -459,23 +477,62 @@ class HttpProxy:
 
     # ------------------------------------------------------------------ streaming
     async def _stream_through(self, fw: McpFirewall, method: str, request: Request,
-                              body: bytes | None, corr: Correlation, initialize: bool = False) -> Response:
+                              body: bytes | None, corr: Correlation, initialize: bool = False,
+                              last_event_id: str | None = None) -> Response:
         headers = self._forward_headers(request.headers)
         if body is not None:
             headers["content-type"] = "application/json"
+        if last_event_id is not None:
+            # The client resumes with the id the proxy minted; the server knows its own.
+            headers = {k: v for k, v in headers.items() if k.lower() != "last-event-id"}
+            headers["last-event-id"] = last_event_id
+        # Opened before the response is returned, so the session header can be decided from the
+        # upstream's response headers (see `_session_header`).
+        cm = self._client.stream(method, self._upstream, headers=headers, content=body, timeout=None)
+        resp = await cm.__aenter__()
+        out_headers = {"cache-control": "no-cache",
+                       **self._session_header(request, resp.headers, initialize)}
 
         async def events() -> AsyncIterator[bytes]:
-            req = self._client.build_request(method, self._upstream, headers=headers, content=body)
-            async with self._client.stream(
-                method, self._upstream, headers=headers, content=body, timeout=None
-            ) as resp:
-                if initialize:
-                    _note_session(fw, resp, corr)
+            try:
                 async for out in self._pump_frames(fw, resp, corr):
                     yield out
-            del req
+            finally:
+                await cm.__aexit__(None, None, None)
 
-        return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
+        return StreamingResponse(events(), media_type=_SSE, headers=out_headers)
+
+    def _session_header(self, request: Request, upstream_headers: Any, initialize: bool) -> dict[str, str]:
+        """The Mcp-Session-Id to hand the client, if any.
+
+        The server assigns the session on the response to `initialize`, and that is the only response
+        whose session id is passed on. On any other response a session id that differs from the one
+        the client sent is withheld (NRVQ-MCP-5087): the TypeScript SDK 1.32 adopts a session id from
+        ANY response, so a server could otherwise move a client onto another client's session.
+        """
+        upstream = upstream_headers.get("mcp-session-id")
+        if upstream is None:
+            return {}
+        if initialize or upstream == request.headers.get("mcp-session-id"):
+            return {"mcp-session-id": upstream}
+        log.warning("nrvq.mcp.http.session_id_withheld", server=self._server_id, code="NRVQ-MCP-5087",
+                    detail="a non-initialize response carried a session id different from the "
+                           "request's; it was not passed to the client")
+        return {}
+
+    def _mint_event_id(self, server_id: str, corr: Correlation | None) -> str:
+        """An SSE event id of the proxy's own, mapped to the server's id and to the stream's scope.
+
+        The client resumes with what it was given. Event ids the SERVER chose cannot say which of the
+        proxy's streams they belonged to — a server can repeat one across streams — so the client is
+        given ids the proxy minted, and a resuming GET is mapped back to exactly one POST's scope.
+        """
+        minted = f"nrvq-{uuid.uuid4().hex}"
+        origin = None if corr is None or corr.get_stream else corr
+        if len(self._event_ids) >= _MAX_EVENT_IDS:
+            self._event_ids.pop(next(iter(self._event_ids)), None)
+        self._event_ids[minted] = (server_id, origin)
+        return minted
 
     async def _pump_frames(self, fw: McpFirewall, resp: Any,
                            corr: Correlation | None = None) -> AsyncIterator[bytes]:
@@ -555,8 +612,7 @@ class HttpProxy:
         headers = {**self._forward_headers(request.headers), "content-type": "application/json"}
         cm = self._client.stream("POST", self._upstream, headers=headers, content=body, timeout=None)
         resp = await cm.__aenter__()
-        if initialize and corr is not None:
-            _note_session(fw, resp, corr)
+        session_header = self._session_header(request, resp.headers, initialize)
 
         if not _is_sse(resp.headers):
             try:
@@ -569,7 +625,8 @@ class HttpProxy:
                         "forwarded")), status_code=502, media_type="application/json")
                 out = await self._mediate_server_bytes(fw, raw, corr)
                 return Response(out, status_code=resp.status_code,
-                                headers=_passthrough(resp.headers), media_type="application/json")
+                                headers={**_passthrough(resp.headers), **session_header},
+                                media_type="application/json")
             finally:
                 await cm.__aexit__(None, None, None)
 
@@ -580,7 +637,8 @@ class HttpProxy:
             finally:
                 await cm.__aexit__(None, None, None)
 
-        return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
+        return StreamingResponse(events(), media_type=_SSE,
+                                 headers={"cache-control": "no-cache", **session_header})
 
     async def _mediate_frame(self, fw: McpFirewall, frame: bytes,
                              corr: Correlation | None = None) -> bytes:
@@ -597,6 +655,14 @@ class HttpProxy:
                         code="NRVQ-MCP-5082",
                         detail="lines in a server SSE frame that are neither data nor a known field "
                                "were not forwarded")
+        # Event ids: the client is handed one the proxy minted (see `_mint_event_id`). An empty `id:`
+        # (which resets the client's last id) is passed as it is.
+        for i, line in enumerate(keep):
+            name, _, value = line.partition(b":")
+            if name == b"id":
+                server_id = (value[1:] if value.startswith(b" ") else value).decode("utf-8", "replace")
+                if server_id:
+                    keep[i] = b"id: " + self._mint_event_id(server_id, corr).encode()
         if data is not None:
             mediated = await self._mediate_server_bytes(fw, data, corr)
             keep.append(b"data: " + _one_line(mediated) if mediated else b"data: ")
@@ -745,14 +811,6 @@ def _split_frame(frame: bytes) -> tuple[list[bytes], bytes | None, int]:
     return keep, (b"\n".join(data) if data else None), dropped
 
 
-def _note_session(fw: McpFirewall, resp: Any, corr: Correlation) -> None:
-    """Tell the firewall which session id the server issued to this `initialize` (see
-    `McpFirewall.note_session_issued`)."""
-    session = resp.headers.get("mcp-session-id")
-    if session:
-        fw.note_session_issued(session, corr)
-
-
 def _is_sse(headers: Any) -> bool:
     """Whether a response is an SSE stream. Media types are case-insensitive (RFC 9110 §8.3.1)."""
     return _SSE in str(headers.get("content-type", "")).lower()
@@ -808,6 +866,7 @@ def _wants_stream(request: Request) -> bool:
 
 def _passthrough(headers) -> dict[str, str]:
     # Content-Encoding too: httpx has already decoded the body that is sent on, so a copied
-    # `gzip` would tell the client to decompress plain bytes.
+    # `gzip` would tell the client to decompress plain bytes. Mcp-Session-Id is never copied: it is
+    # passed only by `HttpProxy._session_header`.
     return {k: v for k, v in headers.items()
-            if k.lower() not in _HOP_HEADERS and k.lower() != "content-encoding"}
+            if k.lower() not in _HOP_HEADERS and k.lower() not in ("content-encoding", "mcp-session-id")}

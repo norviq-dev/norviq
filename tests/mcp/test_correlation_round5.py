@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Correlation must not be steerable through what the SERVER chooses: the session id, or the id text.
+"""Correlation must not be steerable through what the SERVER chooses: the stream, the session id,
+or the id text.
 
-* `Mcp-Session-Id` is assigned by the server. Two client sessions it gives the same id must not
-  pool their requests into one GET-stream scope where one session's request replaces the other's.
+* A GET stream answers no request; a GET that resumes one of the proxy's POST streams answers that
+  POST's request, once, under its id. The SDKs resolve responses there regardless of their id.
+* `Mcp-Session-Id` reaches the client only on the response to initialize (or unchanged).
 * A response id is server text, read on the event loop for every response. Reading it must cost
   time linear in a short, bounded prefix of it.
 """
@@ -16,6 +18,7 @@ import json
 import time
 
 import httpx
+import pytest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
@@ -32,80 +35,170 @@ async def _warm(fw) -> None:
     await fw.on_server_message(_rpc_msg({"jsonrpc": "2.0", "id": 100, "result": {"tools": [CLEAN_TOOL]}}))
 
 
-# ── L1: one session id, two sessions ────────────────────────────────────────────────────────────
-async def test_an_id_pending_from_two_posts_in_one_session_scope_is_not_answerable_on_the_get_stream():
-    """Session 1 lists (id 1); session 2, which the server gave the SAME session id, calls with id 1.
-    The shared scope used to keep only the second (tools/call), so a GET-stream answer shaped as both
-    a tool result and a listing was mediated as a tool result — no Gate A — and the client SDK of
-    session 1 resolved its pending tools/list with it."""
+# ── GET streams answer nothing; a resumed POST stream answers its own request once ──────────────
+async def test_a_resumed_stream_answers_its_post_request_once_under_that_requests_id():
+    """The Python SDK 1.30 rewrites the id of a response on a resumed stream to its pending request's
+    id. So whatever id the server writes there, the response is mediated as THAT request, and only
+    while it is still unanswered."""
     fw, _ = _fw()
-    await _warm(fw)
-    session = fw.session_correlation("X")
-    post1, post2 = fw.new_correlation([session]), fw.new_correlation([session])
+    post = fw.new_correlation()
     await fw.on_client_message(_rpc_msg({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
-                               corr=post1)
-    await fw.on_client_message(_rpc_msg(_call("search_docs", 1)), corr=post2)
+                               corr=post)
+    resumed = post.resumption()
+    first = await fw.on_server_message(_rpc_msg(
+        {"jsonrpc": "2.0", "id": 999, "result": {"tools": [POISONED_TOOL, CLEAN_TOOL]}}), resumed)
+    again = await fw.on_server_message(_rpc_msg(
+        {"jsonrpc": "2.0", "id": 1, "result": {"tools": [POISONED_TOOL]}}), resumed)
+    out = json.loads(first.forward)
+    assert out["id"] == 1 and [t["name"] for t in out["result"]["tools"]] == ["search_docs"]
+    assert again.forward is None
+    late_on_post = await fw.on_server_message(_rpc_msg(
+        {"jsonrpc": "2.0", "id": 1, "result": {"tools": [POISONED_TOOL]}}), post)
+    assert late_on_post.forward is None
 
+
+async def test_a_resumed_stream_of_a_call_cannot_deliver_a_listing():
+    fw, _ = _fw()
+    await _warm(fw)
+    post = fw.new_correlation()
+    await fw.on_client_message(_rpc_msg(_call("search_docs", 1)), corr=post)
+    out = await fw.on_server_message(_rpc_msg(_FORGED), post.resumption())
+    # Mediated as what the SDK will resolve it as: the tools/call result. It is not a listing to
+    # anyone, so Gate A has nothing to say; the content guard ran.
+    assert out.forward is not None and json.loads(out.forward)["id"] == 1
+
+
+def _resuming_upstream(event_frames: list[bytes], get_answer: dict, seen: list):
+    async def post(request):
+        body = json.loads(await request.body() or b"{}")
+        if body.get("method") == "tools/list" and str(body.get("id")) == "1":
+            async def gen():
+                for f in event_frames:
+                    yield f
+            return StreamingResponse(gen(), media_type="text/event-stream")
+        return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "result": {"tools": [CLEAN_TOOL]}})
+
+    async def get(request):
+        seen.append(request.headers.get("last-event-id"))
+
+        async def gen():
+            yield b"id: s2\ndata: " + json.dumps(get_answer).encode() + b"\n\n"
+            yield b"data: " + json.dumps(dict(get_answer, id=1)).encode() + b"\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream")
+    return Starlette(routes=[Route("/mcp", post, methods=["POST"]), Route("/mcp", get, methods=["GET"])])
+
+
+async def _proxy_client(upstream_app):
+    _, _, _, proxy, _ = _make()
+    proxy._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream_app),  # noqa: SLF001
+                                      base_url="http://u")
+    app = Starlette(routes=[Route("/mcp", proxy._handle_post, methods=["POST"]),         # noqa: SLF001
+                            Route("/mcp", proxy._handle_get, methods=["GET"])])           # noqa: SLF001
+    return proxy, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
+
+
+async def test_http_a_resumed_post_stream_is_mediated_as_that_post_and_only_once():
+    """End to end: the POST stream gives an event id and ends without the answer; the client resumes
+    with the id it was given; the server answers on the resumed GET under another id."""
+    seen: list = []
+    answer = {"jsonrpc": "2.0", "id": 77, "result": {"tools": [POISONED_TOOL, CLEAN_TOOL]}}
+    proxy, pc = await _proxy_client(_resuming_upstream([b"id: s1\ndata: " + json.dumps(
+        {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 1}}).encode() + b"\n\n"],
+        answer, seen))
+    posted = await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                           headers={"accept": "text/event-stream"})
+    minted = next(line[4:] for line in posted.text.splitlines() if line.startswith("id: "))
+    assert minted != "s1"
+    resumed = await pc.get("/mcp", headers={"accept": "text/event-stream", "last-event-id": minted})
+
+    assert seen == ["s1"], "the server must be sent its own event id"
+    datas = [json.loads(line[6:]) for line in resumed.text.splitlines() if line.startswith("data: {")]
+    assert len(datas) == 1, resumed.text                 # the second answer on the stream is dropped
+    assert datas[0]["id"] == 1
+    assert [t["name"] for t in datas[0]["result"]["tools"]] == ["search_docs"]
+
+
+async def test_http_a_get_with_an_unknown_last_event_id_answers_nothing():
+    seen: list = []
+    answer = {"jsonrpc": "2.0", "id": 1, "result": {"tools": [POISONED_TOOL]}}
+    _, pc = await _proxy_client(_resuming_upstream([], answer, seen))
+    resumed = await pc.get("/mcp", headers={"accept": "text/event-stream", "last-event-id": "made-up"})
+    assert "id_rsa" not in resumed.text and '"result"' not in resumed.text
+    assert seen == ["made-up"]
+
+
+async def test_http_a_plain_get_stream_answers_nothing():
+    seen: list = []
+    answer = {"jsonrpc": "2.0", "id": 1, "result": {"tools": [POISONED_TOOL]}}
+    _, pc = await _proxy_client(_resuming_upstream([], answer, seen))
+    r = await pc.get("/mcp", headers={"accept": "text/event-stream"})
+    assert '"result"' not in r.text and seen == [None]
+
+
+# ── Mcp-Session-Id is passed only on the response to initialize ─────────────────────────────────
+def _session_upstream(session_out: str):
+    async def handler(request):
+        body = json.loads(await request.body() or b"{}")
+        payload = {"jsonrpc": "2.0", "id": body.get("id"), "result": (
+            {"tools": [CLEAN_TOOL]} if body.get("method") == "tools/list" else {})}
+        if request.headers.get("x-shape") == "sse":
+            async def gen():
+                yield b"data: " + json.dumps(payload).encode() + b"\n\n"
+            return StreamingResponse(gen(), media_type="text/event-stream", headers={"mcp-session-id": session_out})
+        return JSONResponse(payload, headers={"mcp-session-id": session_out})
+    return Starlette(routes=[Route("/mcp", handler, methods=["POST"])])
+
+
+@pytest.mark.parametrize("shape", ["json", "sse"])
+async def test_http_the_session_id_of_initialize_reaches_the_client(shape):
+    _, pc = await _proxy_client(_session_upstream("S1"))
+    accept = "application/json" if shape == "json" else "text/event-stream"
+    r = await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}},
+                      headers={"accept": accept, "x-shape": shape})
+    assert r.headers.get("mcp-session-id") == "S1"
+
+
+@pytest.mark.parametrize("shape", ["json", "sse"])
+async def test_http_a_different_session_id_on_another_response_is_withheld(shape):
+    """The TypeScript SDK 1.32 adopts a session id from ANY response; a server could move a client
+    onto another client's session with it."""
+    _, pc = await _proxy_client(_session_upstream("SOMEONE-ELSE"))
+    accept = "application/json" if shape == "json" else "text/event-stream"
     with capture_logs() as logs:
-        on_get = await fw.on_server_message(_rpc_msg(_FORGED), session)
-    assert on_get.forward is None, "an ambiguous id was answered on the shared GET stream"
-    assert any("ambiguous" in str(e.get("reason", "")) for e in logs)
-
-    # Each request is still answered on its own POST, as what it is.
-    listed = await fw.on_server_message(_rpc_msg(
-        {"jsonrpc": "2.0", "id": 1, "result": {"tools": [POISONED_TOOL, CLEAN_TOOL]}}), post1)
-    called = await fw.on_server_message(_rpc_msg(
-        {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "ok"}]}}), post2)
-    assert listed.forward is not None and b"id_rsa" not in listed.forward
-    assert called.forward is not None
+        r = await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}},
+                          headers={"accept": accept, "x-shape": shape, "mcp-session-id": "MINE"})
+    assert r.headers.get("mcp-session-id") is None
+    assert [e for e in logs if e.get("code") == "NRVQ-MCP-5087"]
 
 
-async def test_an_id_stays_ambiguous_for_a_third_post():
-    fw, _ = _fw()
-    await _warm(fw)
-    session = fw.session_correlation("X")
-    for _ in range(3):
-        await fw.on_client_message(_rpc_msg({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
-                                   corr=fw.new_correlation([session]))
-    on_get = await fw.on_server_message(_rpc_msg(
-        {"jsonrpc": "2.0", "id": 1, "result": {"tools": [CLEAN_TOOL]}}), session)
-    assert on_get.forward is None
+async def test_http_the_same_session_id_on_another_response_is_kept():
+    _, pc = await _proxy_client(_session_upstream("MINE"))
+    r = await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}},
+                      headers={"accept": "application/json", "mcp-session-id": "MINE"})
+    assert r.headers.get("mcp-session-id") == "MINE"
 
 
-async def test_one_session_id_issued_to_two_initialize_exchanges_poisons_its_get_stream():
-    fw, _ = _fw()
-    await _warm(fw)
-    fw.note_session_issued("X", fw.new_correlation())
-    fw.note_session_issued("X", fw.new_correlation())
-    post = fw.new_correlation([fw.session_correlation("X")])
-    await fw.on_client_message(_rpc_msg({"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {}}),
-                               corr=post)
-    on_get = await fw.on_server_message(_rpc_msg(
-        {"jsonrpc": "2.0", "id": 7, "result": {"tools": [CLEAN_TOOL]}}), fw.session_correlation("X"))
-    assert on_get.forward is None
-
-
-async def test_an_answer_on_the_post_consumes_the_session_entry_too():
-    """A second answer to the same request on the GET stream is not an answer to anything."""
-    fw, _ = _fw()
-    session = fw.session_correlation("X")
-    post = fw.new_correlation([session])
-    await fw.on_client_message(_rpc_msg({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}),
-                               corr=post)
-    first = await fw.on_server_message(_rpc_msg({"jsonrpc": "2.0", "id": 3, "result": {"tools": [CLEAN_TOOL]}}), post)
-    again = await fw.on_server_message(_rpc_msg({"jsonrpc": "2.0", "id": 3, "result": {"tools": [CLEAN_TOOL]}}), session)
-    assert first.forward is not None and again.forward is None
-
-
-async def test_session_scopes_are_bounded():
-    from norviq.mcp.firewall import _MAX_SESSION_SCOPES
+# ── review survivors ────────────────────────────────────────────────────────────────────────────
+async def test_a_self_list_whose_scan_fails_leaves_the_catalog_cold(monkeypatch):
+    """Scan before mark: the catalog is listed only by a listing that went through Gate A."""
+    from test_cold_catalog import _Lister
 
     fw, _ = _fw()
-    for i in range(_MAX_SESSION_SCOPES + 40):
-        fw.session_correlation(f"s{i}")
-    assert len(fw._session_corrs) <= _MAX_SESSION_SCOPES                 # noqa: SLF001
+
+    async def boom(_msg):
+        raise RuntimeError("scanner failure")
+
+    monkeypatch.setattr(fw, "_gate_a_tools_list", boom)
+    await fw.on_client_message(_rpc_msg(_call("search_docs")), list_upstream=_Lister())
+    assert fw._catalog_listed is False                                  # noqa: SLF001
 
 
+def test_a_response_carrying_a_method_is_not_well_formed():
+    from norviq.mcp.firewall import _response_defect
+
+    msg = _rpc_msg({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
+    msg.data["method"] = "tools/list"
+    assert _response_defect(msg, "tools/list") == "a response carries a method"
 async def test_http_a_server_merging_two_sessions_cannot_answer_a_listing_on_the_get_stream():
     """The review probe, end to end over HTTP: the merged session's GET stream carries a forged
     answer for id 1 while session 1's tools/list and session 2's tools/call (both id 1) are in flight."""
@@ -232,3 +325,15 @@ async def test_stdio_read_ahead_stops_at_its_byte_budget(monkeypatch):
     await asyncio.wait_for(pump, 5)
     assert read_ahead <= 5, f"read {read_ahead} messages ahead past a 3000-byte budget"
     assert len(noted) == 10
+
+
+async def test_http_a_plain_get_stream_answers_nothing_even_with_requests_pending_elsewhere():
+    """The GET stream's scope is its own, empty one — not the firewall's default scope, which a
+    request could be pending in."""
+    seen: list = []
+    answer = {"jsonrpc": "2.0", "id": 1, "result": {"tools": [POISONED_TOOL]}}
+    proxy, pc = await _proxy_client(_resuming_upstream([], answer, seen))
+    fw = await proxy._firewall_for_caller()                             # noqa: SLF001
+    fw._corr.pending.put(1, "tools/call")                               # noqa: SLF001
+    r = await pc.get("/mcp", headers={"accept": "text/event-stream"})
+    assert '"result"' not in r.text
