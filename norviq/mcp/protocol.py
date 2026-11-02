@@ -18,6 +18,7 @@ streamable-HTTP driver reuses the same message helpers over a different frame.
 from __future__ import annotations
 
 import json
+import unicodedata
 from typing import Any
 
 # --- methods the firewall reasons about --------------------------------------------------------
@@ -280,18 +281,30 @@ def decode(line: bytes) -> JsonRpcMessage | None:
 
 
 def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """An object with a key named twice is not decoded at all.
+    """An object with a key named twice — or two keys that one parser reads as the same name — is not
+    decoded at all.
 
     JSON leaves duplicate names to the parser, and parsers disagree: Python's `json` and JavaScript's
-    `JSON.parse` keep the LAST, others keep the first. Allowed messages are forwarded as their original
-    bytes, so `{"method":"tools/call",...,"method":"ping"}` was decided as a ping here and could be read
-    as a tools/call by a first-wins peer. A message both ends cannot agree on is refused, in both
-    directions, like any other undecodable input.
+    `JSON.parse` keep the LAST, others keep the first. Go's encoding/json, a common MCP server stack,
+    goes further: it matches object keys to struct fields CASE-INSENSITIVELY with Unicode simple
+    folding (`ſ` reads as `s`, the Kelvin sign as `k`), and the last match wins. So
+    `{"name":"read_file","Name":"delete_all"}` was decided here as read_file and run upstream as
+    delete_all. Keys are compared after NFKC normalisation and case folding, which covers those folds;
+    a message both ends cannot agree on is refused, in both directions, like any other undecodable
+    input.
     """
     obj = dict(pairs)
     if len(obj) != len(pairs):
         raise ValueError("duplicate key in a JSON object")
+    if len(pairs) > 1 and not all(k.isascii() and k.islower() for k, _ in pairs):
+        folded = {_fold(k) for k, _ in pairs}
+        if len(folded) != len(pairs):
+            raise ValueError("keys in a JSON object that differ only by case or compatibility form")
     return obj
+
+
+def _fold(key: str) -> str:
+    return unicodedata.normalize("NFKC", key).casefold()
 
 
 def encode(payload: Any) -> bytes:

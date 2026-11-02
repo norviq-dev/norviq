@@ -535,6 +535,33 @@ class Correlation:
         return view
 
 
+# The members the firewall READS from a client message, at the top level and in `params`. A key that
+# differs from one of these only by case or compatibility form is read by this proxy as absent and by a
+# case-insensitive upstream (Go's encoding/json) as that member — so the two would act on different
+# messages. Such a message is refused (`_envelope_alias`).
+_ENVELOPE_KEYS = frozenset({"jsonrpc", "id", "method", "params", "result", "error"})
+_PARAMS_KEYS = frozenset({"name", "arguments", "uri", "_meta", P.INPUT_RESPONSES, "messages",
+                          "maxTokens", "systemPrompt"})
+
+
+def _alias_in(obj: Any, reserved: frozenset) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    folded = {P._fold(k): k for k in reserved}
+    for key in obj:
+        exact = folded.get(P._fold(key))
+        if exact is not None and key != exact:
+            return key
+    return ""
+
+
+def _envelope_alias(msg: P.JsonRpcMessage) -> str:
+    """A key of a client message that aliases a protocol member it is not, or ""."""
+    if not isinstance(msg.data, dict):
+        return ""
+    return _alias_in(msg.data, _ENVELOPE_KEYS) or _alias_in(msg.data.get("params"), _PARAMS_KEYS)
+
+
 # The list each discovery result must carry. A result without it is not a well-formed answer to that
 # method, and is dropped rather than forwarded (see `_response_defect`).
 _LIST_RESULT_KEYS = {
@@ -735,9 +762,28 @@ class McpFirewall:
         # Registering again here would re-open an entry an answer has consumed in between, and a
         # second answer to the same request would then be mediated and forwarded as well.
         corr = corr or self._corr
+        alias = _envelope_alias(msg)
+        if alias:
+            # Refused before anything else reads it: Gate B would decide on one spelling and a
+            # case-insensitive upstream would act on the other.
+            self._bump("ambiguous_key_refused")
+            log.warning("nrvq.mcp.client.ambiguous_key_refused", key=alias[:64], code="NRVQ-MCP-5089")
+            corr.held.discard(msg.id)
+            return MediationResult(
+                reply=P.encode(P.error_response(
+                    msg.id if isinstance(msg.id, (str, int)) and not isinstance(msg.id, bool) else None,
+                    P.E_INVALID_REQUEST,
+                    f"Norviq MCP firewall refused this message: its key '{alias[:64]}' differs from a "
+                    "protocol field only by case or compatibility form.")),
+                blocked=True, note="ambiguous_key")
         if not registered:
             self.note_client_request(msg, corr)
         result = await self._on_client_message(msg, list_upstream)
+        if result.forward is not None and result.forward == msg.framed:
+            # FORWARDED AS PARSED, not as received. The upstream must read exactly the message Gate B
+            # decided on, and the bytes are where parsers differ (duplicate names, case-insensitive
+            # field matching). Compact JSON of the decoded object keeps every member and its order.
+            result.forward = P.encode(msg.data)
         if msg.is_request:
             # HELD until now. Forwarded: the server will have it, so its answer can be accepted —
             # here and in every peer scope. Answered here (refused, malformed): the server never sees
