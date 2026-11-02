@@ -900,7 +900,10 @@ async def test_stdio_reports_a_self_listed_catalog_to_the_control_plane():
     store = _RecordingStore()
 
     class _Fw:
-        async def on_client_message(self, msg, list_upstream=None):
+        def note_client_request(self, msg):
+            pass
+
+        async def on_client_message(self, msg, list_upstream=None, registered=False):
             return MediationResult(catalog_scanned=True)
 
         def catalog_report_due(self):

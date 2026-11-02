@@ -71,6 +71,9 @@ _MAX_LINE = 8 * 1024 * 1024
 # How long the server->client pump gets to drain after the CLIENT hangs up. Bounded so a server that
 # never closes its stdout cannot keep the proxy alive indefinitely.
 _DRAIN_TIMEOUT_S = 5.0
+# How many client messages may be read (and registered as pending) ahead of the one being mediated.
+# Bounded so a client cannot buffer without limit while mediation is held; the reader then waits.
+_READ_AHEAD = 256
 
 
 def configure_stdio_logging() -> None:
@@ -324,25 +327,59 @@ class StdioProxy:
         await proc.stdin.drain()
 
     async def _pump_client_to_server(self, client_in: asyncio.StreamReader) -> None:
+        """Read the client's messages and mediate them strictly in order.
+
+        Reading and mediating are two tasks joined by a bounded queue. Mediation stays strictly
+        sequential (ordering is a correctness property, see the module docstring), but READING runs
+        ahead of it, and every request is registered as pending with the firewall the moment it is
+        read. While mediation is held — a tools/call waiting for the proxy's own list, for up to
+        `mcp_cold_list_timeout_s` — the client keeps sending, and a server that knows the window is
+        open could otherwise answer those not-yet-registered ids first: an answer to an unregistered
+        id has no method to be mediated as. Registered at read, it is mediated as that answer.
+        """
         firewall = self._firewall
-        while True:
-            line = await _read_line(client_in)
-            if line is None:
-                break
-            msg = P.decode(line)
-            if msg is None:
-                # Unparseable input. Dropping is the fail-closed choice: forwarding bytes we could
-                # not classify would mean forwarding a possible tools/call ungoverned.
-                log.warning("nrvq.mcp.client.undecodable_dropped", bytes=len(line), code="NRVQ-MCP-5003")
-                continue
-            result = await firewall.on_client_message(msg, list_upstream=self._list_upstream)
-            if result.catalog_scanned:
-                # The proxy listed a cold catalog itself; report it exactly as a forwarded tools/list.
-                self._report_catalog()
-            if result.reply is not None:
-                await self._write_client(result.reply)
-            if result.forward is not None:
-                await self._write_server(result.forward)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_READ_AHEAD)
+
+        async def _read() -> None:
+            try:
+                while True:
+                    line = await _read_line(client_in)
+                    if line is None:
+                        break
+                    msg = P.decode(line)
+                    if msg is None:
+                        # Unparseable input. Dropping is the fail-closed choice: forwarding bytes we
+                        # could not classify would mean forwarding a possible tools/call ungoverned.
+                        log.warning("nrvq.mcp.client.undecodable_dropped", bytes=len(line),
+                                    code="NRVQ-MCP-5003")
+                        continue
+                    firewall.note_client_request(msg)
+                    await queue.put(msg)
+            except Exception as exc:  # noqa: BLE001 — end the session the way EOF does, loudly
+                log.error("nrvq.mcp.proxy.pump_failed", task="c2s-read", error=str(exc),
+                          code="NRVQ-MCP-5001")
+            # End of input. Not in a `finally`: a cancelled reader must not block on a full queue.
+            await queue.put(None)
+
+        reader = asyncio.create_task(_read(), name="c2s-read")
+        try:
+            while True:
+                msg = await queue.get()
+                if msg is None:
+                    break
+                result = await firewall.on_client_message(msg, list_upstream=self._list_upstream,
+                                                          registered=True)
+                if result.catalog_scanned:
+                    # The proxy listed a cold catalog itself; report it exactly as a forwarded list.
+                    self._report_catalog()
+                if result.reply is not None:
+                    await self._write_client(result.reply)
+                if result.forward is not None:
+                    await self._write_server(result.forward)
+        finally:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await reader
 
     async def _list_upstream(self, request: P.JsonRpcMessage) -> P.JsonRpcMessage | None:
         """Send the firewall's own request to the server and wait for the response with its id.

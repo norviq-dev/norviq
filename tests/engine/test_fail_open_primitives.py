@@ -474,11 +474,21 @@ class TestJsonRpcIdCorrelation:
         pending.put(1, "tools/list")
         assert pending.take(1.0) == "tools/list"
 
-    def test_a_string_id_is_still_a_different_id(self) -> None:
-        # The conflation the typed key exists to prevent — `1` and `"1"` are distinct in JSON-RPC.
+    def test_a_string_id_answers_the_numeric_request_the_client_sdks_match_it_to(self) -> None:
+        # REWRITTEN. This asserted `take("1") == ""` with only request 1 pending, i.e. that "1" is not
+        # an answer to 1. JSON-RPC says so, but both reference client SDKs disagree: the TypeScript
+        # SDK looks the answer up with `Number(response.id)` and the Python SDK with
+        # `int(response_id)`. So the client ACCEPTED "1" as the answer to 1 while the proxy matched it
+        # to nothing, and an unmatched answer was forwarded verbatim, past Gate A. The proxy now
+        # matches the way the clients do; ids that are both pending still keep their own entries.
         pending = _PendingMap(64)
         pending.put(1, "tools/list")
-        assert pending.take("1") == ""
+        assert pending.take("1") == "tools/list"
+
+        pending.put(1, "tools/list")
+        pending.put("1", "tools/call")
+        assert pending.take("1") == "tools/call"      # the exact match first
+        assert pending.take(1) == "tools/list"
 
     def test_a_boolean_is_not_folded_onto_a_number(self) -> None:
         # `bool` is an int subclass in Python and is not a valid JSON-RPC id.

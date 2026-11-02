@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import re
 import uuid
 from dataclasses import dataclass, field
 from time import monotonic, perf_counter
@@ -317,6 +319,51 @@ class MediationResult:
     catalog_scanned: bool = False
 
 
+# JavaScript's StrWhiteSpaceChar set (ECMA-262 WhiteSpace + LineTerminator), which `Number()` trims.
+_JS_WHITESPACE = "\t\n\v\f\r            " \
+                 "      　﻿"
+_JS_DECIMAL = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?|Infinity)\Z")
+_JS_RADIX = re.compile(r"0(?:[xX][0-9a-fA-F]+|[oO][0-7]+|[bB][01]+)\Z")
+
+
+def _js_number(text: str) -> float | None:
+    """`Number(text)` as JavaScript computes it (ECMA-262 StringToNumber), or None for NaN.
+
+    Only what decides correlation is reproduced: trimming, the empty string (0), decimal literals with
+    sign and exponent, the 0x/0o/0b radix forms (unsigned), and Infinity. No underscores, as in JS.
+    """
+    body = text.strip(_JS_WHITESPACE)
+    if body == "":
+        return 0.0
+    if _JS_RADIX.match(body):
+        return float(int(body[2:], {"x": 16, "o": 8, "b": 2}[body[1].lower()]))
+    if _JS_DECIMAL.match(body):
+        return float(body.replace("Infinity", "inf"))
+    return None
+
+
+def _numeric_readings(text: str) -> set[int]:
+    """Every integer a reference MCP client SDK would read a STRING response id as.
+
+    The two reference SDKs both treat a string id as the number it spells:
+      * TypeScript (@modelcontextprotocol/sdk 1.32, `shared/protocol.js` `_onresponse`):
+        `const messageId = Number(response.id)`, then a lookup in a Map keyed by its integer ids.
+      * Python (mcp 1.30, `shared/session.py` `_normalize_request_id`): `int(response_id)` when the
+        id is a str, falling back to the string; its own request ids are ints.
+    Both readings are taken, because the proxy does not know which SDK is on the other side, and a
+    response the client WILL accept as the answer to request N must be mediated as that answer.
+    """
+    readings: set[int] = set()
+    try:
+        readings.add(int(text))         # Python: whitespace, sign, underscores, Unicode digits
+    except ValueError:
+        pass
+    js = _js_number(text)
+    if js is not None and math.isfinite(js) and js.is_integer():
+        readings.add(int(js))           # JavaScript: Number() semantics, double precision
+    return readings
+
+
 class _PendingMap:
     """Bounded request-id -> method map.
 
@@ -324,8 +371,8 @@ class _PendingMap:
     the ids. An unbounded map is a trivially-reachable memory-exhaustion primitive: open requests,
     never answer them. Eviction is insertion-ordered (Python dicts preserve it), and evicting the
     OLDEST is right — an id that has gone unanswered longest is the one least likely to still
-    matter, and losing it degrades to "forward the response unexamined", never to a bypass of Gate B
-    (which is enforced on the REQUEST, before anything is forwarded).
+    matter. A response for an evicted id is UNMATCHED, and an unmatched response is dropped, never
+    forwarded (`McpFirewall.on_server_message`).
     """
 
     __slots__ = ("_map", "_cap")
@@ -336,20 +383,17 @@ class _PendingMap:
 
     @staticmethod
     def _key(msg_id: Any) -> str:
-        # JSON-RPC ids may be strings or numbers, and `1` and `"1"` are DIFFERENT ids. Typed keys
-        # keep them apart; a bare str() would conflate them and let a peer confuse the map.
+        # The key a REQUEST id is stored under. Strings and numbers are typed apart, so a client that
+        # uses both `1` and `"1"` keeps two entries and each answer finds its own (exact match first,
+        # see `match`).
         #
-        # NUMBERS ARE NORMALISED ACROSS int/float, though, because JSON has ONE number type and the
-        # peers do not agree on how it decodes. We sent `"id": 1`; a server that answers `"id": 1.0`
-        # produced `float:1.0` here, missed `int:1`, and `take()` returned "" — so the response
-        # matched no discovery branch and was forwarded VERBATIM: no charset check, no skeleton map,
-        # no pin, no catalog entry. The subsequent tools/call on a homoglyph twin then found no
-        # catalog entry, so `call_denied` never ran either. One character skipped Gate A entirely.
-        # A JavaScript MCP host treats 1 and 1.0 as the same Number and accepts the correlation this
-        # proxy rejected, so the two ends genuinely disagreed about which request was being answered.
+        # NUMBERS ARE NORMALISED ACROSS int/float, because JSON has ONE number type and the peers do
+        # not agree on how it decodes. We sent `"id": 1`; a server that answered `"id": 1.0` missed
+        # `int:1` and the response was forwarded verbatim. A JavaScript host treats 1 and 1.0 as the
+        # same Number.
         #
         # `bool` is excluded deliberately: it is an int subclass in Python but is not a valid JSON-RPC
-        # id, and folding `True` into `num:1` would be the conflation the typed key exists to prevent.
+        # id, and folding `True` into `num:1` would conflate two ids no client conflates.
         if isinstance(msg_id, bool):
             return f"bool:{msg_id}"
         if isinstance(msg_id, (int, float)):
@@ -361,13 +405,95 @@ class _PendingMap:
             return f"num:{msg_id!r}"
         return f"{type(msg_id).__name__}:{msg_id}"
 
+    def _candidates(self, msg_id: Any) -> list[str]:
+        """Keys a RESPONSE id can answer, most exact first.
+
+        Matching has to be at least as liberal as the client's own matching. JSON-RPC calls `5` and
+        `"5"` different ids, but both reference SDKs read a string response id as a number (see
+        `_numeric_readings`), so a server answering `"5"` to request 5 has its answer ACCEPTED by the
+        client as the answer to 5. Typing them apart here made that answer match nothing, and an
+        unmatched answer used to be forwarded verbatim: no Gate A, no content guard. An integral
+        number is likewise tried against a numeric string request id, for a client that compares
+        loosely.
+        """
+        keys = [self._key(msg_id)]
+        if isinstance(msg_id, str):
+            keys += [f"num:{n}" for n in sorted(_numeric_readings(msg_id))]
+        elif isinstance(msg_id, (int, float)) and not isinstance(msg_id, bool):
+            if isinstance(msg_id, int) or msg_id.is_integer():
+                keys.append(f"str:{int(msg_id)}")
+        return keys
+
     def put(self, msg_id: Any, method: str) -> None:
-        if len(self._map) >= self._cap:
+        key = self._key(msg_id)
+        if key not in self._map and len(self._map) >= self._cap:
             self._map.pop(next(iter(self._map)), None)
-        self._map[self._key(msg_id)] = method
+        self._map[key] = method
+
+    def match(self, msg_id: Any) -> tuple[str, str] | None:
+        """(key, method) of the pending request this response id answers, without consuming it."""
+        for key in self._candidates(msg_id):
+            method = self._map.get(key)
+            if method is not None:
+                return key, method
+        return None
+
+    def pop(self, key: str) -> None:
+        self._map.pop(key, None)
+
+    def discard(self, msg_id: Any) -> None:
+        """Forget a request that will get no upstream answer (it was answered locally)."""
+        self._map.pop(self._key(msg_id), None)
 
     def take(self, msg_id: Any) -> str:
-        return self._map.pop(self._key(msg_id), "")
+        found = self.match(msg_id)
+        if found is None:
+            return ""
+        self.pop(found[0])
+        return found[1]
+
+
+# The list each discovery result must carry. A result without it is not a well-formed answer to that
+# method, and is dropped rather than forwarded (see `_response_defect`).
+_LIST_RESULT_KEYS = {
+    P.M_TOOLS_LIST: "tools",
+    P.M_PROMPTS_LIST: "prompts",
+    P.M_RESOURCES_LIST: "resources",
+    P.M_RESOURCES_TEMPLATES: "resourceTemplates",
+}
+
+
+def _response_defect(msg: P.JsonRpcMessage, method: str) -> str:
+    """Why this is not a well-formed JSON-RPC 2.0 answer to `method`, or "" when it is.
+
+    Checked BEFORE the pending entry is consumed. A malformed first answer used to consume it; the
+    client rejected that answer and kept waiting, and the server's second answer with the same id then
+    matched nothing and went out verbatim. Now the malformed one is dropped and the request stays
+    pending, so whatever answer the client does accept is the one that is mediated.
+    """
+    data = msg.data
+    if data.get("jsonrpc") != "2.0":
+        return "jsonrpc is not \"2.0\""
+    if ("result" in data) == ("error" in data):
+        return "a response carries exactly one of result and error"
+    if "error" in data:
+        err = data["error"]
+        code = err.get("code") if isinstance(err, dict) else None
+        if not isinstance(code, int) or isinstance(code, bool) or not isinstance(err.get("message"), str):
+            return "error is not a JSON-RPC error object"
+        return ""
+    result = data["result"]
+    if not isinstance(result, dict):
+        return "result is not an object"
+    key = _LIST_RESULT_KEYS.get(method)
+    if key is not None and not isinstance(result.get(key), list):
+        return f"a {method} result without a {key} list"
+    return ""
+
+
+# How often the unmatched-response drop is logged per firewall. A server chooses how many it sends,
+# so the log line is coalesced; the count of suppressed drops rides on the next line.
+_UNMATCHED_LOG_WINDOW_S = 60.0
 
 
 class McpFirewall:
@@ -414,6 +540,9 @@ class McpFirewall:
         # Counts CLIENT-initiated tools/list responses that have been through Gate A. The proxy's own
         # list compares it before and after its wait: see `_cold_list_once`.
         self._client_list_generation = 0
+        # (monotonic of the last unmatched-response log line, drops suppressed since). See
+        # `_drop_unmatched`.
+        self._unmatched_log: tuple[float, int] = (0.0, 0)
         self.stats: dict[str, int] = {}
 
     # ---------------------------------------------------------------- helpers
@@ -474,6 +603,7 @@ class McpFirewall:
     # ============================================================ CLIENT -> SERVER
     async def on_client_message(
         self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None = None,
+        *, registered: bool = False,
     ) -> MediationResult:
         """Mediate one message travelling from the MCP client to the upstream server.
 
@@ -496,9 +626,33 @@ class McpFirewall:
                 blocked=True, note="batch_refused",
             )
 
+        # `registered`: the driver already called `note_client_request` when it read this message.
+        # Registering again here would re-open an entry an answer has consumed in between, and a
+        # second answer to the same request would then be mediated and forwarded as well.
+        if not registered:
+            self.note_client_request(msg)
+        result = await self._on_client_message(msg, list_upstream)
+        if msg.is_request and result.forward is None:
+            # Answered here (refused, or malformed): the server never sees this request, so nothing
+            # it sends under this id later is an answer to it.
+            self._client_pending.discard(msg.id)
+        return result
+
+    def note_client_request(self, msg: P.JsonRpcMessage) -> None:
+        """Record a client request as pending. Idempotent.
+
+        The drivers call this the moment they READ a message, before anything awaits — on stdio the
+        pump holds a call while the proxy's own list is in flight, and the requests the client sends
+        meanwhile must already be pending: a server answer for one of them is then matched and
+        mediated as that answer, and one that precedes the request is unmatched and dropped. Neither
+        is forwarded unexamined.
+        """
         if msg.is_request:
             self._client_pending.put(msg.id, msg.method)
 
+    async def _on_client_message(
+        self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None,
+    ) -> MediationResult:
         method = msg.method
         # ANSWER PLANE (2026-07-28 MRTR). A retry carries `inputResponses` — data leaving the trust
         # boundary in reply to a question the SERVER composed. That is the confused-deputy vector the
@@ -566,7 +720,23 @@ class McpFirewall:
                             detail="an answer to the proxy's own tools/list arrived when nothing was "
                                    "waiting for it (late or duplicate); it was not forwarded")
                 return MediationResult(blocked=True, note="cold_list_answer_dropped")
-            requested = self._client_pending.take(msg.id)
+            # FAIL CLOSED ON CORRELATION. A response is mediated as the answer to the client request
+            # it answers; one that answers no pending request has no method to be mediated as, and
+            # used to fall through to the terminal forward below — verbatim, past Gate A and the
+            # content guard. Reachable three ways, all server-chosen: an id the client SDK reads as
+            # a pending id but this map did not (`"5"` for 5), a malformed first answer that consumed
+            # the entry before the real one arrived, and an answer timed to land before the client's
+            # request was registered. Matching is now as liberal as the client's (see
+            # `_PendingMap._candidates`), a malformed answer leaves the request pending, and anything
+            # still unmatched is dropped.
+            found = self._client_pending.match(msg.id)
+            if found is None:
+                return self._drop_unmatched(msg, "it answers no pending client request")
+            pending_key, requested = found
+            defect = _response_defect(msg, requested)
+            if defect:
+                return self._drop_unmatched(msg, f"not a well-formed answer: {defect}")
+            self._client_pending.pop(pending_key)
             # `server/discover` replaces the initialize handshake and is the FIRST thing a 2026-07-28
             # client asks. It advertises the server's identity and capabilities as free text, so it is
             # a discovery surface exactly like tools/list — and Gate A never saw it.
@@ -619,6 +789,24 @@ class McpFirewall:
         self._bump("malformed_from_server")
         log.warning("nrvq.mcp.malformed_dropped", direction="server", code="NRVQ-MCP-5011")
         return MediationResult(blocked=True, note="malformed")
+
+    def _drop_unmatched(self, msg: P.JsonRpcMessage, reason: str) -> MediationResult:
+        """Drop a server response that cannot be mediated as the answer to a client request.
+
+        Logged at WARNING, coalesced to one line per `_UNMATCHED_LOG_WINDOW_S` with the count of the
+        drops in between, because the server chooses how many of these it sends.
+        """
+        self._bump("unmatched_response_dropped")
+        last, suppressed = self._unmatched_log
+        now = monotonic()
+        if now - last >= _UNMATCHED_LOG_WINDOW_S:
+            log.warning("nrvq.mcp.server.unmatched_response_dropped", server=self._server_id,
+                        id=repr(msg.id)[:64], reason=reason, suppressed_since_last=suppressed,
+                        code="NRVQ-MCP-5084")
+            self._unmatched_log = (now, 0)
+        else:
+            self._unmatched_log = (last, suppressed + 1)
+        return MediationResult(blocked=True, note="unmatched_response_dropped")
 
     # ============================================================ GATE B
     def _mcp_context(self, tool_name: str, surface: str) -> dict:
@@ -1255,8 +1443,10 @@ class McpFirewall:
                 err = response.data.get("error")
                 detail = err.get("message") if isinstance(err, dict) else err
                 reason = f"the server answered with an error: {str(detail)[:200]}"
-            elif not isinstance(response.result.get("tools"), list):
-                reason = "the response carried no tools list"
+            elif _response_defect(response, P.M_TOOLS_LIST):
+                # The same well-formedness a client's listing must meet; a result with no tools list
+                # included. Failing (and backing off) rather than treating it as an empty catalog.
+                reason = f"not a well-formed answer: {_response_defect(response, P.M_TOOLS_LIST)}"
         if not reason and self._client_list_generation != generation:
             # A CLIENT listing went through Gate A while this answer was in flight. Its verdicts are
             # newer than this answer, and applying this one now would put Gate A out of order: a late

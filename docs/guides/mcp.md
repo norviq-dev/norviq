@@ -198,6 +198,14 @@ JSON-RPC **batches are refused in both directions** (`firewall.py:392-401`). MCP
 inside it ungoverned. A message the proxy cannot classify or decode is dropped, not forwarded — on
 both transports (`firewall.py:489-492`, `http.py:296-310`).
 
+A server response is mediated as the answer to the client request it answers, and a response that
+answers none is dropped (`NRVQ-MCP-5084`). Ids are matched the way the reference client SDKs match
+them: the TypeScript SDK reads a response id with `Number()` and the Python SDK with `int()`, so a
+numeric string such as `"5"` answers request `5`, and an integral number answers a request whose id is
+that number as a string. A response that is not a well-formed JSON-RPC 2.0 answer (`jsonrpc` is not
+`"2.0"`, not exactly one of `result` and `error`, a `result` that is not an object, or a discovery
+result without its list) is dropped and leaves the request pending.
+
 ---
 
 ## 3. What the firewall does at discovery
@@ -729,9 +737,10 @@ stripped, `5032` sanitised, `5035` output-DLP redaction, `5036` response injecti
 first pin, `5042` drift, `5043` approved, `5044` revoked, `5046` control plane unreachable, `5066`
 schema violation, `5070` schema not fully enforceable, `5079` cold catalog listed by the proxy,
 `5080` the proxy's cold-catalog list failed, `5081` a late or duplicate answer to it dropped,
-`5082` SSE lines dropped, `5083` the proxy's list superseded by a client listing. Latency is recorded as
+`5082` SSE lines dropped, `5083` the proxy's list superseded by a client listing, `5084` a server
+response dropped because it matches no well-formed answer to a client request. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
-`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5083` are
+`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5084` are
 listed in [Error Codes](../error-codes.md) so far.
 
 ---
