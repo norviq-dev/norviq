@@ -155,10 +155,22 @@ async def test_a_hung_attempt_is_cut_off_and_retried(slept, monkeypatch):
 
     cache = _Cache()
     # The outer bound turns "the attempt is never cut off" into a failure instead of a hung suite.
-    seeded = await asyncio.wait_for(
-        agents.warm_agent_overrides_at_startup(cache, _factory(_Hang(), _Session(rows=[_FROZEN]))), 5
-    )
+    with structlog.testing.capture_logs() as logs:
+        seeded = await asyncio.wait_for(
+            agents.warm_agent_overrides_at_startup(cache, _factory(_Hang(), _Session(rows=[_FROZEN]))), 5
+        )
     assert seeded == 1 and cache.store == {f"agent_frozen:{_FROZEN['spiffe_id']}": "1"}
+    # str() of wait_for's TimeoutError is '', so the retry line said `error=''`: the cut-off must be named.
+    [retry] = [r for r in logs if r["log_level"] == "warning"]
+    assert retry["error"].startswith("TimeoutError"), retry
+
+
+async def test_an_exhausted_retry_names_the_exception_type(slept):
+    sessions = [_Session(boom=TimeoutError()) for _ in range(startup_retry.WARM_ATTEMPTS)]
+    with structlog.testing.capture_logs() as logs:
+        assert await agents.warm_agent_overrides_at_startup(_Cache(), _factory(*sessions)) is None
+    [error] = [r for r in logs if r["log_level"] == "error"]
+    assert error["error"].startswith("TimeoutError"), error
 
 
 class _NsRow:

@@ -103,12 +103,16 @@ because they should be installed.
   `NRVQ-API-7138` means that pod did not restore them; restart the API again. The same gap opens after
   any later loss of store data: a `FLUSHALL`, a store restart without persistence or from an older
   snapshot, a failover. Restart the API after any of those (Known issues, below). **Nothing is
-  deleted:** 0.2.5's dump stays at the root of the volume, and `helm rollback` to 0.2.5 finds it. A
-  later upgrade picks Valkey's data up from where it was at the rollback. The start-up write adds what
-  Postgres holds but removes nothing, so a freeze or trust cap you lifted while rolled back to 0.2.5 is
-  enforced again after the re-upgrade if Valkey held it at the rollback. Lift it again after
-  re-upgrading with `norviq agent reset-trust <id> --score 1.0`. Stores you run yourself
-  (`redis.enabled=false`) are unaffected.
+  deleted:** 0.2.5's dump stays at the root of the volume, and `helm rollback` to 0.2.5 finds it. That
+  rollback reloads the store as 0.2.5 left it, so a freeze or trust cap lifted under 0.2.6 is enforced
+  again, and a token logged out under 0.2.6 is accepted again until it expires (0.2.5 keeps its denylist
+  in the store only); 0.2.5's API writes back what Postgres holds when it starts, so a freeze or cap set
+  under 0.2.6 stays. A later upgrade picks Valkey's data up from where it was at the rollback. The
+  start-up write adds what Postgres holds but removes nothing, so a freeze or trust cap you lifted while
+  rolled back to 0.2.5 is enforced again after the re-upgrade if Valkey held it at the rollback. Lift a
+  freeze or cap that came back with `norviq agent reset-trust <id> --score 1.0`, which also clears the
+  agent's cap; to lift only a freeze and keep a cap, send that cap instead (`--score 0.5` clears the
+  freeze and sets the cap to 0.5). Stores you run yourself (`redis.enabled=false`) are unaffected.
 - **HA (`redis.ha.enabled=true`, as in `values-prod.yaml`) stays on Redis 7.4.** The RedisFailover now
   takes its own `redis.ha.image`, default `redis:7.4-alpine`, the same Redis 7.4 that 0.2.5's
   `redis:7-alpine` ran, still under RSALv2/SSPLv1. Through 0.2.5 it took `images.redis`. Left on that,
@@ -206,7 +210,8 @@ uncapped and the chart-wide posture, until an API pod restarts. Earlier releases
 any such event run `kubectl -n <namespace> rollout restart deployment/norviq-api` and look for
 `NRVQ-API-7034` in the new pods' logs. A store restored from an older snapshot can also bring back a
 freeze or cap lifted since: the restart adds what Postgres holds and removes nothing, so lift it again
-with `norviq agent reset-trust <id> --score 1.0`. Details in docs/trust-score-design.md §5.
+with `norviq agent reset-trust <id> --score 1.0` (which clears a cap too; `--score <cap>` lifts the
+freeze and keeps that cap). Details in docs/trust-score-design.md §5.
 
 ## [0.2.5] — 2026-08-20 — log codes that named two things at once
 

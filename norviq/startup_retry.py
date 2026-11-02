@@ -19,6 +19,12 @@ T = TypeVar("T")
 STARTUP_ATTEMPTS = 5
 
 
+def _describe(exc: BaseException) -> str:
+    """`TimeoutError: ...`, never an empty string. str() of the TimeoutError that asyncio.wait_for raises is
+    '', so a warm attempt cut off at its bound logged `error=''`, which says nothing about why."""
+    return f"{type(exc).__name__}: {exc}"
+
+
 async def connect_with_backoff(
     coro_factory: Callable[[], Awaitable[T]],
     name: str,
@@ -40,9 +46,11 @@ async def connect_with_backoff(
             return await coro_factory()
         except Exception as exc:
             if attempt == attempts:
-                log.error(f"nrvq.startup.{name}_failed", attempts=attempt, error=str(exc), code=fail_code)
+                log.error(f"nrvq.startup.{name}_failed", attempts=attempt, error=_describe(exc), code=fail_code)
                 raise
-            log.warning(f"nrvq.startup.{name}_retry", attempt=attempt, delay=delay, error=str(exc), code=retry_code)
+            log.warning(
+                f"nrvq.startup.{name}_retry", attempt=attempt, delay=delay, error=_describe(exc), code=retry_code
+            )
             await asyncio.sleep(delay)
             delay *= 2
     raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover

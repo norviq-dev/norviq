@@ -344,11 +344,15 @@ profile — see the scope-drift gap in §4 for the fact that nothing currently w
 > freezes and caps, `NRVQ-API-7159` for posture), and the last one an ERROR (`NRVQ-API-7035`,
 > `NRVQ-API-7138`); the API then starts anyway. `NRVQ-API-7034` and `NRVQ-API-7063` say a warm
 > completed. The warm adds what Postgres holds and deletes nothing, so a store restored from
-> an older snapshot can also bring back a freeze or cap lifted since.
+> an older snapshot can also bring back a freeze or cap lifted since. A `helm rollback` from 0.2.6 to
+> 0.2.5 is such a restore: the bundled store reloads the dump 0.2.5 left, so a freeze or cap lifted under
+> 0.2.6 is enforced again (one set under 0.2.6 is written back from Postgres when 0.2.5's API starts).
 >
 > **Mitigation.** After any loss of store data or a failover, restart the API:
 > `kubectl -n <namespace> rollout restart deployment/norviq-api`, then look for `NRVQ-API-7034` in the
 > new pods' logs. Lift a freeze or cap that came back with `norviq agent reset-trust <id> --score 1.0`.
+> That clears both; to lift only a freeze and keep a cap, send the cap (`--score 0.5` clears the freeze
+> and sets the cap to 0.5), since the endpoint sets the whole state (§6).
 > For the 0.2.6 upgrade, scale an agent that must stay frozen to zero across it and restart the API once
 > `helm upgrade` has finished (CHANGELOG, 0.2.6). Keep the store's persistence on (the bundled store's
 > PVC) so a plain restart reloads them.

@@ -33,7 +33,9 @@ def _posture_mirror(row: NamespaceSettings | None) -> dict:
 
 async def warm_ns_settings(cache, session_factory=get_session) -> None:
     """Startup: seed the Redis posture mirror from every persisted NamespaceSettings row so a row that predates
-    this fix (or a Redis flush) is not silently stale. Best-effort — the evaluator falls back to global config."""
+    this fix, or a store flushed before this process started, is not silently stale. Only at process start: a
+    flush while the API runs leaves posture absent until the next API start. On a miss the evaluator falls
+    back to global config."""
     if cache is None:
         return
     provider = session_factory()

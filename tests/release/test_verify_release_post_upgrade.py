@@ -189,3 +189,52 @@ def test_an_unfinished_rollout_fails_however_the_replica_counts_look(monkeypatch
         "still counted)"
     )
     assert not seen["forwarded"], "a /readyz from mid-rollout proves nothing about the upgraded API"
+
+
+# ---- mutants the first tests left alive ----------------------------------------------------------------
+# Each test below fails with one part of the check removed: the uid comparison, the health of the first
+# sample, the deletionTimestamp filter. Each existing test changed more than one of those at once, so
+# removing any single part still passed them.
+
+
+def test_a_new_pod_fails_even_if_its_container_id_reads_the_same(monkeypatch) -> None:
+    """Only the uid differs. Without the uid comparison this passed."""
+    events: list[str] = []
+    _patch_store(monkeypatch, events, pod_after_sleep=_store_pod(0, uid="pod-b"))
+    vr.check_store_after_upgrade("kind-x", Path("chart"))
+    name, ok, detail = vr.results[-1]
+    assert not ok and "replaced within 15s" in detail, detail
+
+
+def test_a_first_sample_that_was_never_healthy_fails(monkeypatch) -> None:
+    """wait_until gave up (120 s) with the store not Ready; it turned Ready, same pod and container, by the
+    second sample. Judging the second sample alone passed a store that missed its deadline."""
+    events: list[str] = []
+    not_ready = _store_pod(0)
+    not_ready["status"]["containerStatuses"][0]["ready"] = False
+    _patch_store(monkeypatch, events)
+    slept: list[float] = []
+
+    def kubectl(_ctx, *args, timeout=300):
+        if args[:2] == ("get", "pod"):
+            return _ok(_store_pod(0) if slept else not_ready)
+        return _ok("Valkey ... loading")
+
+    monkeypatch.setattr(vr, "kubectl", kubectl)
+    monkeypatch.setattr(vr.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(vr, "wait_until", lambda fn, timeout, interval=2.0: fn())
+    vr.check_store_after_upgrade("kind-x", Path("chart"))
+    assert vr.results[-1][1] is False, vr.results
+
+
+def test_a_terminating_pod_of_the_current_revision_is_never_probed(monkeypatch) -> None:
+    """Listed first and of the current ReplicaSet: only the deletionTimestamp filter keeps it out."""
+    _patch_api(monkeypatch, rollout_rc=0)
+    pods = {"items": [_pod("norviq-api-new-2", "bbb", terminating=True), _pod("norviq-api-new-1", "bbb")]}
+    real = vr.kubectl
+
+    def kubectl(ctx, *args, timeout=300):
+        return _ok(pods) if args[:2] == ("get", "pods") else real(ctx, *args, timeout=timeout)
+
+    monkeypatch.setattr(vr, "kubectl", kubectl)
+    assert vr._current_api_pods("kind-x") == ["norviq-api-new-1"]

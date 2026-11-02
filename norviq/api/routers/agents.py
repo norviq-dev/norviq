@@ -493,8 +493,9 @@ async def update_trust(
         await cache.set_trust_override(spiffe_id, body.score)
     trust = TrustScore(score=body.score, category="frozen" if body.score == 0 else "")
     await cache.set_trust(spiffe_id, trust)
-    # SECURITY (fail-open fix): persist the freeze/cap DURABLY (source of truth) so a Redis flush/restart can
-    # never silently lift the kill-switch. Warm-seeded back into Redis at startup (warm_agent_overrides).
+    # SECURITY (fail-open fix): persist the freeze/cap DURABLY (source of truth). The engine enforces from Redis
+    # only; warm_agent_overrides writes this back when an API process starts. A Redis flush/restart/failover
+    # while the API runs lifts the kill-switch until the next API start (trust-score-design §5 known gap).
     # Best-effort UPDATE of the registered agent's row; an unregistered agent gets its durable state stamped
     # on its next registration path if needed — the common case (freezing a known misbehaving agent) is covered.
     frozen = body.score == 0
@@ -514,8 +515,10 @@ async def update_trust(
 
 async def warm_agent_overrides(cache, session_factory=get_session) -> int:
     """SECURITY (fail-open fix): at startup, re-seed durable admin freeze/cap from agent_registry into Redis so
-    a Redis restart/flush (which loses the ephemeral agent_frozen:/override keys) does not leave a killed or
-    capped agent running unpoliced. Returns the count seeded.
+    a store that lost the agent_frozen:/override keys before this process started does not leave a killed or
+    capped agent running unpoliced. Runs only at process start: a loss while the API runs is not repaired
+    until an API process starts again. Adds what Postgres holds and deletes nothing. Returns the count
+    seeded.
 
     RAISES on any failure. It used to catch its own error, log a WARNING and return the count reached (0 when
     the query failed), which reads exactly like "nothing is frozen" while every freeze stayed absent until
