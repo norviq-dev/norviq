@@ -210,7 +210,7 @@ def test_sse_framing_fields_survive_mediation():
     # maps back to 42 when the client resumes (a server's own ids cannot say which stream they belong
     # to; see `HttpProxy._mint_event_id`).
     minted = next(line[4:] for line in body.splitlines() if line.startswith("id: "))
-    assert proxy._event_ids[minted][0] == "42"                          # noqa: SLF001
+    assert next(iter(proxy._event_ids.values())).get(minted)[0] == "42"  # noqa: SLF001
     assert body.rstrip().endswith("}") or "\n\n" in body
 
 

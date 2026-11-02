@@ -181,7 +181,7 @@ def test_event_id_retry_and_comments_still_pass_for_normal_frames():
     # The event id is kept as one the proxy minted, mapped back to the server's (see
     # test_sse_framing_fields_survive_mediation for why it is not passed verbatim any more).
     minted = next(line[4:] for line in text.splitlines() if line.startswith("id: "))
-    assert proxy._event_ids[minted][0] == "42"                          # noqa: SLF001
+    assert next(iter(proxy._event_ids.values())).get(minted)[0] == "42"  # noqa: SLF001
     _assert_listing_mediated(text)
 
 

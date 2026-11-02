@@ -259,7 +259,11 @@ cannot match to a well-formed answer to one of the client's requests. The annota
 longer include excerpts of the server content they describe. The HTTP MCP proxy reads at most
 `NRVQ_MCP_HTTP_MAX_MESSAGE_BYTES` (default 8 MiB) of one upstream message on a client-facing path and
 fails closed above it (`NRVQ-MCP-5085`); a server that writes one message over several SSE `data:`
-lines now reaches the client intact. Two security booleans no longer fall back to off when an
+lines now reaches the client intact. Behind the HTTP MCP proxy: responses a server sends on a
+plain GET stream are dropped (servers must not send them there); SSE event ids reach the client as ids
+the proxy issues, which it maps back when the client resumes; and a server's `Mcp-Session-Id` reaches
+the client on the response to `initialize`, or when it is the client's own (`NRVQ-MCP-5087` when one is
+withheld). Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

@@ -211,7 +211,9 @@ it arrives on. A GET stream answers no request: as the transport requires, respo
 dropped, and only server requests and notifications are forwarded (mediated as usual). The SSE event
 ids the client receives are the proxy's own; a GET that resumes a POST's stream with one of them
 answers that POST's request at most once, under that request's id, and an event id the proxy did not
-issue resumes nothing. A server's `Mcp-Session-Id` reaches the client on the response to `initialize`;
+issue to the same caller resumes nothing. The proxy remembers a bounded number of event ids per caller
+and per stream, and a server event id longer than 256 bytes is dropped from its frame
+(`NRVQ-MCP-5088`). A server's `Mcp-Session-Id` reaches the client on the response to `initialize`;
 on any other response one that differs from the client's own is withheld (`NRVQ-MCP-5087`). A string
 id longer than 64 characters is not read as a number. A message is a request or notification only
 when its `method` is a string and it carries no `result` or `error`, and a response only when it
@@ -753,9 +755,9 @@ schema violation, `5070` schema not fully enforceable, `5079` cold catalog liste
 `5080` the proxy's cold-catalog list failed, `5081` a late or duplicate answer to it dropped,
 `5082` SSE lines dropped, `5083` the proxy's list superseded by a client listing, `5084` a server
 response dropped because it matches no well-formed answer to a client request, `5085` an upstream
-message over the HTTP size limit, `5087` a session id withheld from the client. Latency is recorded as
+message over the HTTP size limit, `5087` a session id withheld from the client, `5088` an over-long SSE event id dropped. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
-`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` and `5087` are
+`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085`, `5087` and `5088` are
 listed in [Error Codes](../error-codes.md) so far.
 
 ---

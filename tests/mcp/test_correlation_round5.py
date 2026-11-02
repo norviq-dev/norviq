@@ -337,3 +337,95 @@ async def test_http_a_plain_get_stream_answers_nothing_even_with_requests_pendin
     fw._corr.pending.put(1, "tools/call")                               # noqa: SLF001
     r = await pc.get("/mcp", headers={"accept": "text/event-stream"})
     assert '"result"' not in r.text
+
+
+# ── resumption bookkeeping is bounded and per caller ────────────────────────────────────────────
+def _frames_upstream(frames: list[bytes]):
+    async def post(request):
+        async def gen():
+            for f in frames:
+                yield f
+        return StreamingResponse(gen(), media_type="text/event-stream")
+    return Starlette(routes=[Route("/mcp", post, methods=["POST"])])
+
+
+def _ping_frame(event_id: bytes, n: int = 0) -> bytes:
+    return (b"id: " + event_id + b"\ndata: " + json.dumps(
+        {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": n}}).encode() + b"\n\n")
+
+
+async def test_a_long_server_event_id_is_not_remembered_and_the_frame_goes_on_without_it():
+    proxy, pc = await _proxy_client(_frames_upstream([_ping_frame(b"x" * 4096)]))
+    with capture_logs() as logs:
+        r = await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                          headers={"accept": "text/event-stream"})
+    assert "notifications/progress" in r.text and "\nid:" not in "\n" + r.text
+    assert not any(ids.entries for ids in proxy._event_ids.values())      # noqa: SLF001
+    assert [e for e in logs if e.get("code") == "NRVQ-MCP-5088"]
+
+
+async def test_the_event_id_map_is_bounded_in_bytes_and_entries(monkeypatch):
+    from norviq.mcp import http as http_mod
+
+    monkeypatch.setattr(http_mod, "_MAX_EVENT_ID_BUDGET", 2000)
+    monkeypatch.setattr(http_mod, "_MAX_EVENT_IDS", 50)
+    frames = [_ping_frame(f"{i:0>200}".encode(), i) for i in range(40)]
+    proxy, pc = await _proxy_client(_frames_upstream(frames))
+    for mid in range(3):
+        await pc.post("/mcp", json={"jsonrpc": "2.0", "id": mid, "method": "ping"},
+                      headers={"accept": "text/event-stream"})
+    ids = next(iter(proxy._event_ids.values()))                           # noqa: SLF001
+    assert ids.bytes <= 2000 and len(ids.entries) <= 50
+
+
+async def test_one_stream_cannot_evict_another_streams_resumption_ids(monkeypatch):
+    from norviq.mcp import http as http_mod
+
+    monkeypatch.setattr(http_mod, "_MAX_EVENT_IDS_PER_STREAM", 8)
+    first = await _proxy_client(_frames_upstream([_ping_frame(b"first")]))
+    proxy, pc = first
+    r1 = await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                       headers={"accept": "text/event-stream"})
+    kept = next(line[4:] for line in r1.text.splitlines() if line.startswith("id: "))
+    proxy._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=_frames_upstream(  # noqa: SLF001
+        [_ping_frame(str(i).encode(), i) for i in range(500)])), base_url="http://u")
+    await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "ping"},
+                  headers={"accept": "text/event-stream"})
+    ids = next(iter(proxy._event_ids.values()))                           # noqa: SLF001
+    assert ids.get(kept) is not None, "a busy stream evicted another stream's resumption id"
+    assert len(ids.entries) <= 1 + 8
+
+
+async def test_an_event_id_minted_for_one_caller_resumes_nothing_for_another():
+    """The map is per attested caller; another caller presenting the id resumes nothing."""
+    seen: list = []
+    answer = {"jsonrpc": "2.0", "id": 77, "result": {"tools": [POISONED_TOOL, CLEAN_TOOL]}}
+    proxy, pc = await _proxy_client(_resuming_upstream([b"id: s1\ndata: " + json.dumps(
+        {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 1}}).encode() + b"\n\n"],
+        answer, seen))
+    posted = await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                           headers={"accept": "text/event-stream"})
+    minted = next(line[4:] for line in posted.text.splitlines() if line.startswith("id: "))
+    proxy._identity_key = "spiffe://norviq/ns/other/sa/someone-else"   # noqa: SLF001 - a second caller
+    resumed = await pc.get("/mcp", headers={"accept": "text/event-stream", "last-event-id": minted})
+    assert '"result"' not in resumed.text
+    assert seen == [minted], "an unknown id is forwarded as the client sent it, and resumes nothing"
+
+
+async def test_an_empty_event_id_passes_through_as_the_reset_it_is():
+    proxy, pc = await _proxy_client(_frames_upstream([_ping_frame(b"")]))
+    r = await pc.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                      headers={"accept": "text/event-stream"})
+    assert any(line in ("id: ", "id:") for line in r.text.splitlines()), r.text
+    assert not any(ids.entries for ids in proxy._event_ids.values())      # noqa: SLF001
+
+
+async def test_the_event_id_map_is_bounded_in_entries_when_ids_are_small(monkeypatch):
+    from norviq.mcp import http as http_mod
+
+    monkeypatch.setattr(http_mod, "_MAX_EVENT_IDS", 10)
+    proxy, pc = await _proxy_client(_frames_upstream([_ping_frame(str(i).encode(), i) for i in range(20)]))
+    for mid in range(2):
+        await pc.post("/mcp", json={"jsonrpc": "2.0", "id": mid, "method": "ping"},
+                      headers={"accept": "text/event-stream"})
+    assert len(next(iter(proxy._event_ids.values())).entries) <= 10     # noqa: SLF001

@@ -29,10 +29,12 @@ and this spike does not pretend to have validated it. Client-supplied identity i
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import hashlib
 import json
 import uuid
+import weakref
 from typing import Any, AsyncIterator
 
 import httpx
@@ -64,9 +66,13 @@ _HOP_HEADERS = frozenset({
 # puts on one JSON-RPC line: far above a real catalogue, and it keeps a server from streaming without
 # end into memory while a client's call waits.
 _OWN_LIST_MAX_BYTES = 8 * 1024 * 1024
-# How many minted SSE event ids are remembered for resumption. A resume with an evicted id resumes
+# Resumption bookkeeping, per attested caller (`_EventIds`). A resume with an evicted id resumes
 # nothing (its responses are dropped), which is the fail-closed direction.
-_MAX_EVENT_IDS = 4096
+_MAX_EVENT_IDS = 4096                       # entries per caller
+_MAX_EVENT_IDS_PER_STREAM = 64              # one stream cannot evict the others' entries
+_MAX_EVENT_ID_BUDGET = 1024 * 1024          # bytes of server event ids held per caller
+# Longest server SSE event id the proxy will remember. Ids are opaque cursors; a 4 MB one is not.
+_MAX_SERVER_EVENT_ID_BYTES = 256
 # The client headers the proxy's own `tools/list` carries: what identifies the connection, nothing
 # that describes the call that triggered it. See `HttpProxy._upstream_lister`.
 _MCP_METHOD_HEADER = "mcp-method"
@@ -87,9 +93,11 @@ class HttpProxy:
         self._engine: PolicyEngineClient | None = None
         # Keyed by ATTESTED identity, never by anything the caller sends. See _firewall_for.
         self._firewalls: dict[str, McpFirewall] = {}
-        # Minted SSE event id -> (the server's event id, the POST scope it came from, or None for a
-        # GET stream). See `_mint_event_id`.
-        self._event_ids: dict[str, tuple[str, Correlation | None]] = {}
+        # Per attested caller (its firewall): minted SSE event id -> (the server's event id, the POST
+        # scope it came from, or None for a GET stream). See `_mint_event_id` and `_EventIds`. Keyed by
+        # the firewall OBJECT, weakly, so an id minted for one caller is never found for another and
+        # an evicted caller's ids go with it.
+        self._event_ids: weakref.WeakKeyDictionary[McpFirewall, _EventIds] = weakref.WeakKeyDictionary()
         self._identity_key: str | None = None
         # Pins are per-SERVER, not per-session: a rug pull that reset itself every time a client
         # reconnected would not be detectable at all.
@@ -453,7 +461,8 @@ class HttpProxy:
         server_last_id: str | None = None
         last = request.headers.get("last-event-id")
         if last is not None:
-            known = self._event_ids.get(last)
+            ids = self._event_ids.get(fw)
+            known = ids.get(last) if ids is not None else None
             if known is not None:
                 server_last_id, origin = known
                 if origin is not None:
@@ -520,19 +529,18 @@ class HttpProxy:
                            "request's; it was not passed to the client")
         return {}
 
-    def _mint_event_id(self, server_id: str, corr: Correlation | None) -> str:
+    def _mint_event_id(self, fw: McpFirewall, server_id: str, corr: Correlation | None) -> str:
         """An SSE event id of the proxy's own, mapped to the server's id and to the stream's scope.
 
         The client resumes with what it was given. Event ids the SERVER chose cannot say which of the
         proxy's streams they belonged to — a server can repeat one across streams — so the client is
         given ids the proxy minted, and a resuming GET is mapped back to exactly one POST's scope.
         """
-        minted = f"nrvq-{uuid.uuid4().hex}"
+        ids = self._event_ids.get(fw)
+        if ids is None:
+            ids = self._event_ids[fw] = _EventIds()
         origin = None if corr is None or corr.get_stream else corr
-        if len(self._event_ids) >= _MAX_EVENT_IDS:
-            self._event_ids.pop(next(iter(self._event_ids)), None)
-        self._event_ids[minted] = (server_id, origin)
-        return minted
+        return ids.add(server_id, origin, id(corr) if corr is not None else 0)
 
     async def _pump_frames(self, fw: McpFirewall, resp: Any,
                            corr: Correlation | None = None) -> AsyncIterator[bytes]:
@@ -660,9 +668,19 @@ class HttpProxy:
         for i, line in enumerate(keep):
             name, _, value = line.partition(b":")
             if name == b"id":
-                server_id = (value[1:] if value.startswith(b" ") else value).decode("utf-8", "replace")
-                if server_id:
-                    keep[i] = b"id: " + self._mint_event_id(server_id, corr).encode()
+                raw_id = value[1:] if value.startswith(b" ") else value
+                if len(raw_id) > _MAX_SERVER_EVENT_ID_BYTES:
+                    # Held in memory until evicted, so bounded: an id this long is not one the proxy
+                    # will remember. The frame goes on without an id (the client cannot resume to it).
+                    log.warning("nrvq.mcp.http.sse_event_id_too_long", bytes=len(raw_id),
+                                limit=_MAX_SERVER_EVENT_ID_BYTES, server=self._server_id,
+                                code="NRVQ-MCP-5088")
+                    keep[i] = b""
+                elif raw_id:
+                    keep[i] = b"id: " + self._mint_event_id(
+                        fw, raw_id.decode("utf-8", "replace"), corr).encode()
+                # An EMPTY `id:` is passed as it is: it resets the client's last event id.
+        keep = [line for line in keep if line]
         if data is not None:
             mediated = await self._mediate_server_bytes(fw, data, corr)
             keep.append(b"data: " + _one_line(mediated) if mediated else b"data: ")
@@ -809,6 +827,53 @@ def _split_frame(frame: bytes) -> tuple[list[bytes], bytes | None, int]:
         elif line:
             dropped += 1
     return keep, (b"\n".join(data) if data else None), dropped
+
+
+class _EventIds:
+    """One caller's minted event ids, bounded three ways.
+
+    Per stream (`_MAX_EVENT_IDS_PER_STREAM`, the oldest of that stream goes): resumption needs a
+    stream's recent ids, and one stream emitting thousands must not evict every other stream's. Per
+    caller in entries and in bytes (the oldest overall goes): the server chooses how many streams and
+    how long its ids are, and these are held in memory.
+    """
+
+    __slots__ = ("entries", "streams", "bytes")
+
+    def __init__(self) -> None:
+        self.entries: dict[str, tuple[str, Correlation | None, int]] = {}
+        self.streams: dict[int, collections.deque] = {}
+        self.bytes = 0
+
+    def get(self, minted: str) -> tuple[str, Correlation | None] | None:
+        entry = self.entries.get(minted)
+        return None if entry is None else (entry[0], entry[1])
+
+    def _drop(self, minted: str) -> None:
+        entry = self.entries.pop(minted, None)
+        if entry is None:
+            return
+        self.bytes -= len(entry[0])
+        queue = self.streams.get(entry[2])
+        if queue is not None:
+            with contextlib.suppress(ValueError):
+                queue.remove(minted)
+            if not queue:
+                self.streams.pop(entry[2], None)
+
+    def add(self, server_id: str, origin: Correlation | None, stream: int) -> str:
+        minted = f"nrvq-{uuid.uuid4().hex}"
+        queue = self.streams.setdefault(stream, collections.deque())
+        while len(queue) >= _MAX_EVENT_IDS_PER_STREAM:
+            self._drop(queue[0])
+        while self.entries and (len(self.entries) >= _MAX_EVENT_IDS
+                                or self.bytes + len(server_id) > _MAX_EVENT_ID_BUDGET):
+            self._drop(next(iter(self.entries)))
+        queue = self.streams.setdefault(stream, collections.deque())
+        queue.append(minted)
+        self.entries[minted] = (server_id, origin, stream)
+        self.bytes += len(server_id)
+        return minted
 
 
 def _is_sse(headers: Any) -> bool:
