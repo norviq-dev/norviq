@@ -85,6 +85,16 @@ def test_only_an_explicit_none_selects_the_fresh_install_path() -> None:
     assert vr.resolve_upgrade_source("0.2.3", "0.2.6", must_not_list) == "0.2.3"
 
 
+@pytest.mark.parametrize("requested", ["", "  "])
+def test_an_empty_upgrade_from_is_an_error_not_the_fresh_path(requested: str) -> None:
+    """`--upgrade-from ""` (an unset CI variable) used to be returned as the version "" -> fresh install."""
+    def must_not_list() -> list[str]:
+        raise AssertionError("an empty value must be refused before the registry is consulted")
+
+    with pytest.raises(vr.UpgradeSourceError, match="empty"):
+        vr.resolve_upgrade_source(requested, "0.2.6", must_not_list)
+
+
 def test_auto_with_no_published_release_fails_instead_of_running_the_fresh_path() -> None:
     with pytest.raises(vr.UpgradeSourceError, match="--upgrade-from none"):
         vr.resolve_upgrade_source("auto", "0.1.0", lambda: PUBLISHED_2026_10_30)

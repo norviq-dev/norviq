@@ -1,0 +1,191 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
+"""The checks verify_release.py runs after `helm upgrade` must not pass for the wrong reason.
+
+The review of the first version found two ways they could.
+
+* check_store_after_upgrade said it sampled the store twice, 15s apart. It slept and then took both
+  samples back to back. Spacing them out alone changed nothing for a crash, though: restartCount only
+  rises, so the second sample decided either way. What neither version saw was a store pod REPLACED inside
+  the window, whose new container starts again at restartCount 0. It now compares the pod's uid and the
+  container's ID across the two samples.
+* check_api_after_upgrade called the API rolled out when readyReplicas equalled updatedReplicas, which
+  holds while old replicas are still counted. It then sent /readyz to any non-terminating API pod,
+  which mid-rollout can be an old one. An old pod answering healthily is exactly the false pass an
+  upgrade gate cannot afford.
+
+kubectl and the port-forward are faked, so nothing here needs a cluster.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))  # release scripts are not a package; import them by path
+import verify_release as vr  # noqa: E402
+
+STORE_IMAGE = "valkey/valkey:8.1-alpine@sha256:" + "2" * 64
+
+
+def _ok(stdout: object = "", rc: int = 0) -> subprocess.CompletedProcess[str]:
+    out = stdout if isinstance(stdout, str) else json.dumps(stdout)
+    return subprocess.CompletedProcess(["kubectl"], rc, out, "")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_results():
+    vr.results.clear()
+    yield
+    vr.results.clear()
+
+
+# ---- the store ----------------------------------------------------------------------------------------
+
+
+def _store_pod(restarts: int, uid: str = "pod-a", container: str = "containerd://aaa") -> dict:
+    return {"metadata": {"uid": uid},
+            "spec": {"containers": [{"name": "redis", "image": STORE_IMAGE}]},
+            "status": {"containerStatuses": [{"name": "redis", "ready": True, "restartCount": restarts,
+                                              "containerID": container}]}}
+
+
+def _patch_store(monkeypatch, events: list[str], restarts_after_sleep: int = 0,
+                 pod_after_sleep: dict | None = None) -> None:
+    slept = []
+
+    def kubectl(_ctx, *args, timeout=300):
+        if args[:2] == ("get", "pod"):
+            events.append("sample")
+            if slept and pod_after_sleep is not None:
+                return _ok(pod_after_sleep)
+            return _ok(_store_pod(restarts_after_sleep if slept else 0))
+        return _ok("Valkey ... # Can't handle RDB format version 12")  # logs
+
+    def sleep(seconds):
+        events.append(f"sleep {seconds}")
+        slept.append(seconds)
+
+    monkeypatch.setattr(vr, "kubectl", kubectl)
+    monkeypatch.setattr(vr, "_candidate_store_image", lambda _chart: STORE_IMAGE)
+    monkeypatch.setattr(vr, "wait_until", lambda fn, timeout, interval=2.0: True)
+    monkeypatch.setattr(vr.time, "sleep", sleep)
+
+
+def test_the_store_is_sampled_twice_with_the_wait_between_the_samples(monkeypatch) -> None:
+    events: list[str] = []
+    _patch_store(monkeypatch, events, restarts_after_sleep=0)
+    vr.check_store_after_upgrade("kind-x", Path("chart"))
+    assert events == ["sample", "sleep 15", "sample"], (
+        f"the two samples must bracket the 15s wait, got {events}"
+    )
+    assert vr.results[-1][1] is True, vr.results
+
+
+def test_a_store_that_restarts_inside_the_window_fails_with_its_log(monkeypatch) -> None:
+    events: list[str] = []
+    _patch_store(monkeypatch, events, restarts_after_sleep=1)
+    vr.check_store_after_upgrade("kind-x", Path("chart"))
+    name, ok, detail = vr.results[-1]
+    assert not ok and "restarts=1" in detail and "RDB format version 12" in detail, detail
+
+
+def test_a_store_pod_replaced_inside_the_window_fails(monkeypatch) -> None:
+    """A new pod's container starts at restartCount 0 and Ready, so both samples looked healthy."""
+    events: list[str] = []
+    _patch_store(monkeypatch, events, pod_after_sleep=_store_pod(0, uid="pod-b", container="containerd://bbb"))
+    vr.check_store_after_upgrade("kind-x", Path("chart"))
+    name, ok, detail = vr.results[-1]
+    assert not ok, f"a store pod replaced between the samples passed the check: {detail}"
+    assert "replaced within 15s" in detail and "RDB format version 12" in detail, detail
+
+
+def test_a_store_container_replaced_in_place_fails_even_if_restart_count_reads_zero(monkeypatch) -> None:
+    events: list[str] = []
+    _patch_store(monkeypatch, events, pod_after_sleep=_store_pod(0, container="containerd://bbb"))
+    vr.check_store_after_upgrade("kind-x", Path("chart"))
+    assert vr.results[-1][1] is False, vr.results
+
+
+# ---- the API ------------------------------------------------------------------------------------------
+
+
+def _rs(name: str, revision: str, pod_hash: str, owner: str = "norviq-api") -> dict:
+    return {"metadata": {"name": name, "labels": {"pod-template-hash": pod_hash},
+                         "annotations": {"deployment.kubernetes.io/revision": revision},
+                         "ownerReferences": [{"kind": "Deployment", "name": owner}]}}
+
+
+def _pod(name: str, pod_hash: str, terminating: bool = False) -> dict:
+    meta: dict = {"name": name, "labels": {"pod-template-hash": pod_hash}}
+    if terminating:
+        meta["deletionTimestamp"] = "2026-10-30T00:00:00Z"
+    return {"metadata": meta}
+
+
+# Mid-rollout: revision 3 is current. The old ReplicaSet's pod is listed FIRST and is not terminating.
+# readyReplicas == updatedReplicas == spec.replicas although status.replicas still counts the old pod,
+# which is the state the old readiness comparison called "rolled out".
+DEPLOY = {"metadata": {"annotations": {"deployment.kubernetes.io/revision": "3"}},
+          "spec": {"replicas": 2},
+          "status": {"replicas": 3, "readyReplicas": 2, "updatedReplicas": 2, "availableReplicas": 2}}
+REPLICASETS = {"items": [_rs("norviq-api-old", "2", "aaa"), _rs("norviq-api-new", "3", "bbb"),
+                         _rs("someone-else", "3", "ccc", owner="not-norviq")]}
+PODS = {"items": [_pod("norviq-api-old-1", "aaa"), _pod("norviq-api-new-1", "bbb"),
+                  _pod("norviq-api-new-2", "bbb", terminating=True), _pod("foreign-1", "ccc")]}
+
+
+def _patch_api(monkeypatch, rollout_rc: int) -> dict:
+    seen: dict = {"forwarded": [], "kubectl": []}
+
+    def kubectl(_ctx, *args, timeout=300):
+        seen["kubectl"].append(args)
+        if args[:2] == ("rollout", "status"):
+            return _ok('deployment "norviq-api" successfully rolled out' if rollout_rc == 0
+                       else "Waiting for deployment spec update to be observed...", rc=rollout_rc)
+        if args[:2] == ("get", "deploy"):
+            return _ok(DEPLOY)
+        if args[:2] == ("get", "rs"):
+            return _ok(REPLICASETS)
+        if args[:2] == ("get", "pods"):
+            return _ok(PODS)
+        return _ok("", rc=1)
+
+    @contextmanager
+    def port_forward(_ctx, pod, port, target=8080):
+        seen["forwarded"].append(pod)
+        yield type("PF", (), {"port": port})()
+
+    monkeypatch.setattr(vr, "kubectl", kubectl)
+    monkeypatch.setattr(vr, "_PortForward", port_forward)
+    monkeypatch.setattr(vr, "_api", lambda port, path, *a, **k: {"status": "ready", "redis": True})
+    monkeypatch.setattr(vr, "wait_until", lambda fn, timeout, interval=2.0: fn())
+    return seen
+
+
+def test_readyz_goes_to_a_pod_of_the_current_replicaset(monkeypatch) -> None:
+    seen = _patch_api(monkeypatch, rollout_rc=0)
+    vr.check_api_after_upgrade("kind-x")
+    assert seen["forwarded"] == ["norviq-api-new-1"], (
+        f"/readyz went to {seen['forwarded']}. Only a pod of the Deployment's current revision can vouch "
+        f"for the upgraded API; the old ReplicaSet's pod, a terminating one and another owner's are not it"
+    )
+    assert vr.results[-1][1] is True, vr.results
+
+
+def test_an_unfinished_rollout_fails_however_the_replica_counts_look(monkeypatch) -> None:
+    seen = _patch_api(monkeypatch, rollout_rc=1)
+    vr.check_api_after_upgrade("kind-x")
+    assert any(a[:2] == ("rollout", "status") for a in seen["kubectl"]), "kubectl rollout status was not used"
+    assert vr.results[-1][1] is False, (
+        "the check passed while `kubectl rollout status` said the rollout was not done (an old replica was "
+        "still counted)"
+    )
+    assert not seen["forwarded"], "a /readyz from mid-rollout proves nothing about the upgraded API"

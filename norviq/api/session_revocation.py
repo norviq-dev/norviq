@@ -175,7 +175,11 @@ _degraded_since: float | None = None
 
 def _legacy_token_hash(raw_token: str) -> str:
     """The 0.2.5-and-earlier key: SHA-256 of the raw string. Still written and checked so a token revoked
-    before an upgrade (or after a rollback) stays revoked; it can go once every such token has expired."""
+    under 0.2.5, or while rolled back to it, stays revoked wherever the store keeps its data across the
+    upgrade: an external store, or the HA failover, which stays on Redis 7.4. Not the bundled
+    single-instance store. It starts Valkey on an empty directory because Valkey cannot read 0.2.5's Redis
+    7.4 dump (CHANGELOG 0.2.6), so those revocations are gone there and such tokens are accepted again
+    until they expire. It can go once every token revoked under 0.2.5 has expired."""
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 

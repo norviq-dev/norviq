@@ -78,16 +78,37 @@ because they should be installed.
   cannot read. Pointed at 0.2.5's data on `norviq-redis-pvc`, it exits with `Can't handle RDB format
   version 12` and `helm upgrade` times out. Valkey now keeps its data in a `valkey/` subdirectory of
   that volume, so it starts empty. **That resets** trust history and behavioural profiles (agents are
-  re-learned from a neutral baseline), the logout denylist (a token logged out under 0.2.5 is accepted
-  again until it expires, at most `auth.sessionTtlSeconds`, default 1h), sessions, login-lockout and
-  rate-limit counters, and the policy and evaluation caches, which are rebuilt from Postgres.
-  **Everything in Postgres survives**: policies and their versions, the audit log, users and API keys,
-  namespace settings, and the agent freezes and trust caps recorded in `agent_registry`. Each API pod
-  writes those back into the store when it starts. Look for `NRVQ-API-7034` in an API pod's log after
-  the upgrade. `NRVQ-API-7035` means they were not restored, so restart the API. **Nothing is
-  deleted:** 0.2.5's dump stays at the root of the volume, and `helm rollback` to 0.2.5 finds it. A
-  later upgrade picks Valkey's data up from where it was at the rollback. Stores you run yourself
-  (`redis.enabled=false`) are unaffected.
+  re-learned from a neutral baseline), sessions, login-lockout and rate-limit counters, the policy and
+  evaluation caches (rebuilt from Postgres), and the logout denylist. A token logged out under 0.2.5 is
+  accepted again until its own expiry: within `auth.sessionTtlSeconds` (default 1h) for a console
+  login, but a token minted with `norviq login --ttl` (or `token_mint --ttl`) lives as long as that
+  `--ttl` said. To end every session instead, rotate the signing key in the same upgrade
+  (`--set api.secretKey="$(openssl rand -base64 48)"`). That also invalidates every injected sidecar's
+  credential and every other token signed with it, so restart your agent workloads afterwards so the
+  webhook mints new ones. In a fleet, the hub and every spoke share that key: it signs join tokens and,
+  unless OIDC client credentials are configured, the spokes' relay and puller tokens to the hub. Rotate
+  it on the hub and on every spoke in the same change, or the spokes stop reaching the hub. **Everything
+  in Postgres survives**: policies and their versions, the audit log, users and API keys, namespace
+  settings, and the agent freezes and trust caps recorded in `agent_registry`. But the engine enforces
+  freezes, trust caps and namespace posture from the store, not from Postgres, and an API process writes
+  them into the store only when an admin changes one and once when it starts. **Until a 0.2.6 API pod
+  starts after the empty Valkey is up, freezes, trust caps and namespace posture are absent from the
+  store.** An absent freeze or cap is enforced as none, and an absent namespace posture falls back to
+  the chart-wide setting. 0.2.5's API pods and the engine keep serving in between, and an API pod that
+  started before the new Valkey did wrote into the old store, not this one. Nothing writes them back
+  while the API runs, so if no API pod starts after Valkey, the gap stays open. If you rely on a
+  freeze, scale that agent to zero across the upgrade. When `helm upgrade` has finished, run
+  `kubectl -n <namespace> rollout restart deployment/norviq-api` and look for `NRVQ-API-7034` (freezes
+  and caps) and `NRVQ-API-7063` (namespace posture) in the new pods' logs. `NRVQ-API-7035` or
+  `NRVQ-API-7138` means that pod did not restore them; restart the API again. The same gap opens after
+  any later loss of store data: a `FLUSHALL`, a store restart without persistence or from an older
+  snapshot, a failover. Restart the API after any of those. **Nothing is deleted:** 0.2.5's dump stays
+  at the root of the volume, and `helm rollback` to 0.2.5 finds it. A later upgrade picks Valkey's data
+  up from where it was at the rollback. The start-up write adds what Postgres holds but removes nothing,
+  so a freeze or trust cap you lifted while rolled back to 0.2.5 is enforced again after the re-upgrade
+  if Valkey held it at the rollback. Lift it again after re-upgrading with
+  `norviq agent reset-trust <id> --score 1.0`. Stores you run yourself (`redis.enabled=false`) are
+  unaffected.
 - **HA (`redis.ha.enabled=true`, as in `values-prod.yaml`) stays on Redis 7.4.** The RedisFailover now
   takes its own `redis.ha.image`, default `redis:7.4-alpine`, the same Redis 7.4 that 0.2.5's
   `redis:7-alpine` ran, still under RSALv2/SSPLv1. Through 0.2.5 it took `images.redis`. Left on that,

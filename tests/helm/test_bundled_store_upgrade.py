@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import pathlib
 import posixpath
+import shlex
 import shutil
 import subprocess
 
@@ -53,8 +54,9 @@ BASE = ["--set-json", 'policyQuotaNamespaces=["default"]']
 # store moves to a new, empty volume and that also fixes the upgrade. Update this test deliberately in
 # that case; do not delete it.
 CLAIM_0_2_5_WROTE = "norviq-redis-pvc"
-# The image's WORKDIR. Valkey runs with no `dir` setting, so it writes dump.rdb to its working directory.
-# Move the mount anywhere else and the dump goes to the container's own writable layer, which is gone on
+# The image's WORKDIR. With no `dir` setting Valkey writes dump.rdb to its working directory, so the
+# data lands wherever the container's workingDir (default: this) and any `--dir` argument point. If that
+# is anywhere but inside the mount, the dump goes to the container's own writable layer, which is gone on
 # the next restart. Nothing reports that.
 VALKEY_WORKDIR = "/data"
 
@@ -77,6 +79,25 @@ def _store_container(sts: dict) -> dict:
     containers = sts["spec"]["template"]["spec"]["containers"]
     assert len(containers) == 1, f"expected one store container, got {[c['name'] for c in containers]}"
     return containers[0]
+
+
+def _data_dir(container: dict) -> str:
+    """Where the server writes dump.rdb: `--dir` resolved against the working directory, else the working
+    directory itself, which is the container's workingDir or the image's WORKDIR.
+
+    The command is `sh -c 'exec redis-server ...'`, so each command/args element is split as a shell line
+    to find a `--dir` buried inside the script.
+    """
+    workdir = container.get("workingDir") or VALKEY_WORKDIR
+    tokens = [tok for part in (container.get("command") or []) + (container.get("args") or [])
+              for tok in shlex.split(part)]
+    target = "."
+    for i, tok in enumerate(tokens):
+        if tok == "--dir" and i + 1 < len(tokens):
+            target = tokens[i + 1]
+        elif tok.startswith("--dir="):
+            target = tok.split("=", 1)[1]
+    return posixpath.normpath(posixpath.join(workdir, target))
 
 
 def _mounts_of_claim(sts: dict, claim: str) -> list[dict]:
@@ -105,9 +126,11 @@ def test_valkey_does_not_mount_the_volume_root_that_redis_wrote() -> None:
             f"the upgrade times out. Mount a subdirectory (subPath: valkey) and leave the root alone for "
             f"`helm rollback`."
         )
-        assert m["mountPath"] == VALKEY_WORKDIR, (
-            f"the store's data is mounted at {m['mountPath']}, but Valkey writes dump.rdb to its working "
-            f"directory {VALKEY_WORKDIR}. Every save would go to the container layer and be lost on restart"
+        data_dir, mount = _data_dir(_store_container(sts)), posixpath.normpath(m["mountPath"])
+        assert data_dir == mount or data_dir.startswith(mount + "/"), (
+            f"the store's data is mounted at {mount}, but Valkey writes dump.rdb to {data_dir} (from the "
+            f"container's workingDir / `--dir`, default {VALKEY_WORKDIR}). Every save would go to the "
+            f"container layer, outside the volume, and be lost on restart"
         )
 
 

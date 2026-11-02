@@ -49,6 +49,8 @@ NS, TENANT = "norviq", "agents"
 POLICY = "nrvq-verify-guard"
 # The bundled single-instance store (templates/redis-statefulset.yaml), the same pod name in every release.
 STORE_POD, STORE_CONTAINER = "norviq-redis-0", "redis"
+# How long the store must stay up between the two samples check_store_after_upgrade takes.
+STORE_STABLE_S = 15
 # Only ever used against a throwaway kind cluster this script created and deletes.
 VERIFY_PASSWORD = "verify-release-not-a-real-secret-9137"
 
@@ -673,8 +675,12 @@ def resolve_upgrade_source(requested: str, candidate: str,
                            list_published: Callable[[], list[str]] | None = None) -> str:
     """Turn `--upgrade-from` into a version to install first, or "" for the fresh-install path.
 
-    Only an explicit `none` gives "". `auto` either names a published release or raises.
+    Only an explicit `none` gives "". `auto` either names a published release or raises, and so does an
+    empty value: `--upgrade-from ""` (an unset CI variable, say) used to fall through as the version ""
+    and reach the fresh-install path, which is the silent switch this function exists to refuse.
     """
+    if not requested.strip():
+        raise UpgradeSourceError("--upgrade-from is empty. Pass auto, none, or a published version.")
     if requested == "none":
         return ""
     if requested != "auto":
@@ -782,9 +788,12 @@ def check_store_after_upgrade(ctx: str, chart: Path) -> None:
     what makes `--wait` time out, and the timeout alone does not say why. In the live 0.2.5 -> 0.2.6 run
     the only line that did was in this pod's log: "Can't handle RDB format version 12".
 
-    Sampled twice, 15s apart. The container has no readiness probe, so it reads Ready the moment it starts,
-    and a server that exits while loading its dump is briefly Ready between restarts. restartCount is what
-    separates a running store from a crash-looping one.
+    Sampled twice, STORE_STABLE_S apart. Both samples must be healthy, and the second must be the SAME pod
+    (metadata.uid) running the SAME container (containerID) as the first. The container has no readiness
+    probe, so it reads Ready the moment it starts, and a server that exits while loading its dump is briefly
+    Ready between restarts. restartCount catches a container that restarted in place, but it starts again at
+    0 on a new pod, so a store pod that was replaced inside the window (evicted, or deleted by a crash-looping
+    StatefulSet's controller) looked healthy on restartCount alone; the uid and containerID catch it.
     """
     want = _candidate_store_image(chart)
 
@@ -793,50 +802,80 @@ def check_store_after_upgrade(ctx: str, chart: Path) -> None:
         try:
             pod = json.loads(r.stdout)
         except json.JSONDecodeError:
-            return {"ready": False, "image": "", "restarts": -1}
+            return {"ready": False, "image": "", "restarts": -1, "uid": "", "container": ""}
         cs = next((c for c in pod.get("status", {}).get("containerStatuses") or []
                    if c.get("name") == STORE_CONTAINER), {})
         image = next((c["image"] for c in pod["spec"]["containers"] if c["name"] == STORE_CONTAINER), "")
-        return {"ready": bool(cs.get("ready")), "image": image, "restarts": int(cs.get("restartCount", 0))}
+        return {"ready": bool(cs.get("ready")), "image": image, "restarts": int(cs.get("restartCount", 0)),
+                "uid": pod.get("metadata", {}).get("uid", ""), "container": cs.get("containerID", "")}
 
     def healthy(s: dict) -> bool:
         return s["ready"] and s["image"] == want and s["restarts"] == 0
 
     wait_until(lambda: healthy(sample()), 120, interval=3)
-    time.sleep(15)
-    first, second = sample(), sample()
-    ok = bool(want) and healthy(first) and healthy(second)
+    first = sample()
+    time.sleep(STORE_STABLE_S)
+    second = sample()
+    same = first["uid"] == second["uid"] and first["container"] == second["container"]
+    ok = bool(want) and healthy(first) and healthy(second) and same
     detail = f"{second['image'] or '?'} ready={second['ready']} restarts={second['restarts']}"
+    if not same:
+        detail += (f"; replaced within {STORE_STABLE_S}s (pod {first['uid'][:8] or '?'} -> {second['uid'][:8] or '?'}, "
+                   f"container {first['container'][-12:] or '?'} -> {second['container'][-12:] or '?'})")
     if not ok:
         logs = kubectl(ctx, "logs", STORE_POD, "-n", NS, "-c", STORE_CONTAINER, "--previous", "--tail=4")
         if logs.returncode != 0:
             logs = kubectl(ctx, "logs", STORE_POD, "-n", NS, "-c", STORE_CONTAINER, "--tail=4")
         detail += f" (want {want or 'an image from the candidate chart'}) — " + " | ".join(
             ln.strip() for ln in logs.stdout.splitlines()[-4:])
-    check("the store's pod runs the candidate image, is Ready and has not restarted", ok, detail)
+    check("the store's pod runs the candidate image, is Ready, and was neither restarted nor replaced", ok, detail)
+
+
+def _current_api_pods(ctx: str) -> list[str]:
+    """API pods of the Deployment's CURRENT ReplicaSet, never an old one still draining.
+
+    Matched on pod-template-hash of the ReplicaSet carrying the Deployment's own revision. A pod's phase
+    or deletionTimestamp cannot tell an old pod from a new one in the moment between the old
+    ReplicaSet's scale-down and the pod's removal, and an old pod answering /readyz is the false pass
+    this check must not give.
+    """
+    def items(*args: str) -> list[dict]:
+        try:
+            return json.loads(kubectl(ctx, "get", *args, "-n", NS, "-o", "json").stdout).get("items") or []
+        except json.JSONDecodeError:
+            return []
+
+    try:
+        deploy = json.loads(kubectl(ctx, "get", "deploy", "norviq-api", "-n", NS, "-o", "json").stdout)
+    except json.JSONDecodeError:
+        return []
+    revision = (deploy.get("metadata", {}).get("annotations") or {}).get("deployment.kubernetes.io/revision")
+    hashes = {
+        rs["metadata"]["labels"].get("pod-template-hash")
+        for rs in items("rs", "-l", "app.kubernetes.io/component=api")
+        if (rs["metadata"].get("annotations") or {}).get("deployment.kubernetes.io/revision") == revision
+        and any(o.get("kind") == "Deployment" and o.get("name") == "norviq-api"
+                for o in rs["metadata"].get("ownerReferences") or [])
+    } - {None}
+    return [p["metadata"]["name"] for p in items("pods", "-l", "app.kubernetes.io/component=api")
+            if (p["metadata"].get("labels") or {}).get("pod-template-hash") in hashes
+            and not p["metadata"].get("deletionTimestamp")]
 
 
 def check_api_after_upgrade(ctx: str) -> None:
-    """Every API replica Ready on the upgraded release, and /readyz saying it reaches the store.
+    """The API Deployment fully rolled out, and a pod of the NEW ReplicaSet saying on /readyz that it
+    reaches the store.
 
-    The API's readiness probe is /readyz, which pings the store, so a store that never came back holds
-    the rollout here. Reading the payload names the store as the cause instead of only "not ready".
+    `kubectl rollout status` is the completion test. It waits for observedGeneration, updated, available
+    and total replicas to agree, which means no old replica is still counted. The first version compared
+    readyReplicas with updatedReplicas, which can agree while old pods still serve, and then picked any
+    non-terminating API pod for /readyz, which could be an old one mid-rollout.
     """
-    status: dict = {}
-
-    def rolled_out() -> bool:
-        r = kubectl(ctx, "get", "deploy", "norviq-api", "-n", NS, "-o", "json")
-        try:
-            d = json.loads(r.stdout)
-        except json.JSONDecodeError:
-            return False
-        want, st = d["spec"].get("replicas", 1), d.get("status", {})
-        status.update(want=want, ready=st.get("readyReplicas", 0), updated=st.get("updatedReplicas", 0))
-        return want == status["ready"] == status["updated"]
-
-    rolled = wait_until(rolled_out, 180, interval=3)
+    rollout = kubectl(ctx, "rollout", "status", "deployment/norviq-api", "-n", NS, "--timeout=180s",
+                      timeout=240)
+    rolled = rollout.returncode == 0
     payload: dict = {}
-    pods = _api_pods(ctx)
+    pods = _current_api_pods(ctx) if rolled else []
     if pods:
         with _PortForward(ctx, pods[0], 18104) as pf:
             try:
@@ -848,10 +887,11 @@ def check_api_after_upgrade(ctx: str) -> None:
                     payload = {"status": f"HTTP {exc.code}"}
             except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
                 payload = {"status": f"unreachable: {exc}"}
+    last = (rollout.stdout or rollout.stderr).strip().splitlines()[-1:] or ["no output"]
     check("the API is Ready after the upgrade and reaches the store",
-          rolled and payload.get("redis") is True,
-          f"{status.get('ready', 0)}/{status.get('want', '?')} ready, {status.get('updated', 0)} updated; "
-          f"/readyz {payload or 'not reached'}")
+          rolled and bool(pods) and payload.get("redis") is True,
+          f"rollout: {last[0][:160]}; /readyz on {pods[0] if pods else 'no current-revision pod'}: "
+          f"{payload or 'not reached'}")
 
 
 def snapshot(ctx: str) -> dict[str, str]:
