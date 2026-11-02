@@ -27,7 +27,7 @@
 # default USER is numeric (not a name) so `runAsNonRoot: true` can verify it without a lookup.
 # The chart omits runAsUser entirely when openshift.enabled=true, letting the platform assign.
 
-ARG ALPINE_VERSION=3.21
+ARG ALPINE_VERSION=3.24
 FROM alpine:${ALPINE_VERSION}
 
 # The Makefile passes --build-arg NRVQ_GIT_SHA to all five images, and this one silently DROPPED it:

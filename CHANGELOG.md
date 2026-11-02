@@ -167,7 +167,8 @@ from `nginx:1.27-alpine` to `nginx:1.30-alpine`, the console's base from
 `curlimages/curl:8.10.1` to `8.23.0`. nginx 1.27 and its Alpine 3.21 base are end of life; Trivy
 (HIGH/CRITICAL, fixable only) reported 60 findings in the terminator, 58 in the console base before the
 build's `apk upgrade`, and 22 in curl. A mirror behind `global.imageRegistry` needs the new tags copied
-(digest-preserving) before the upgrade.
+(digest-preserving) before the upgrade. The first-party bootstrap image (the chart's TLS hooks) moves
+from `alpine:3.21` to `alpine:3.24`: Alpine 3.21 left security support on 2026-11-01.
 
 **Fixed.** `global.imageRegistry` relocates the busybox init image. An agent that retries one refused
 call no longer loses trust on every attempt. Two security booleans no longer fall back to off when an
