@@ -562,14 +562,30 @@ evaluates the call. So:
 - a tool the server did not list is still unscanned (`definition_seen: false`), and the baseline
   still escalates it.
 
+When it does not list. A call the proxy refuses from the message alone (arguments that are not an
+object, arguments that set outbound headers) is refused before any list. A server the operator has
+blocked is never listed on the call path. A call that policy then refuses has still caused the list,
+because the facts policy decides on (§5) come from the scanned catalog.
+
 Bounds. The proxy's list waits at most `NRVQ_MCP_COLD_LIST_TIMEOUT_S` (default `5`; `0` turns the
 self-list off and restores the old behaviour). Calls that arrive while it is in flight wait for that
-one list rather than sending their own. Only the first page of a paginated listing is read. On HTTP
-the list carries the client's request headers (minus hop headers), so a server that authenticates or
-keeps a 2025-06-18 session sees the same credentials as the call; the answer is capped at 8 MiB.
-On stdio the server's answer goes to the proxy and is never forwarded to the client.
+one list rather than sending their own. Only the first page of a paginated listing is read.
 
-If the list fails (an error answer, a non-2xx status, no answer in time, or no tools list in it),
+- **HTTP.** The list carries the headers a `tools/list` from that client would carry, not the call's:
+  `Authorization`, `Mcp-Session-Id` and `Mcp-Protocol-Version` are copied, and `Mcp-Method` is set to
+  `tools/list` when the client's request had an `Mcp-Method`. `Mcp-Name`, `Mcp-Param-*`, cookies and
+  every other header of the call are not sent; a server that authenticates by cookie therefore refuses
+  the list, and the call is decided unscanned. The answer (one JSON body, or an SSE stream read until
+  the matching frame) is capped at 8 MiB in total bytes received.
+- **stdio.** The server's answer goes to the proxy, never to the client. An answer that arrives after
+  the timeout, or a second answer to the same id, is dropped and logged as `NRVQ-MCP-5081`
+  (`nrvq.mcp.gate_a.cold_list_answer_dropped`, WARNING); the HTTP proxy drops one pushed on another
+  stream the same way. If the server sends the client a request (`roots/list`, sampling, elicitation)
+  while the proxy's list is pending, the proxy gives the list up at once (logged as a failure, below),
+  so the client's reply is not held behind the call for the whole timeout.
+
+If the list fails (an error answer, a non-2xx status, no answer in time, no tools list in it, an
+answer over the size cap, or a server request mid-list on stdio),
 the call is evaluated unscanned as before, and the proxy logs `NRVQ-MCP-5080`
 (`nrvq.mcp.gate_a.cold_list_failed`, WARNING, with the reason). It does not try again for 30 seconds,
 so a failing server cannot turn every call into an upstream round trip plus a timeout. A successful
@@ -707,7 +723,7 @@ Structured logs use the `NRVQ-MCP-5xxx` range: `5020` Gate-A call denial, `5021`
 stripped, `5032` sanitised, `5035` output-DLP redaction, `5036` response injection flagged, `5041`
 first pin, `5042` drift, `5043` approved, `5044` revoked, `5046` control plane unreachable, `5066`
 schema violation, `5070` schema not fully enforceable, `5079` cold catalog listed by the proxy,
-`5080` the proxy's cold-catalog list failed. Latency is recorded as
+`5080` the proxy's cold-catalog list failed, `5081` a late or duplicate answer to it dropped. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
 `response_guard` (`norviq/telemetry/metrics.py:156-168`). These codes are not yet in
 [Error Codes](../error-codes.md).

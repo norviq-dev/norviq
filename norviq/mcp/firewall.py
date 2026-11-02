@@ -121,6 +121,12 @@ _COLD_LIST_RETRY_S = 30.0
 # The JSON-RPC id of the proxy's own list. A string with a random part, so it cannot collide with an
 # id the client chose (clients number their requests) and a peer cannot predict it to answer it early.
 _COLD_LIST_ID_PREFIX = "norviq-cold-list-"
+
+
+def is_cold_list_id(msg_id: Any) -> bool:
+    """True for the JSON-RPC id of a `tools/list` the proxy itself sent for a cold catalog."""
+    return isinstance(msg_id, str) and msg_id.startswith(_COLD_LIST_ID_PREFIX)
+
 # The 2026-07-28 per-request handshake keys copied from the triggering call onto the self-list, so a
 # stateless server sees the same revision and client capabilities on both requests.
 _COLD_LIST_META_KEYS = (P.META_PROTOCOL_VERSION, P.META_CLIENT_CAPABILITIES, P.META_CLIENT_INFO)
@@ -499,10 +505,7 @@ class McpFirewall:
             if result is not None:
                 return result
         if method == P.M_TOOLS_CALL:
-            scanned = await self._warm_cold_catalog(msg, list_upstream)
-            result = await self._gate_b_tools_call(msg)
-            result.catalog_scanned = scanned
-            return result
+            return await self._gate_b_tools_call(msg, list_upstream)
         if method == P.M_RESOURCES_READ and settings.mcp_govern_resources:
             return await self._gate_b_resources_read(msg)
 
@@ -546,6 +549,20 @@ class McpFirewall:
             return MediationResult(forward=msg.framed)
 
         if msg.is_response:
+            # The answer to the PROXY's own cold-catalog `tools/list` that nobody is waiting for any
+            # more: it arrived after the timeout, it is a second answer to the same id, or (HTTP) the
+            # server pushed it onto another stream. The waiting side is the only place it is scanned,
+            # so forwarding it here would hand the client the server's raw catalog — unscanned,
+            # unpinned, poisoned definitions included — under an id the client never sent. Dropped
+            # by PREFIX rather than by a record of issued ids, so no eviction or restart can reopen it;
+            # a client that chose such an id for its own request loses only its own response.
+            if is_cold_list_id(msg.id):
+                self._bump("cold_list_answer_dropped")
+                log.warning("nrvq.mcp.gate_a.cold_list_answer_dropped", server=self._server_id,
+                            id=str(msg.id)[:64], code="NRVQ-MCP-5081",
+                            detail="an answer to the proxy's own tools/list arrived when nothing was "
+                                   "waiting for it (late or duplicate); it was not forwarded")
+                return MediationResult(blocked=True, note="cold_list_answer_dropped")
             requested = self._client_pending.take(msg.id)
             # `server/discover` replaces the initialize handshake and is the FIRST thing a 2026-07-28
             # client asks. It advertises the server's identity and capabilities as free text, so it is
@@ -929,7 +946,8 @@ class McpFirewall:
                 out.append(f"argument '{key}' must be {'/'.join(wanted)}")
         return out[:16]  # bounded: the reason string goes back to the caller
 
-    async def _gate_b_tools_call(self, msg: P.JsonRpcMessage) -> MediationResult:
+    async def _gate_b_tools_call(self, msg: P.JsonRpcMessage,
+                                 list_upstream: ListUpstream | None = None) -> MediationResult:
         """Enforce policy on `tools/call` before the upstream server ever sees it."""
         timer0 = perf_counter()
         params = msg.params
@@ -974,6 +992,21 @@ class McpFirewall:
                 )
             arguments = {}
 
+        # --- Cold catalog: scan before use. ---
+        #
+        # AFTER the two refusals above and before everything below, on purpose. Those two read only
+        # the message, so a call the proxy refuses on its own terms never causes an upstream list
+        # (which carries the client's credentials). Everything below — the Gate A verdict, schema
+        # conformance, and the `input.mcp` facts policy decides on — is read from the catalog, so it
+        # cannot be decided before the catalog exists.
+        scanned = await self._warm_cold_catalog(msg, list_upstream)
+        result = await self._gate_b_decide(msg, name, arguments, timer0)
+        result.catalog_scanned = scanned
+        return result
+
+    async def _gate_b_decide(self, msg: P.JsonRpcMessage, name: str, arguments: dict,
+                             timer0: float) -> MediationResult:
+        """The catalog-dependent half of `_gate_b_tools_call`: Gate A carry-over, schema, policy."""
         # --- Gate A carry-over: one dict lookup, no scanning, no hashing. ---
         entry = self._catalog.get(name)
         if entry is not None and entry.call_denied:
@@ -1169,6 +1202,11 @@ class McpFirewall:
             return False
         timeout = float(settings.mcp_cold_list_timeout_s or 0)
         if timeout <= 0:
+            return False
+        # A server the operator BLOCKED is not listed on the call path. Its listing would be withheld
+        # wholesale anyway (see `_gate_a_tools_list`), so a self-list could only ever leave the call
+        # unscanned — while sending the client's credentials to a server nobody is meant to talk to.
+        if not self._servers.get(self._server_id).reachable:
             return False
         task = self._cold_list
         if task is None or task.done():

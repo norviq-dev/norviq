@@ -253,7 +253,8 @@ after the proxy restarts (a stateless HTTP client, or one reusing its old tool l
 every call held for approval by `mcp_definition_never_scanned`: the proxy lists the server itself
 and scans the answer through Gate A before deciding the call, so withheld, drifted and quarantined
 tools are still refused. If that list fails the call is escalated as before and `NRVQ-MCP-5080` says
-why; `NRVQ_MCP_COLD_LIST_TIMEOUT_S` (default 5s, `0` off) bounds it. Two security booleans no longer fall back to off when an
+why; `NRVQ_MCP_COLD_LIST_TIMEOUT_S` (default 5s, `0` off) bounds it. The HTTP MCP proxy now reads SSE frames separated by
+CRLF as each one completes; it held them until the server closed the stream. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

@@ -379,12 +379,24 @@ class StdioProxy:
                 continue
             # The answer to the proxy's OWN request. Not forwarded: the client never asked for it, and
             # an unsolicited response would confuse its id bookkeeping. The firewall scans it on the
-            # waiting side, through the same Gate A function a client's listing goes through.
+            # waiting side, through the same Gate A function a client's listing goes through. An
+            # answer nobody waits for any more (late, or a second one) is not in this map and goes on
+            # to the firewall, which drops it by its id prefix (NRVQ-MCP-5081) — never to the client.
             own = self._own_requests.get(msg.id) if msg.is_response and isinstance(msg.id, str) else None
-            if own is not None:
-                if not own.done():
-                    own.set_result(msg)
+            if own is not None and not own.done():
+                own.set_result(msg)
                 continue
+            if msg.is_request and self._own_requests:
+                # A server->client request (roots/list, sampling, elicitation) while the proxy's own
+                # list is pending. The client's reply would queue behind the call the client->server
+                # pump is holding for that list, and a server that waits for the reply before it
+                # lists would stall the session for the whole timeout. Give up the list instead: the
+                # call is decided as it was before the self-list existed, and the reply gets through.
+                for future in list(self._own_requests.values()):
+                    if not future.done():
+                        future.set_exception(RuntimeError(
+                            f"the server sent a {msg.method[:64]} request while the proxy's tools/list "
+                            "was pending; the list was abandoned so the client can answer it"))
             result = await firewall.on_server_message(msg)
             if result.reply is not None:
                 await self._write_server(result.reply)

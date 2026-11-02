@@ -61,6 +61,10 @@ _HOP_HEADERS = frozenset({
 # puts on one JSON-RPC line: far above a real catalogue, and it keeps a server from streaming without
 # end into memory while a client's call waits.
 _OWN_LIST_MAX_BYTES = 8 * 1024 * 1024
+# The client headers the proxy's own `tools/list` carries: what identifies the connection, nothing
+# that describes the call that triggered it. See `HttpProxy._upstream_lister`.
+_MCP_METHOD_HEADER = "mcp-method"
+_LIST_HEADER_ALLOWLIST = frozenset({"authorization", "mcp-session-id", "mcp-protocol-version"})
 
 
 class HttpProxy:
@@ -351,21 +355,29 @@ class HttpProxy:
     def _upstream_lister(self, request: Request):
         """The firewall's way to send its own `tools/list` upstream for a cold catalog.
 
-        It carries the CLIENT's request headers (hop headers removed, as for any forward), because
-        that is what the upstream authenticates and correlates on: an `Authorization` the server
-        requires, the 2025-06-18 `Mcp-Session-Id` of a stateful server, the protocol-version header.
-        A list sent without them would be refused by any server that checks, and the call would stay
-        cold for no reason the operator could see.
+        The headers are the ones a `tools/list` from THIS client would carry, not the headers of the
+        `tools/call` that triggered it. Copying the call's headers wholesale sent `Mcp-Method:
+        tools/call`, `Mcp-Name: <tool>` and the `Mcp-Param-*` headers (built from model-controlled
+        arguments) on a request whose body says `tools/list`: a 2026-07-28 server rejects that
+        mismatch (`-32020`), which broke the self-list for exactly the stateless clients it exists
+        for, and it put call-derived values on the wire before Gate B had decided the call.
 
-        Bounded in size here and in time by the firewall. The answer is either one JSON body or an SSE
-        stream, the server's choice per request as everywhere on this transport; on a stream the
+        So only what identifies the CONNECTION is carried — `_LIST_HEADER_ALLOWLIST`: the
+        credential the server authenticates (`Authorization`), the 2025-06-18 session
+        (`Mcp-Session-Id`) and the negotiated revision (`Mcp-Protocol-Version`). `Mcp-Method` is set
+        to `tools/list` when the client's own request carried an `Mcp-Method` (a client that speaks
+        the header revision), and is absent otherwise, as it would be on that client's own list.
+
+        Bounded in total bytes here and in time by the firewall. The answer is either one JSON body or
+        an SSE stream, the server's choice per request as everywhere on this transport; on a stream the
         response is the frame whose id matches, and the stream is closed as soon as it is found.
         """
-        headers = {
-            **self._forward_headers(request.headers),
-            "content-type": "application/json",
-            "accept": f"application/json, {_SSE}",
-        }
+        client_headers = {k.lower(): v for k, v in request.headers.items()}
+        headers = {k: v for k, v in client_headers.items() if k in _LIST_HEADER_ALLOWLIST}
+        if _MCP_METHOD_HEADER in client_headers:
+            headers[_MCP_METHOD_HEADER] = P.M_TOOLS_LIST
+        headers["content-type"] = "application/json"
+        headers["accept"] = f"application/json, {_SSE}"
 
         async def _list(own: P.JsonRpcMessage) -> P.JsonRpcMessage | None:
             async with self._client.stream("POST", self._upstream, headers=headers,
@@ -374,19 +386,25 @@ class HttpProxy:
                     raise RuntimeError(f"upstream answered HTTP {resp.status_code}")
                 streamed = _SSE in resp.headers.get("content-type", "")
                 buffer = b""
+                received = 0
                 async for chunk in resp.aiter_bytes():
-                    buffer += chunk
-                    if len(buffer) > _OWN_LIST_MAX_BYTES:
+                    # TOTAL bytes, not the unparsed remainder: on a stream the remainder shrinks as
+                    # frames are split off, so a server sending endless small non-matching frames
+                    # would never reach a cap measured on it.
+                    received += len(chunk)
+                    if received > _OWN_LIST_MAX_BYTES:
                         raise RuntimeError(f"tools/list answer exceeded {_OWN_LIST_MAX_BYTES} bytes")
+                    buffer += chunk
                     if not streamed:
                         continue
+                    buffer = _normalise_sse(buffer)
                     while b"\n\n" in buffer:
                         frame, buffer = buffer.split(b"\n\n", 1)
                         found = _own_response_in_frame(frame, own.id)
                         if found is not None:
                             return found
                 if streamed:
-                    return _own_response_in_frame(buffer, own.id)
+                    return _own_response_in_frame(_normalise_sse(buffer), own.id)
                 found = P.decode(buffer)
                 return found if found is not None and found.id == own.id else None
 
@@ -437,7 +455,7 @@ class HttpProxy:
         """
         buffer = b""
         async for chunk in resp.aiter_bytes():
-            buffer += chunk
+            buffer = _normalise_sse(buffer + chunk)
             # SSE frames are separated by a blank line. Split on the boundary and emit whole frames
             # only — a half-received frame must not be parsed, and must not be held back longer than
             # it takes to complete.
@@ -578,6 +596,16 @@ class HttpProxy:
             with contextlib.suppress(Exception):
                 await self._engine.close()
         return 0
+
+
+def _normalise_sse(buffer: bytes) -> bytes:
+    """CRLF line endings to LF, so a blank line between SSE frames is always `\\n\\n`.
+
+    SSE permits CRLF, and a server that used it never produced `\\n\\n`: the splitter saw one
+    unterminated frame until the stream ended, so nothing reached the client in between. A `\\r` left
+    at the very end of the buffer is kept as it is; the next chunk completes the pair.
+    """
+    return buffer.replace(b"\r\n", b"\n")
 
 
 def _own_response_in_frame(frame: bytes, own_id: Any) -> P.JsonRpcMessage | None:
