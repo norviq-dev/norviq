@@ -621,8 +621,15 @@ async def deregister_agent(
     """Admin removal of a decommissioned agent identity from the registry. The background pruner ages
     stale agents out after agent_registry_retention_days; this is the immediate manual path (without it a
     decommissioned agent lingers and surfaces as a phantom 'awaiting' node on the asset graph).
-    Registry + trust-cache only — never touches policies or audit history; a live agent that calls
-    again is simply re-registered on its next evaluated call."""
+
+    What it removes: the agent_registry row and the agent's asset-graph node. What it keeps: policies,
+    audit_log, and the agent's behavioural history (1 h window) and learned profile (7 d) in Redis — an
+    identity that calls again is re-registered on its next evaluated call and is scored on that record.
+
+    Refused with 409 while the agent is FROZEN or under a trust CAP. The registry row is the durable copy
+    of both, so deleting it used to lift them as a side effect, with a log line that did not say so: the
+    identity came back unfrozen on its next call or the next Redis restart. Lift the control first with
+    PUT .../trust (score 1.0), which is logged with its actor, then deregister."""
     require_admin(user)
     from norviq.api.db.models import AgentRegistryEntry
 
@@ -631,6 +638,27 @@ async def deregister_agent(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Agent not found in registry")
+    # The live keys as well as the row: a freeze set before the registry carried it durably, or one whose
+    # durable write failed, exists only in Redis. A Redis that cannot answer is a refusal too — fail closed
+    # rather than delete what may be the last record of a freeze.
+    try:
+        live_frozen = bool(await request.app.state.cache._client().get(f"agent_frozen:{spiffe_id}"))
+        live_cap = await request.app.state.cache._client().get(f"agent_trust_override:{spiffe_id}")
+    except Exception as exc:  # noqa: BLE001 - see above
+        log.warning("nrvq.api.agent.deregister_check_failed", spiffe_id=spiffe_id, error=str(exc),
+                    actor=user.get("sub"), code="NRVQ-API-7144")
+        raise HTTPException(status_code=503, detail="Could not confirm the agent is not frozen; not deleted") from exc
+    frozen = bool(row.frozen) or live_frozen
+    capped = row.trust_cap is not None or live_cap is not None
+    if frozen or capped:
+        log.info("nrvq.api.agent.deregister_refused", spiffe_id=spiffe_id, frozen=frozen, capped=capped,
+                 actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7143")
+        control = "frozen" if frozen else "under a trust cap"
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent is {control}. Deleting it would lift that control. Lift it first "
+                    f"(PUT /api/v1/agents/{{id}}/trust with score 1.0), then delete."),
+        )
     ns = row.namespace
     await session.delete(row)
     await session.commit()
@@ -640,15 +668,10 @@ async def deregister_agent(
     # on the console while the response still said {"deleted": true}. That is the case that matters:
     # an agent worth decommissioning is usually one that ran. See norviq/api/graph_maintenance.py.
     graph_node_removed = await try_remove_graph_node(request, ns, spiffe_id)
-    # Best-effort: drop the live trust/freeze cache entries so a deleted identity doesn't linger there.
-    try:
-        cache = request.app.state.cache
-        await cache._client().delete(f"agent_frozen:{spiffe_id}")
-        await cache.clear_trust_override(spiffe_id)
-    except Exception:  # noqa: BLE001 - cache cleanup is cosmetic; the registry row is already gone
-        pass
+    # No Redis cleanup any more: it deleted the agent_frozen:/agent_trust_override: keys, i.e. the live
+    # freeze. Past the check above neither key exists, and history/profile are deliberately kept.
     log.info("nrvq.api.agent.deregistered", spiffe_id=spiffe_id, namespace=ns,
-             graph_node_removed=graph_node_removed, actor=user.get("sub"),
+             graph_node_removed=graph_node_removed, frozen=False, capped=False, actor=user.get("sub"),
              actor_role=user.get("role"), code="NRVQ-API-7121")
     # Report the graph outcome rather than folding it into `deleted`. False is legitimate — the agent
     # may never have been observed, so it had no snapshot node — but it also covers a prune that

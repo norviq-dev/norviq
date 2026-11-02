@@ -97,7 +97,7 @@ Total unique codes: **410** (including `*-DEBUG-*` traces).
 | NRVQ-API-7062 | `nrvq.api.policy.managed_scope_reverted` (admin confirm-deleted an operator-authored `__baseline__`/`__guardrail__`) | `norviq/api/routers/policies.py` |
 | NRVQ-API-7063 | `nrvq.api.settings.warmed` (per-ns posture mirror warmed at startup; fires on every API process start, including with `count=0`) | `norviq/api/routers/settings_router.py` |
 | NRVQ-API-7115 | `nrvq.api.search.served` (scoped ⌘K search across tools/agents/policies) | `norviq/api/routers/search.py` |
-| NRVQ-API-7121 | `nrvq.api.agent.deregistered` (admin removed a decommissioned agent identity from the registry) | `norviq/api/routers/agents.py` |
+| NRVQ-API-7121 | `nrvq.api.agent.deregistered` (admin removed a decommissioned agent identity from the registry; carries `actor`, `actor_role` and `frozen`/`capped`, which are always `false` because a frozen or capped agent is refused, NRVQ-API-7143) | `norviq/api/routers/agents.py` |
 | NRVQ-API-7122 | `nrvq.api.apikey.expired` (an expired API key was presented — rejected like a revoked one) | `norviq/api/api_keys.py` |
 | NRVQ-API-7123 | `nrvq.api.policy.remediation_accumulated` (applying a compliance control UNIONED into the class's remediation overlay) | `norviq/api/routers/policies.py` |
 | NRVQ-API-7124 | `nrvq.api.policy.remediation_control_reverted` (one control removed from the accumulated overlay; remaining controls re-materialized) | `norviq/api/routers/policies.py` |
@@ -136,6 +136,8 @@ Total unique codes: **410** (including `*-DEBUG-*` traces).
 | NRVQ-API-7140 | `nrvq.api.baseline.rematerialize_failed` — re-compiling one namespace's saved baseline controls at startup failed; that namespace keeps its old module, which cannot replace the chart's baseline (NRVQ-ENG-2068) | `norviq/api/routers/baseline_router.py` |
 | NRVQ-API-7141 | `nrvq.api.baseline.rematerialize_skipped_foreign` — a `__controls__` policy the baseline controls API did not write (its name is not `baseline-controls:<preset>`) was left as it is | `norviq/api/routers/baseline_router.py` |
 | NRVQ-API-7142 | `nrvq.startup.baseline_controls_rematerialize_failed` — the startup re-compile of saved baseline controls failed as a whole (for example the database was unreachable); no namespace was re-compiled | `norviq/api/main.py` |
+| NRVQ-API-7143 | `nrvq.api.agent.deregister_refused` — `DELETE /agents/{id}` answered **409** because the agent is frozen or under a trust cap (`frozen`, `capped`, `actor`). Deleting the registry row would have lifted the control; lift it with `PUT /agents/{id}/trust` (score 1.0) first | `norviq/api/routers/agents.py` |
+| NRVQ-API-7144 | `nrvq.api.agent.deregister_check_failed` — `DELETE /agents/{id}` could not read the agent's live freeze/cap keys from Redis and answered **503** without deleting anything | `norviq/api/routers/agents.py` |
 
 ## WHK
 
@@ -401,7 +403,7 @@ NRVQ-API-7086, NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-
 NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7098, NRVQ-API-7099, NRVQ-API-7100, NRVQ-API-7101,
 NRVQ-API-7102, NRVQ-API-7103, NRVQ-API-7104, NRVQ-API-7105, NRVQ-API-7110, NRVQ-API-7111, NRVQ-API-7112,
 NRVQ-API-7113, NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-API-7123,
-NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7136, NRVQ-API-7137, NRVQ-API-7138, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7158, NRVQ-API-7159, NRVQ-API-7460
+NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7136, NRVQ-API-7137, NRVQ-API-7138, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7143, NRVQ-API-7144, NRVQ-API-7158, NRVQ-API-7159, NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
 NRVQ-WHK-4007, NRVQ-WHK-4008, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,

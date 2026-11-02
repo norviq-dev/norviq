@@ -211,7 +211,8 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 ```
 
 Deregistering an agent (`DELETE /api/v1/agents/{spiffe_id}`) prunes the same way
-(`norviq/api/routers/agents.py:516`). Both go through one implementation
+(`norviq/api/routers/agents.py`, `deregister_agent`). It is refused with `409` while the agent is frozen or
+under a trust cap, because the registry row it deletes is the durable copy of that control. Both go through one implementation
 (`norviq/api/graph_maintenance.py`) so the two cannot drift into different notions of "removed", and
 both report whether a node was *actually* removed rather than assuming success. The removal operates on
 the live builder and re-saves, so every graph surface reflects it immediately.

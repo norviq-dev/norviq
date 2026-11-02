@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import jwt
 import pytest
+import structlog
 from sqlalchemy import text
 
 from norviq.api.db.session import close_db, create_tables, get_session, init_db, upsert_agent_registry
@@ -259,3 +260,96 @@ async def test_retention_never_ages_out_a_frozen_or_capped_agent(env) -> None:
     assert (await _row(frozen))["frozen"] is True
     assert (await _row(capped))["trust_cap"] == pytest.approx(0.4)
     assert await _row(stale) is None, "an ordinary stale row must still age out"
+
+
+# --- DELETE /agents/{id} no longer lifts a freeze or a cap as a side effect -------------------------------
+
+
+async def _seed_registered(spiffe: str) -> None:
+    async with _session() as session:
+        await upsert_agent_registry(
+            session,
+            spiffe_id=spiffe,
+            namespace="ctl-test",
+            agent_class="x",
+            trust_score=0.5,
+            trust_category="Medium",
+            violation=True,
+        )
+        await session.commit()
+
+
+async def test_delete_refuses_a_frozen_agent_and_leaves_the_freeze_in_place(env) -> None:
+    """FAIL-ON-BUG: DELETE removed the registry row (the durable freeze) AND deleted agent_frozen:, so the
+    identity's next call ran unfrozen. Measured before the fix: 200, row None, agent_frozen: None."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "frozen")
+    await _seed_registered(spiffe)
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+
+    with structlog.testing.capture_logs() as logs:
+        resp = await client.delete(f"/api/v1/agents/{spiffe}", headers=_hdr())
+    assert resp.status_code == 409
+    assert "frozen" in resp.json()["detail"] and "score 1.0" in resp.json()["detail"]
+    assert (await _row(spiffe))["frozen"] is True
+    assert await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+    refused = [entry for entry in logs if entry.get("code") == "NRVQ-API-7143"]
+    assert refused and refused[0]["actor"] == "alice" and refused[0]["frozen"] is True
+
+
+async def test_delete_refuses_a_capped_agent(env) -> None:
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "capped")
+    await _seed_registered(spiffe)
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.3}, headers=_hdr())).status_code == 200
+    resp = await client.delete(f"/api/v1/agents/{spiffe}", headers=_hdr())
+    assert resp.status_code == 409 and "trust cap" in resp.json()["detail"]
+    assert (await _row(spiffe))["trust_cap"] == pytest.approx(0.3)
+    assert await cache._client().get(f"agent_trust_override:{spiffe}") is not None
+
+
+async def test_delete_refuses_a_freeze_that_exists_only_in_redis(env) -> None:
+    """A freeze set before the registry carried it durably has no frozen row; the live key still counts."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "legacy-freeze")
+    await _seed_registered(spiffe)
+    await cache._client().set(f"agent_frozen:{spiffe}", "1")
+    assert (await client.delete(f"/api/v1/agents/{spiffe}", headers=_hdr())).status_code == 409
+    assert await _row(spiffe) is not None and await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+
+
+async def test_delete_after_an_explicit_lift_works_and_keeps_history(env) -> None:
+    """The intended path: lift (logged with its actor), then delete. History and profile survive DELETE."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "lifted")
+    await _seed_registered(spiffe)
+    await cache._client().zadd(f"agent_history:{spiffe}", {'{"decision": "block"}': time.time()})
+    await cache._client().hset(f"agent_profile:{spiffe}", "known_tools", '["t"]')
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+
+    with structlog.testing.capture_logs() as logs:
+        resp = await client.delete(f"/api/v1/agents/{spiffe}", headers=_hdr())
+    assert resp.status_code == 200 and resp.json()["deleted"] is True
+    assert await _row(spiffe) is None
+    assert await cache._client().exists(f"agent_history:{spiffe}", f"agent_profile:{spiffe}") == 2
+    line = [entry for entry in logs if entry.get("code") == "NRVQ-API-7121"][0]
+    assert (line["frozen"], line["capped"], line["actor"]) == (False, False, "alice")
+
+
+async def test_delete_fails_closed_when_redis_cannot_answer(env) -> None:
+    app, client, _, ids = env
+    spiffe = _agent(ids, "redis-down")
+    await _seed_registered(spiffe)
+
+    class _DownCache:
+        def _client(self):
+            raise ConnectionError("redis unreachable")
+
+    real = app.state.cache
+    app.state.cache = _DownCache()
+    try:
+        assert (await client.delete(f"/api/v1/agents/{spiffe}", headers=_hdr())).status_code == 503
+    finally:
+        app.state.cache = real
+    assert await _row(spiffe) is not None

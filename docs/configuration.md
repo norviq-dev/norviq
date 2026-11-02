@@ -347,7 +347,7 @@ a non-chart deployment makes the app spawn its own managed `opa run --server`, b
 | `config.retention.auditRetentionDays` | `30` | Audit-log rows older than this are pruned. The console's Audit Log views read at most the last 30 days; raise to 90–365 for compliance evidence windows (export audit-evidence packs for long-term archival). `0` = keep forever. |
 | `config.retention.coverageSnapshotRetentionDays` | `30` | Compliance coverage trend snapshots + export events older than this are pruned. `0` = keep forever. |
 | `config.retention.graphSnapshotKeepPerNamespace` | `10` | Keep only the newest N asset-graph snapshots per namespace (readers only load the newest; caps growth under traffic). `0` = keep all. |
-| `config.retention.agentRegistryRetentionDays` | `90` | Agent-registry entries are removed N days after `last_seen` (`0` = never). Admins can remove one immediately via `DELETE /api/v1/agents/{spiffe_id}`. |
+| `config.retention.agentRegistryRetentionDays` | `90` | Agent-registry entries are removed N days after `last_seen` (`0` = never). Admins can remove one immediately via `DELETE /api/v1/agents/{spiffe_id}`. A frozen or capped agent is never aged out, and `DELETE` refuses it with `409` until the freeze or cap is lifted. |
 | `config.retention.apiKeyDefaultTtlDays` | `90` | Default expiry for **newly created** API keys — per-key override at creation (incl. never). Pre-existing keys never expire; revoked keys are kept (soft revoke). `0` = new keys never expire. |
 | `config.retention.draftTtlDays` | `14` | Real policy-intent drafts auto-expire after N days (expired drafts are also swept hourly in the background). |
 | `config.retention.draftTtlTestHours` | `24` | Test/e2e (synthetic-class) drafts expire faster. |
