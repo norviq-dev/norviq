@@ -138,6 +138,8 @@ Total unique codes: **410** (including `*-DEBUG-*` traces).
 | NRVQ-API-7142 | `nrvq.startup.baseline_controls_rematerialize_failed` — the startup re-compile of saved baseline controls failed as a whole (for example the database was unreachable); no namespace was re-compiled | `norviq/api/main.py` |
 | NRVQ-API-7143 | `nrvq.api.agent.deregister_refused` — `DELETE /agents/{id}` answered **409** because the agent is frozen or under a trust cap (`frozen`, `capped`, `actor`). Deleting the registry row would have lifted the control; lift it with `PUT /agents/{id}/trust` (score 1.0) first | `norviq/api/routers/agents.py` |
 | NRVQ-API-7144 | `nrvq.api.agent.deregister_check_failed` — `DELETE /agents/{id}` could not read the agent's live freeze/cap keys from Redis and answered **503** without deleting anything | `norviq/api/routers/agents.py` |
+| NRVQ-API-7145 | `nrvq.api.agent.trust_reset` — the audit record of `POST /agents/{id}/trust/reset`: an admin cleared the agent's behavioural history and profile. Carries `actor`, `actor_role`, `score_before`, `violation_count` (the registry's cumulative count, which the reset keeps), `history_entries_cleared`, `history_blocks_cleared`, `keys_cleared`, and the `frozen`/`trust_cap` that stay in force | `norviq/api/routers/agents.py` |
+| NRVQ-API-7146 | `nrvq.api.agent.trust_reset_failed` — the reset could not read or delete the Redis keys and answered **503**; the keys are deleted in one command, so nothing was cleared | `norviq/api/routers/agents.py` |
 
 ## WHK
 
@@ -403,7 +405,7 @@ NRVQ-API-7086, NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-
 NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7098, NRVQ-API-7099, NRVQ-API-7100, NRVQ-API-7101,
 NRVQ-API-7102, NRVQ-API-7103, NRVQ-API-7104, NRVQ-API-7105, NRVQ-API-7110, NRVQ-API-7111, NRVQ-API-7112,
 NRVQ-API-7113, NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-API-7123,
-NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7136, NRVQ-API-7137, NRVQ-API-7138, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7143, NRVQ-API-7144, NRVQ-API-7158, NRVQ-API-7159, NRVQ-API-7460
+NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7136, NRVQ-API-7137, NRVQ-API-7138, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7143, NRVQ-API-7144, NRVQ-API-7145, NRVQ-API-7146, NRVQ-API-7158, NRVQ-API-7159, NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
 NRVQ-WHK-4007, NRVQ-WHK-4008, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,

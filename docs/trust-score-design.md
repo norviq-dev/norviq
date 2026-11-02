@@ -406,6 +406,13 @@ trust, pass `--score 1.0` explicitly. Both the freeze and the cap are persisted 
 written back into Redis when an API process starts. A store that loses them in between enforces neither
 until the API restarts (§5, known gap).
 
+**Clearing an agent's record is its own action.** `POST /api/v1/agents/{spiffe_id}/trust/reset`
+(CLI: `norviq agent reset-history`, admin only) deletes the agent's history and profile, so the signals
+start from the next call; it logs `NRVQ-API-7145` with the actor and what was cleared, and it leaves a
+freeze or cap in force. `DELETE /api/v1/agents/{spiffe_id}` keeps both and is refused (`409`) while
+the agent is frozen or capped, so neither a fresh record nor a lifted freeze is ever a side effect of
+deregistering.
+
 ---
 
 ## 7. Integration Points

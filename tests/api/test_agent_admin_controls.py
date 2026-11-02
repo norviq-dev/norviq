@@ -353,3 +353,68 @@ async def test_delete_fails_closed_when_redis_cannot_answer(env) -> None:
     finally:
         app.state.cache = real
     assert await _row(spiffe) is not None
+
+
+# --- POST /agents/{id}/trust/reset: the one explicit, audited way to clear the behavioural record ---------
+
+
+async def test_reset_clears_history_and_profile_writes_the_audit_line_and_keeps_the_freeze(env) -> None:
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "reset")
+    await _seed_registered(spiffe)
+    now = time.time()
+    await cache._client().zadd(
+        f"agent_history:{spiffe}", {'{"decision": "block", "n": 1}': now, '{"decision": "allow", "n": 2}': now}
+    )
+    await cache._client().hset(f"agent_profile:{spiffe}", "known_tools", '["t"]')
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+
+    with structlog.testing.capture_logs() as logs:
+        resp = await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=_hdr(sub="bob"))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["keys_cleared"] == [f"agent_history:{spiffe}", f"agent_profile:{spiffe}"]
+    assert (body["score_before"], body["violation_count"]) == (0.0, 1)
+    assert (body["history_entries_cleared"], body["history_blocks_cleared"]) == (2, 1)
+    assert await cache._client().exists(f"agent_history:{spiffe}", f"agent_profile:{spiffe}") == 0
+
+    audit = [entry for entry in logs if entry.get("code") == "NRVQ-API-7145"]
+    assert len(audit) == 1
+    assert audit[0]["actor"] == "bob" and audit[0]["actor_role"] == "admin"
+    assert audit[0]["score_before"] == 0.0 and audit[0]["keys_cleared"] == body["keys_cleared"]
+
+    # Not a lift: the freeze is untouched in Redis and in the registry, and the cumulative count stays.
+    assert await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+    row = await _row(spiffe)
+    assert row["frozen"] is True and row["violation_count"] == 1
+
+
+async def test_reset_is_admin_only_and_404s_an_unknown_identity(env) -> None:
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "viewer")
+    await _seed_registered(spiffe)
+    await cache._client().hset(f"agent_profile:{spiffe}", "known_tools", '["t"]')
+    for role in ("viewer", "operator", "service"):
+        resp = await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=_hdr(role=role))
+        assert resp.status_code == 403, role
+    assert await cache._client().exists(f"agent_profile:{spiffe}") == 1
+    unknown = _agent(ids, "unknown")
+    assert (await client.post(f"/api/v1/agents/{unknown}/trust/reset", headers=_hdr())).status_code == 404
+
+
+async def test_reset_fails_closed_when_redis_cannot_answer(env) -> None:
+    app, client, _, ids = env
+    spiffe = _agent(ids, "reset-down")
+    await _seed_registered(spiffe)
+
+    class _DownCache:
+        async def get_trust(self, _spiffe):
+            raise ConnectionError("redis unreachable")
+
+    real = app.state.cache
+    app.state.cache = _DownCache()
+    try:
+        resp = await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=_hdr())
+    finally:
+        app.state.cache = real
+    assert resp.status_code == 503

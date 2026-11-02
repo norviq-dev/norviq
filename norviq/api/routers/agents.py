@@ -612,6 +612,66 @@ async def warm_agent_overrides_at_startup(cache, session_factory=get_session) ->
     )
 
 
+@router.post("/agents/{spiffe_id:path}/trust/reset")
+async def reset_agent_trust_history(
+    spiffe_id: str, request: Request, user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    _target: None = Depends(require_target_cluster)
+) -> dict:
+    """Admin-only, audited clean slate for an agent's BEHAVIOURAL record: deletes its rolling decision
+    history (``AgentHistoryStore``, which drives violation_rate) and its learned profile
+    (``AgentProfileStore``: known tools, entropy baselines), so trust is recomputed from the next call.
+
+    Deliberately narrow. It does NOT lift a freeze or a trust cap (``PUT .../trust`` with 1.0 does, and is
+    logged as its own action), does not touch the registry's cumulative ``violation_count`` or audit_log,
+    and is the only API path that clears history: DELETE /agents keeps it, so wiping a misbehaving agent's
+    record is never a side effect of housekeeping. The NRVQ-API-7145 line is the audit record — actor,
+    the score and violation count it had before, and the keys it actually removed."""
+    require_admin(user)
+    from norviq.api.db.models import AgentRegistryEntry
+    from norviq.engine.trust.history import AgentHistoryStore
+    from norviq.engine.trust.profile import AgentProfileStore
+
+    cache = request.app.state.cache
+    history_store = AgentHistoryStore(cache)
+    row = (
+        await session.execute(select(AgentRegistryEntry).where(AgentRegistryEntry.spiffe_id == spiffe_id))
+    ).scalar_one_or_none()
+    try:
+        trust = await cache.get_trust(spiffe_id)
+        history = await history_store.get_history(spiffe_id)
+        keys = [history_store._key(spiffe_id), AgentProfileStore(cache)._key(spiffe_id)]
+        present = [k for k in keys if await cache._client().exists(k)]
+        if row is None and trust is None and not present:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        # One DEL for both keys, so the reset is all or nothing: a history cleared without its profile
+        # (or the reverse) and a 503 would be a wiped record with no audit line saying so.
+        await cache._client().delete(*keys)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a half-done reset must not be reported as done
+        log.warning("nrvq.api.agent.trust_reset_failed", spiffe_id=spiffe_id, error=str(exc),
+                    actor=user.get("sub"), code="NRVQ-API-7146")
+        raise HTTPException(status_code=503, detail="Trust history reset failed; nothing is reported as cleared") from exc
+    score_before = trust.score if trust is not None else (row.trust_score if row is not None else None)
+    blocks = sum(1 for entry in history if entry.get("decision") == "block")
+    audit = {
+        "spiffe_id": spiffe_id,
+        "score_before": score_before,
+        # The registry's cumulative count (what the Agent Monitor shows; this reset leaves it alone),
+        # and what the cleared window held, so the record says how much behaviour was wiped.
+        "violation_count": row.violation_count if row is not None else (trust.violation_count if trust else 0),
+        "history_entries_cleared": len(history),
+        "history_blocks_cleared": blocks,
+        "keys_cleared": present,
+        "frozen": bool(row.frozen) if row is not None else False,
+        "trust_cap": row.trust_cap if row is not None else None,
+    }
+    log.info("nrvq.api.agent.trust_reset", **audit, actor=user.get("sub"), actor_role=user.get("role"),
+             code="NRVQ-API-7145")
+    return {"reset": True, **audit}
+
+
 @router.delete("/agents/{spiffe_id:path}")
 async def deregister_agent(
     spiffe_id: str, request: Request, user: dict = Depends(get_current_user),
@@ -625,6 +685,7 @@ async def deregister_agent(
     What it removes: the agent_registry row and the agent's asset-graph node. What it keeps: policies,
     audit_log, and the agent's behavioural history (1 h window) and learned profile (7 d) in Redis — an
     identity that calls again is re-registered on its next evaluated call and is scored on that record.
+    Clearing that record is its own audited action, POST .../trust/reset (reset_agent_trust_history).
 
     Refused with 409 while the agent is FROZEN or under a trust CAP. The registry row is the durable copy
     of both, so deleting it used to lift them as a side effect, with a log line that did not say so: the

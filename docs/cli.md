@@ -114,7 +114,7 @@ The write paths add a role check, and it is not one check but two:
 
 | Gate | Accepts | Commands |
 |---|---|---|
-| `require_admin` (`norviq/api/auth.py::require_admin`) | role `admin` only | `policy apply` (`norviq/api/routers/policies.py::apply_policy`), `policy rollback` (`norviq/api/routers/policies.py::rollback_policy`), `agent reset-trust` / `agent freeze` (`norviq/api/routers/agents.py::update_trust`), `fleet join` / `fleet leave` (`norviq/api/routers/fleet_enroll.py::fleet_join`, `norviq/api/routers/fleet_enroll.py::fleet_leave`) |
+| `require_admin` (`norviq/api/auth.py::require_admin`) | role `admin` only | `policy apply` (`norviq/api/routers/policies.py::apply_policy`), `policy rollback` (`norviq/api/routers/policies.py::rollback_policy`), `agent reset-trust` / `agent freeze` (`norviq/api/routers/agents.py::update_trust`), `agent reset-history` (`norviq/api/routers/agents.py::reset_agent_trust_history`), `fleet join` / `fleet leave` (`norviq/api/routers/fleet_enroll.py::fleet_join`, `norviq/api/routers/fleet_enroll.py::fleet_leave`) |
 | `require_admin_or_service` (`norviq/api/auth.py::require_admin_or_service`) | role `admin` **or** role `service` | `policy create` (`norviq/api/routers/policies.py::create_policy`), `policy delete` (`norviq/api/routers/policies.py::delete_policy`), `policy dry-run` (`norviq/api/routers/policies.py::dry_run_policy`) |
 
 The split is deliberate least-privilege, not an oversight: the `service` role exists for the webhook
@@ -135,11 +135,11 @@ and it writes each CRD into that CRD's own namespace, so there is no narrower fl
 fixed column subset followed by `(N results)` (`norviq/cli/formatters.py::fmt_table`), or
 `No results.` when the list is empty.
 
-`-o` is honored by **eight** commands. The rest print a hand-written summary and ignore it entirely:
+`-o` is honored by **nine** commands. The rest print a hand-written summary and ignore it entirely:
 
 | Honors `-o json` | Ignores `-o` (fixed human output) |
 |---|---|
-| `policy list`, `policy get`, `policy versions`\*, `audit list`, `audit stats`, `audit top-blocked`, `agent list`, `agent get` | `status`, `policy create`, `policy rollback`, `policy dry-run`, `policy apply`, `policy delete`, `agent reset-trust`, `agent freeze`, `fleet *`, `config *`, `login`, `admin reset-password`, `redteam *` |
+| `policy list`, `policy get`, `policy versions`\*, `audit list`, `audit stats`, `audit top-blocked`, `agent list`, `agent get`, `agent reset-history` | `status`, `policy create`, `policy rollback`, `policy dry-run`, `policy apply`, `policy delete`, `agent reset-trust`, `agent freeze`, `fleet *`, `config *`, `login`, `admin reset-password`, `redteam *` |
 
 \* `policy versions` honors `-o json` (`norviq/cli/main.py::policy_versions`), and that is the only
 way to see a historical version's Rego: the endpoint returns `rego_source` per row
@@ -395,6 +395,7 @@ traffic.
 | `get` | `SPIFFE_ID` | `GET /api/v1/agents/{spiffe_id}` |
 | `reset-trust` | `SPIFFE_ID`, `--score FLOAT` (default `0.8`) | `PUT /api/v1/agents/{spiffe_id}/trust` |
 | `freeze` | `SPIFFE_ID` | `PUT .../trust` with `{"score": 0.0}` |
+| `reset-history` | `SPIFFE_ID` | `POST /api/v1/agents/{spiffe_id}/trust/reset` |
 
 Pass the full SPIFFE ID, quoted. The scheme's `//` survives into the request path unmodified and the
 route's `:path` converter accepts it (`norviq/api/routers/agents.py::get_agent`), so no escaping is
@@ -435,6 +436,23 @@ columns. If the database write fails the command exits non-zero on a `503`: a fr
 force but not yet durable (retry it), and a cap or a clear has changed nothing. The retention pruner
 never ages out a frozen or capped agent
 (`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
+
+**`reset-history` clears the behavioural record, and nothing else.** It deletes the agent's rolling
+decision history (the 1-hour window `violation_rate` scores from) and its learned profile (known tools,
+entropy baselines, 7 days), so trust is recomputed from the agent's next call
+(`norviq/api/routers/agents.py::reset_agent_trust_history`). It does not lift a freeze or a cap — that
+is `reset-trust --score 1.0`, a separate logged action — and it keeps the registry's cumulative
+violation count and the audit log. Admin only. Each reset logs `NRVQ-API-7145` with the actor, the score
+and violation count before, how many history entries and blocks it removed, and the keys it cleared;
+the command prints the same, and says so when the agent is still frozen or capped. `404` for an identity
+with no registry row, trust entry, history or profile; `503` (nothing cleared) when Redis cannot answer.
+A pod running the opt-in in-process cache (`config.inprocCacheTtlS`) may score from its cached copy
+until that TTL expires.
+
+`DELETE /api/v1/agents/{spiffe_id}` (no CLI command) deregisters an identity and keeps its history and
+profile. It is refused with `409` while the agent is frozen or capped, because the registry row it
+deletes is the durable copy of that control: lift it first, then delete
+(`norviq/api/routers/agents.py::deregister_agent`).
 
 One cosmetic wart: `reset-trust` echoes the category the endpoint returns, and the endpoint builds
 that response with `category=""` for any non-zero score (`norviq/api/routers/agents.py::update_trust`).
