@@ -256,7 +256,10 @@ tools are still refused. If that list fails the call is escalated as before and 
 why; `NRVQ_MCP_COLD_LIST_TIMEOUT_S` (default 5s, `0` off) bounds it. The MCP HTTP proxy's SSE handling is stricter about
 framing; content it cannot parse is not forwarded. The MCP proxy no longer forwards a server response it
 cannot match to a well-formed answer to one of the client's requests. The annotations the MCP proxy adds for the client no
-longer include excerpts of the server content they describe. Two security booleans no longer fall back to off when an
+longer include excerpts of the server content they describe. The HTTP MCP proxy reads at most
+`NRVQ_MCP_HTTP_MAX_MESSAGE_BYTES` (default 8 MiB) of one upstream message on a client-facing path and
+fails closed above it (`NRVQ-MCP-5085`); a server that writes one message over several SSE `data:`
+lines now reaches the client intact. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

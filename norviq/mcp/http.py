@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 from typing import Any, AsyncIterator
 
 import httpx
@@ -392,7 +394,7 @@ class HttpProxy:
                 if encoding not in ("", "identity"):
                     raise RuntimeError(f"upstream answered with content-encoding {encoding[:32]!r}; "
                                        "the proxy's own list accepts identity only")
-                streamed = _SSE in resp.headers.get("content-type", "")
+                streamed = _is_sse(resp.headers)
                 buffer = b""
                 received = 0
                 lines = _SseLines()
@@ -417,6 +419,11 @@ class HttpProxy:
                 found = P.decode(buffer)
                 return found if found is not None and found.id == own.id else None
 
+        # Single flight and back-off are per credential (see `McpFirewall._cold_lists`): a digest, so
+        # the credential itself is never held as a key.
+        _list.credential_key = hashlib.sha256(                       # type: ignore[attr-defined]
+            f"{client_headers.get('authorization', '')}\0{client_headers.get('mcp-session-id', '')}"
+            .encode("utf-8", "replace")).hexdigest()[:32]
         return _list
 
     async def _handle_get(self, request: Request) -> Response:
@@ -462,30 +469,63 @@ class HttpProxy:
         would eventually disagree about framing — the same way `initialize` and `server/discover`
         drifted until one of them had no scan at all.
         """
-        if _SSE not in resp.headers.get("content-type", ""):
+        if not _is_sse(resp.headers):
             # The server answered a body that is NOT a stream on the path that serves the client a
             # stream (an SSE-only client, or the GET stream). It has no frames and no `data:` lines, so
             # the frame loop below would have read the whole body as bookkeeping and passed it through
             # unmediated. It is one JSON-RPC message: mediate it whole, exactly as the JSON route does,
             # and hand the client the result as the one SSE event it asked for. A body that does not
             # decode is dropped by `_mediate_server_bytes` and nothing is emitted.
-            body = await resp.aread()
+            body = await self._read_capped(resp, "stream path, non-stream body")
+            if body is None:
+                return
             mediated = await self._mediate_server_bytes(fw, body) if body.strip() else b""
             if mediated:
-                yield b"event: message\ndata: " + mediated + b"\n\n"
+                yield b"event: message\ndata: " + _one_line(mediated) + b"\n\n"
             return
         buffer = b""
+        scan_from = 0
         lines = _SseLines()
+        limit = int(settings.mcp_http_max_message_bytes)
         async for chunk in resp.aiter_bytes():
             buffer += lines.feed(chunk)
             # SSE frames are separated by a blank line. Split on the boundary and emit whole frames
             # only — a half-received frame must not be parsed, and must not be held back longer than
-            # it takes to complete.
-            while b"\n\n" in buffer:
-                frame, buffer = buffer.split(b"\n\n", 1)
+            # it takes to complete. The search resumes where the last one stopped: rescanning the
+            # whole pending frame on every chunk made a long frame quadratic.
+            while True:
+                end = buffer.find(b"\n\n", scan_from)
+                if end < 0:
+                    scan_from = max(0, len(buffer) - 1)
+                    break
+                frame, buffer, scan_from = buffer[:end], buffer[end + 2:], 0
                 yield await self._mediate_frame(fw, frame) + b"\n\n"
+            if len(buffer) > limit:
+                # One frame larger than any message the proxy will hold. Ending the stream is the
+                # only fail-closed choice: the frame cannot be mediated without being held whole.
+                self._over_limit("stream path, one SSE frame", limit)
+                return
         if buffer.strip():
             yield await self._mediate_frame(fw, buffer)
+
+    async def _read_capped(self, resp: Any, where: str) -> bytes | None:
+        """The whole body, or None (logged) once it passes `mcp_http_max_message_bytes`."""
+        limit = int(settings.mcp_http_max_message_bytes)
+        parts: list[bytes] = []
+        size = 0
+        async for chunk in resp.aiter_bytes():
+            size += len(chunk)
+            if size > limit:
+                self._over_limit(where, limit)
+                return None
+            parts.append(chunk)
+        return b"".join(parts)
+
+    def _over_limit(self, where: str, limit: int) -> None:
+        log.warning("nrvq.mcp.http.upstream_message_too_large", where=where, limit=limit,
+                    server=self._server_id, code="NRVQ-MCP-5085",
+                    hint="raise NRVQ_MCP_HTTP_MAX_MESSAGE_BYTES only if the server's messages are "
+                         "legitimately this large")
 
     async def _post_once(self, fw: McpFirewall, request: Request, body: bytes) -> Response:
         """POST upstream exactly once and serve whichever shape comes back.
@@ -499,9 +539,16 @@ class HttpProxy:
         cm = self._client.stream("POST", self._upstream, headers=headers, content=body, timeout=None)
         resp = await cm.__aenter__()
 
-        if _SSE not in resp.headers.get("content-type", ""):
+        if not _is_sse(resp.headers):
             try:
-                out = await self._mediate_server_bytes(fw, await resp.aread())
+                raw = await self._read_capped(resp, "json path")
+                if raw is None:
+                    sent = P.decode(body)
+                    return Response(P.encode(P.error_response(
+                        sent.id if sent is not None else None, P.E_INTERNAL,
+                        "Norviq MCP proxy: the upstream response exceeded the size limit and was not "
+                        "forwarded")), status_code=502, media_type="application/json")
+                out = await self._mediate_server_bytes(fw, raw)
                 return Response(out, status_code=resp.status_code,
                                 headers=_passthrough(resp.headers), media_type="application/json")
             finally:
@@ -532,7 +579,7 @@ class HttpProxy:
                                "were not forwarded")
         if data is not None:
             mediated = await self._mediate_server_bytes(fw, data)
-            keep.append(b"data: " + mediated if mediated else b"data: ")
+            keep.append(b"data: " + _one_line(mediated) if mediated else b"data: ")
         return b"\n".join(keep)
 
     async def _mediate_server_bytes(self, fw: McpFirewall, payload: bytes) -> bytes:
@@ -677,6 +724,25 @@ def _split_frame(frame: bytes) -> tuple[list[bytes], bytes | None, int]:
     return keep, (b"\n".join(data) if data else None), dropped
 
 
+def _is_sse(headers: Any) -> bool:
+    """Whether a response is an SSE stream. Media types are case-insensitive (RFC 9110 §8.3.1)."""
+    return _SSE in str(headers.get("content-type", "")).lower()
+
+
+def _one_line(message: bytes) -> bytes:
+    """A mediated message as ONE `data:` value.
+
+    A message forwarded unchanged is re-emitted from the server's bytes, and a server that spread its
+    JSON over several `data:` lines (or pretty-printed a body) left line breaks in those bytes. After a
+    single `data: ` prefix the client read only the first line as data and lost the message. Line
+    breaks in JSON are only ever whitespace between tokens (inside a string they must be escaped), so
+    a compact re-encoding is the same message.
+    """
+    if b"\n" not in message and b"\r" not in message:
+        return message
+    return P.encode(json.loads(message)).rstrip(b"\n")
+
+
 def _own_response_in_frame(frame: bytes, own_id: Any) -> P.JsonRpcMessage | None:
     """The response to the proxy's own request, if this SSE frame carries it; else None."""
     _keep, data, _dropped = _split_frame(frame)
@@ -712,4 +778,7 @@ def _wants_stream(request: Request) -> bool:
 
 
 def _passthrough(headers) -> dict[str, str]:
-    return {k: v for k, v in headers.items() if k.lower() not in _HOP_HEADERS}
+    # Content-Encoding too: httpx has already decoded the body that is sent on, so a copied
+    # `gzip` would tell the client to decompress plain bytes.
+    return {k: v for k, v in headers.items()
+            if k.lower() not in _HOP_HEADERS and k.lower() != "content-encoding"}

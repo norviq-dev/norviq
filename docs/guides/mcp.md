@@ -576,8 +576,11 @@ blocked is never listed on the call path. A call that policy then refuses has st
 because the facts policy decides on (§5) come from the scanned catalog.
 
 Bounds. The proxy's list waits at most `NRVQ_MCP_COLD_LIST_TIMEOUT_S` (default `5`; `0` turns the
-self-list off and restores the old behaviour). Calls that arrive while it is in flight wait for that
-one list rather than sending their own. Only the first page of a paginated listing is read.
+self-list off and restores the old behaviour). Calls that arrive while it is in flight with the same
+credential (on HTTP, the same `Authorization` and `Mcp-Session-Id`) wait for that one list rather than
+sending their own; a caller with a different credential sends its own, and a failed list backs off only
+its own credential. The catalog it produces is shared, as a client's listing is: one HTTP proxy serves
+one attested workload. Only the first page of a paginated listing is read.
 
 - **HTTP.** The list carries the headers a `tools/list` from that client would carry, not the call's:
   `Authorization`, `Mcp-Session-Id` and `Mcp-Protocol-Version` are copied, and `Mcp-Method` is set to
@@ -738,9 +741,10 @@ first pin, `5042` drift, `5043` approved, `5044` revoked, `5046` control plane u
 schema violation, `5070` schema not fully enforceable, `5079` cold catalog listed by the proxy,
 `5080` the proxy's cold-catalog list failed, `5081` a late or duplicate answer to it dropped,
 `5082` SSE lines dropped, `5083` the proxy's list superseded by a client listing, `5084` a server
-response dropped because it matches no well-formed answer to a client request. Latency is recorded as
+response dropped because it matches no well-formed answer to a client request, `5085` an upstream
+message over the HTTP size limit. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
-`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5084` are
+`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` are
 listed in [Error Codes](../error-codes.md) so far.
 
 ---
@@ -764,6 +768,7 @@ All read from the **proxy process's** environment, prefix `NRVQ_`:
 | `NRVQ_MCP_GOVERN_SAMPLING` | `true` | evaluate server-initiated `sampling/createMessage` |
 | `NRVQ_MCP_ALLOW_TOOL_HEADERS` | `false` | permit tool parameters to set outbound HTTP headers |
 | `NRVQ_MCP_MAX_PENDING_REQUESTS` | `4096` | per-direction cap on in-flight request-id bookkeeping |
+| `NRVQ_MCP_HTTP_MAX_MESSAGE_BYTES` | `8388608` | largest upstream message the HTTP proxy reads on a client-facing path (a JSON body, or one SSE event); over it the response fails closed and `NRVQ-MCP-5085` is logged |
 | `NRVQ_MCP_COLD_LIST_TIMEOUT_S` | `5` | how long the proxy waits for its own `tools/list` when a call arrives before any list was scanned (§6, cold catalog); `0` disables it |
 
 > **`file` with no path is not an error — it is a silent downgrade, now made loud.** `NRVQ_MCP_PIN_STORE=file` without `NRVQ_MCP_PIN_PATH` degrades to the in-process store: a restart re-TOFUs every definition and drift is not detected. `build_store` logs this as `nrvq.mcp.pins.store_degraded` (**`NRVQ-MCP-5078`**) on every transport. Until 0.2.6 only the HTTP proxy said so; the stdio proxy this guide's quickstart recommends degraded with no line at all.

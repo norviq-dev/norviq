@@ -135,7 +135,9 @@ _COLD_LIST_META_KEYS = (P.META_PROTOCOL_VERSION, P.META_CLIENT_CAPABILITIES, P.M
 
 # Sends the proxy's own `tools/list` request upstream and returns the server's response to it (the
 # message whose id matches), or None. Supplied per call by the transport driver, because only the
-# driver owns the upstream connection — and on HTTP, the headers the client's request carried.
+# driver owns the upstream connection — and on HTTP, the headers the client's request carried. An
+# optional `credential_key` attribute names the credential it lists with; single flight and back-off
+# are kept per key.
 ListUpstream = Callable[[P.JsonRpcMessage], Awaitable[P.JsonRpcMessage | None]]
 
 
@@ -507,6 +509,17 @@ def _response_defect(msg: P.JsonRpcMessage, method: str) -> str:
     return ""
 
 
+# Bound on the per-credential single-flight and back-off maps. The key is a digest of what the caller
+# sent, so a caller cycling credentials must not grow them without limit; the oldest is evicted.
+_COLD_LIST_MAX_CREDENTIALS = 64
+
+
+def _bounded_put(mapping: dict, key: str, value: Any) -> None:
+    if key not in mapping and len(mapping) >= _COLD_LIST_MAX_CREDENTIALS:
+        mapping.pop(next(iter(mapping)), None)
+    mapping[key] = value
+
+
 # How often the unmatched-response drop is logged per firewall. A server chooses how many it sends,
 # so the log line is coalesced; the count of suppressed drops rides on the next line.
 _UNMATCHED_LOG_WINDOW_S = 60.0
@@ -549,10 +562,14 @@ class McpFirewall:
         # Not the same as "the catalog is non-empty": a blocked server or an empty server is listed and
         # leaves no entries, and must not be re-listed on every call because of it.
         self._catalog_listed = False
-        # The proxy's own list for a cold catalog: one task shared by every call that arrives while it
-        # runs (single flight), and when it last failed (see `_COLD_LIST_RETRY_S`).
-        self._cold_list: asyncio.Task | None = None
-        self._cold_list_failed_at: float | None = None
+        # The proxy's own list for a cold catalog, PER CREDENTIAL (`ListUpstream.credential_key`): one
+        # task shared by every call with that credential that arrives while it runs (single flight),
+        # and when that credential's list last failed (see `_COLD_LIST_RETRY_S`). Per credential so a
+        # caller never waits on, or is backed off by, a list sent with someone else's Authorization.
+        # The CATALOG stays shared: it is this attested workload's view of the server, exactly as a
+        # client listing warms it for every caller of the same firewall.
+        self._cold_lists: dict[str, asyncio.Task] = {}
+        self._cold_list_failed: dict[str, float] = {}
         # Counts CLIENT-initiated tools/list responses that have been through Gate A. The proxy's own
         # list compares it before and after its wait: see `_cold_list_once`.
         self._client_list_generation = 0
@@ -1417,22 +1434,23 @@ class McpFirewall:
         # unscanned — while sending the client's credentials to a server nobody is meant to talk to.
         if not self._servers.get(self._server_id).reachable:
             return False
-        task = self._cold_list
+        credential = str(getattr(list_upstream, "credential_key", "") or "")
+        task = self._cold_lists.get(credential)
         if task is None or task.done():
-            failed_at = self._cold_list_failed_at
+            failed_at = self._cold_list_failed.get(credential)
             if failed_at is not None and monotonic() - failed_at < _COLD_LIST_RETRY_S:
                 return False
             # SINGLE FLIGHT. A restart is exactly when calls arrive in a burst, and N concurrent cold
             # calls each sending their own list would hand the burst straight to the server. Every
-            # call that arrives while this runs awaits the same task.
-            task = asyncio.ensure_future(self._cold_list_once(call, list_upstream, timeout))
-            self._cold_list = task
+            # call with this credential that arrives while this runs awaits the same task.
+            task = asyncio.ensure_future(self._cold_list_once(call, list_upstream, timeout, credential))
+            _bounded_put(self._cold_lists, credential, task)
         # Shielded: one waiter being cancelled (an HTTP client hanging up) must not cancel the list
         # every other waiter is relying on.
         return await asyncio.shield(task)
 
     async def _cold_list_once(self, call: P.JsonRpcMessage, list_upstream: ListUpstream,
-                              timeout: float) -> bool:
+                              timeout: float, credential: str = "") -> bool:
         t0 = perf_counter()
         generation = self._client_list_generation
         request_id = f"{_COLD_LIST_ID_PREFIX}{uuid.uuid4().hex}"
@@ -1480,7 +1498,7 @@ class McpFirewall:
                 reason = f"scanning the listing failed: {type(exc).__name__}: {exc}"[:200]
 
         if reason:
-            self._cold_list_failed_at = monotonic()
+            _bounded_put(self._cold_list_failed, credential, monotonic())
             self._bump("cold_list_failed")
             log.warning(
                 "nrvq.mcp.gate_a.cold_list_failed", server=self._server_id,
@@ -1490,7 +1508,7 @@ class McpFirewall:
                      "mcp_definition_never_scanned) until the client lists or a later attempt succeeds",
             )
             return False
-        self._cold_list_failed_at = None
+        self._cold_list_failed.pop(credential, None)
         self._bump("cold_listed")
         log.info(
             "nrvq.mcp.gate_a.cold_listed", server=self._server_id, tools=len(self._catalog),

@@ -295,6 +295,11 @@ class NorviqSettings(BaseSettings):
     # evaluated. On timeout or error the call is evaluated unscanned, as before, which the baseline
     # escalates. Bounded because the client's call waits on it; 0 disables the self-list.
     mcp_cold_list_timeout_s: float = 5.0
+    # Largest single message the HTTP proxy reads from the upstream on a client-facing path: a JSON
+    # body, a non-stream body on the streaming path, or one SSE frame still waiting for its blank
+    # line. The upstream is untrusted and these were read into memory unbounded. Over it, the response
+    # fails closed (NRVQ-MCP-5085). 8 MiB is the stdio driver's line bound.
+    mcp_http_max_message_bytes: int = 8 * 1024 * 1024
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     db_ssl_mode: str = Field(
         default="prefer",
