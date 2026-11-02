@@ -23,7 +23,7 @@ approved it. Norviq splits enforcement accordingly:
 | Nature | heuristic, evadable by construction | deterministic backstop |
 
 Gate A never runs on the Gate B path: a `tools/call` costs one dict lookup against a catalog built at
-discovery (`norviq/mcp/firewall.py:203-257`). That separation is the reason it is affordable to put
+discovery (`norviq/mcp/firewall.py` `McpFirewall._mcp_context`). That separation is the reason it is affordable to put
 Gate-A state in front of every policy decision.
 
 If you have not read [Writing Policies](writing-policies.md), do that first — everything in §5 below
@@ -37,7 +37,7 @@ There are two transports and one identity story.
 
 **stdio.** A stdio MCP server is a *child process* of its client. There is no socket, so there is
 nothing for a gateway to sit in front of; the only faithful interception point is to *be* the child
-(`norviq/mcp/stdio.py:5-15`).
+(`norviq/mcp/stdio.py` module docstring).
 
 ```bash
 python -m norviq.mcp --server-id filesystem -- npx -y @modelcontextprotocol/server-filesystem /work
@@ -45,7 +45,7 @@ python -m norviq.mcp --server-id filesystem -- npx -y @modelcontextprotocol/serv
 
 **Streamable HTTP.** Fronts a remote MCP endpoint. Still deployed as a sidecar in the agent's pod,
 not as a shared gateway — a shared gateway would have to attest callers over the network, which is a
-different and larger design (`norviq/mcp/http.py:22-26`).
+different and larger design (`norviq/mcp/http.py` module docstring).
 
 ```bash
 python -m norviq.mcp --http --listen 127.0.0.1:9000 --upstream https://mcp.example.com/mcp
@@ -62,7 +62,7 @@ policies must tell two identically-named tools apart: prefixing breaks the 1:1 m
 proxy runs in the same pod, same uid and network namespace as the agent that spawned it, so its
 SPIFFE SVID *is* that workload's identity — and `/api/v1/evaluate` re-binds every
 enforcement-selecting field to the caller's own credential anyway, so a proxy that lied would have
-its claim overwritten (`norviq/mcp/stdio.py:17-32`).
+its claim overwritten (`norviq/mcp/stdio.py` module docstring).
 
 ### In Kubernetes
 
@@ -146,28 +146,30 @@ name, and gets no Gate A — deploy the `--http` driver yourself for that case.
 
 ## 2. Which method falls in which gate
 
-Everything not named below is forwarded **byte-for-byte**, including future methods and vendor
-extensions. Allowed messages are re-emitted from the original bytes rather than re-serialised, so key
-order and anything the proxy does not model survive the hop (`norviq/mcp/protocol.py:103-127`).
+Everything not named below is forwarded, including future methods and vendor extensions, with every
+member and its order intact. A client message goes upstream as the compact encoding of what the proxy
+decoded, so the server reads exactly what was decided on; a server message the proxy does not rewrite
+goes to the client as its original bytes (`norviq/mcp/firewall.py` `McpFirewall.on_client_message`,
+`norviq/mcp/protocol.py` `JsonRpcMessage.framed`).
 
 ### Gate B — invocation (an `/evaluate` round trip)
 
 | Method | Direction | Gated when | Blocked how |
 |---|---|---|---|
-| `tools/call` | client → server | always (`firewall.py:414`) | MCP tool error (`result.isError`) for the Gate-A, schema and policy refusals; JSON-RPC error for the two malformed-input refusals (see below) |
-| `resources/read` | client → server | `mcp_govern_resources` (default `true`, `firewall.py:416`) | JSON-RPC error `-32001` |
-| `sampling/createMessage` | server → client | `mcp_govern_sampling` (default `true`, `firewall.py:434`) | JSON-RPC error `-32001`, returned to the **server** |
-| any request carrying `params.inputResponses` | client → server | always (`firewall.py:410-413`) | JSON-RPC error `-32001` |
+| `tools/call` | client → server | always (`firewall.py` `McpFirewall._on_client_message`) | MCP tool error (`result.isError`) for the Gate-A, schema and policy refusals; JSON-RPC error for the two malformed-input refusals (see below) |
+| `resources/read` | client → server | `mcp_govern_resources` (default `true`, `firewall.py` `McpFirewall._on_client_message`) | JSON-RPC error `-32001` |
+| `sampling/createMessage` | server → client | `mcp_govern_sampling` (default `true`, `firewall.py` `McpFirewall.on_server_message`) | JSON-RPC error `-32001`, returned to the **server** |
+| any request carrying `params.inputResponses` | client → server | always (`firewall.py` `McpFirewall._gate_answer`) | JSON-RPC error `-32001` |
 
 A `tools/call` refusal is deliberately shaped as `result.isError` rather than a JSON-RPC `error`:
 several hosts treat a server-originated protocol error on a tool call as a session fault and tear the
 connection down, so a targeted denial would become an outage. The block is still absolute — the
 upstream server never sees the call — and the model reads "blocked by rule X" as tool output and can
-route around it (`norviq/mcp/protocol.py:277-292`).
+route around it (`norviq/mcp/protocol.py` `tool_error_result`).
 
 Two refusals on this same path are the exception and do travel as JSON-RPC errors: transport-header
-smuggling answers `-32001` (`firewall.py:744-751`) and a `params.arguments` that is not an object
-answers `-32600` (`firewall.py:758-762`). The reasoning above applies to those two no less than to a
+smuggling answers `-32001` (`firewall.py` `McpFirewall._gate_b_tools_call`) and a `params.arguments` that is not an object
+answers `-32600` (`firewall.py` `McpFirewall._gate_b_tools_call`). The reasoning above applies to those two no less than to a
 policy block, so a host that tears the session down on a server-originated error will do so for them.
 Read it as an inconsistency in the shipped code rather than as a deliberate distinction.
 
@@ -181,23 +183,26 @@ through to the ordinary call gate — one message, two decisions.
 
 | Surface | Direction | Action on a finding |
 |---|---|---|
-| `tools/list` result | server → client | per tool: pass / sanitize / **strip** (`firewall.py:946-1064`) |
-| `resources/list`, `resources/templates/list`, `prompts/list` results | server → client | per entry: keep or **withhold**; the rest of the list still passes (`firewall.py:1119-1248`) |
-| `prompts/get` result | server → client | annotate; **replace** the messages at strip severity (`firewall.py:1080-1117`) |
-| `elicitation/create` | server → client (request) | annotate; **refuse** at strip severity (`firewall.py:1269-1305`) |
-| `server/discover` result | server → client | annotate only — never refused (`firewall.py:1424-1444`) |
-| `notifications/message`, `notifications/progress` | server → client | annotate only (`firewall.py:1307-1331`) |
-| `notifications/{tools,prompts,resources}/list_changed` | server → client | mark every catalog entry stale (`firewall.py:929-944`) |
-| `notifications/*` carrying a `subscriptionId` + `content` | server → client | content guard (fence + DLP) (`firewall.py:449-451`) |
-| `tools/call` result | server → client | content guard, then `structuredContent` DLP (`firewall.py:1334-1382`) |
-| `resources/read` result | server → client | content guard only — the `structuredContent` pass is not run here (`firewall.py:1384-1386`) |
-| `tools/call` result with `resultType: "input_required"` | server → client | scan the demand, annotate only (`firewall.py:1485-1513`) |
+| `tools/list` result | server → client | per tool: pass / sanitize / **strip** (`firewall.py` `McpFirewall._gate_a_tools_list`) |
+| `resources/list`, `resources/templates/list`, `prompts/list` results | server → client | per entry: keep or **withhold**; the rest of the list still passes (`firewall.py` `McpFirewall._gate_a_item_list`) |
+| `prompts/get` result | server → client | annotate; **replace** the messages at strip severity (`firewall.py` `McpFirewall._gate_a_prompts_get`) |
+| `elicitation/create` | server → client (request) | annotate; **refuse** at strip severity (`firewall.py` `McpFirewall._gate_a_elicitation`) |
+| `server/discover` result | server → client | annotate only — never refused (`firewall.py` `McpFirewall._gate_a_discover`) |
+| `notifications/message`, `notifications/progress` | server → client | annotate only (`firewall.py` `McpFirewall._gate_a_notification_text`) |
+| `notifications/{tools,prompts,resources}/list_changed` | server → client | mark every catalog entry stale (`firewall.py` `McpFirewall._on_catalog_changed`) |
+| `notifications/*` carrying a `subscriptionId` + `content` | server → client | content guard (fence + DLP) (`firewall.py` `McpFirewall.on_server_message`) |
+| `tools/call` result | server → client | content guard, then `structuredContent` DLP (`firewall.py` `McpFirewall._on_tool_result`) |
+| `resources/read` result | server → client | content guard only — the `structuredContent` pass is not run here (`firewall.py` `McpFirewall._on_resource_result`) |
+| `tools/call` result with `resultType: "input_required"` | server → client | scan the demand, annotate only (`firewall.py` `McpFirewall._gate_input_required`) |
 
-JSON-RPC **batches are refused in both directions** (`firewall.py:392-401`). MCP removed batching in
+JSON-RPC **batches are refused in both directions** (`firewall.py` `McpFirewall.on_client_message`). MCP removed batching in
 2025-06-18, and a proxy that forwarded an array it did not inspect would let a `tools/call` ride
 inside it ungoverned. A message the proxy cannot classify or decode is dropped, not forwarded — on
-both transports, and a JSON object that names a key twice counts as undecodable, since parsers
-disagree on which value wins (`firewall.py:489-492`, `http.py:296-310`).
+both transports, and a JSON object that names a key twice, or two keys that differ only by case or
+compatibility form, counts as undecodable, since parsers disagree on which value wins and some match
+keys case-insensitively. A client message whose key differs from a protocol field only that way is
+refused (`NRVQ-MCP-5089`), and an allowed client message is forwarded as the message the proxy decoded
+(compact JSON, every member kept in order), not as the client's bytes (`firewall.py` `McpFirewall.on_server_message`, `http.py` `HttpProxy._mediate_server_bytes`).
 
 A server response is mediated as the answer to the client request it answers, and a response that
 answers none is dropped (`NRVQ-MCP-5084`). Ids are matched the way the reference client SDKs match
@@ -258,15 +263,15 @@ severity on `uri`/`uriTemplate`/`name`, where it is the address *of* a secret ra
 one (`scanner.py:534-540`).
 
 Every bound is **reported, never silent**. One `tools/list` response gets a shared 512 KiB scan budget
-(`firewall.py:80`), one message 64 KiB (`scanner.py:212`), one field 16 KiB, and the structure walk
+(`firewall.py` `_LIST_SCAN_BUDGET`), one message 64 KiB (`scanner.py:212`), one field 16 KiB, and the structure walk
 stops at 512 strings / 512 members per node / 12 levels deep. Exhausting any of them raises a finding
 and sets `budget_exhausted`, and on `tools/list` a definition the budget could not read is **stripped
 rather than sanitised** — a walk that stopped early must not produce the same report as a walk that
-found nothing (`firewall.py:992-1000`).
+found nothing (`firewall.py` `McpFirewall._gate_a_tools_list`).
 
 ### 3.2 Severity → action
 
-`_action_for` (`firewall.py:1066-1078`) maps (scan severity, pin status) onto one of three actions:
+`_action_for` (`firewall.py` `McpFirewall._action_for`) maps (scan severity, pin status) onto one of three actions:
 
 | Action | What the model receives | Can the tool still be called? |
 |---|---|---|
@@ -301,7 +306,7 @@ Two independent mechanisms:
 - **Cross-catalog collision** (`mcp_a_name_shadowing`, critical): `send_email` and `send_emaiI` fold
   to the same skeleton and are indistinguishable to a model reading a list. Only detectable with the
   whole catalog in hand, so it lives in the firewall rather than the scanner
-  (`firewall.py:979-988, 1627-1632`).
+  (`firewall.py` `McpFirewall._gate_a_tools_list, 1627-1632`).
 
 **`server_id` is not folded.** Confusables cover tool names only, so `pоstgres-prod` (Cyrillic о) is a
 distinct pin row from `postgres-prod` rather than a detected collision. It is resolved at
@@ -319,7 +324,7 @@ disabled, which is worse than not having one. See §6 for the lifecycle.
 ### 3.5 Schema enforceability
 
 At discovery the firewall records what its conformance checker *cannot* enforce about each declared
-`inputSchema` (`firewall.py:583-634`): `$ref`, `anyOf`/`oneOf`/`allOf`, `if`/`then`, `patternProperties`
+`inputSchema` (`firewall.py` `McpFirewall._schema_enforceability`): `$ref`, `anyOf`/`oneOf`/`allOf`, `if`/`then`, `patternProperties`
 and friends are not evaluated, because resolving them means following references or running
 server-supplied regexes — unbounded work on attacker-controlled input inside a fail-closed budget.
 The result is published to policy as `mcp.schema_notes` and logged once at `NRVQ-MCP-5070`. Nothing is
@@ -329,8 +334,8 @@ checked against the arguments here; that happens at Gate B (§4).
 
 | Control | Setting (`config.py`) | Default | Notes |
 |---|---|---|---|
-| `tools/list` scan + pin | — | **always on** | not gated by `mcp_scan_responses` (`firewall.py:946-955`) |
-| Scan server-returned content and non-tool discovery lists | `mcp_scan_responses` (207) | `true` | off skips `prompts/get`, the three item lists, `elicitation/create`, the free-text notifications and the result injection scan — but **not** the whole response path: `server/discover` (`firewall.py:1424-1444`) and the `input_required` demand scan (`firewall.py:1485-1513`) do not consult it, and masking is governed separately by `mcp_output_dlp_enabled` (`firewall.py:1518-1521`) |
+| `tools/list` scan + pin | — | **always on** | not gated by `mcp_scan_responses` (`firewall.py` `McpFirewall._gate_a_tools_list`) |
+| Scan server-returned content and non-tool discovery lists | `mcp_scan_responses` (207) | `true` | off skips `prompts/get`, the three item lists, `elicitation/create`, the free-text notifications and the result injection scan — but **not** the whole response path: `server/discover` (`firewall.py` `McpFirewall._gate_a_discover`) and the `input_required` demand scan (`firewall.py` `McpFirewall._gate_input_required`) do not consult it, and masking is governed separately by `mcp_output_dlp_enabled` (`firewall.py` `McpFirewall._guard_content`) |
 | Content-hash pinning mode | `mcp_pin_mode` (191) | `tofu` | `strict` quarantines first sight |
 | Pin durability | `mcp_pin_store` (192) | `memory` | the chart sets `control-plane` (`values.yaml:349`) |
 | Strip threshold | `mcp_scan_strip_severity` (203) | `high` | |
@@ -342,7 +347,7 @@ checked against the arguments here; that happens at Gate B (§4).
 | Allow tool params to set HTTP headers | `mcp_allow_tool_headers` (215) | **`false`** | opt-in; see §4 |
 
 Every one of these is read from the **proxy process's own environment** (`NRVQ_MCP_*`, prefix set at
-`config.py:49`), not from the control plane. `PUT /api/v1/settings` does not reach them and the
+`config.py` `NorviqSettings.model_config`), not from the control plane. `PUT /api/v1/settings` does not reach them and the
 console cannot display them — which is why the MCP Servers page states the shipped default explicitly
 rather than claiming to know your threshold (`ui/src/pages/McpServers.tsx:243-253`).
 
@@ -351,8 +356,8 @@ rather than claiming to know your threshold (`ui/src/pages/McpServers.tsx:243-25
 ## 4. What the proxy enforces before policy is consulted
 
 This is the distinction that determines what you can change with a rule. A `tools/call` passes five
-proxy-side checks *before* `/evaluate` is reached (`firewall.py:735-842`; check 1 sits one level up,
-in `on_client_message` at `firewall.py:392-401`), in this order:
+proxy-side checks *before* `/evaluate` is reached (`firewall.py` `McpFirewall._gate_b_tools_call`; check 1 sits one level up,
+in `on_client_message` at `firewall.py` `McpFirewall.on_client_message`), in this order:
 
 | # | Check | Refuses when | Turned off by |
 |---|---|---|---|
@@ -367,8 +372,8 @@ Check 5 runs before the evaluation on purpose. An argument the tool never declar
 mentions either, so evaluating first would produce an `allow` meaning "no rule objected to a field
 nobody knew about" — true and useless. Refusing first keeps the allow honest: every argument that
 reaches policy is one the server admits to. It is a **deliberate subset** of JSON Schema, not a
-validator (`firewall.py:636-666`). It runs only when the tool has a catalog entry *and* that entry
-carries a published `inputSchema` (`firewall.py:793`), so an observed-only tool and a tool the proxy
+validator (`firewall.py` `McpFirewall._schema_violations`). It runs only when the tool has a catalog entry *and* that entry
+carries a published `inputSchema` (`firewall.py` `McpFirewall._gate_b_decide`), so an observed-only tool and a tool the proxy
 never scanned are both unaffected either way.
 
 At discovery, **policy is not consulted at all**. Strip and sanitize are proxy decisions taken from
@@ -382,13 +387,13 @@ Because check 4 fires before check 6, several `input.mcp` values **cannot be obs
 the ordinary `tools/call` path**:
 
 - `pin_status == "drift"` and `pin_status == "quarantined"` — the call is already refused
-  (`CatalogEntry.call_denied`, `firewall.py:248-257`).
+  (`CatalogEntry.call_denied`, `firewall.py` `CatalogEntry.call_denied`).
 - `scan_severity == "high"` and `scan_severity == "critical"` at the default strip threshold — the
   same short circuit, because those grades produce `action == "strip"`.
 
 So the shipped guardrail's first three rules (§7) are **defence in depth for events that reach
 `/evaluate` by a route other than the call gate** — the answer plane (which evaluates *before* the
-call gate, `firewall.py:410-415`, so it does see a drifted tool's status), red-team traffic, which
+call gate, `firewall.py` `McpFirewall._on_client_message`, so it does see a drifted tool's status), red-team traffic, which
 synthesises its own MCP document, and any caller that reaches `/evaluate` directly. They are not the
 mechanism that stops a drifted tool on the call path. The proxy is that mechanism.
 
@@ -402,7 +407,7 @@ blocked.
 
 ## 5. The facts `input.mcp` publishes
 
-Built by `_mcp_context` (`firewall.py:495-543`) from values computed at discovery and cached, so
+Built by `_mcp_context` (`firewall.py` `McpFirewall._mcp_context`) from values computed at discovery and cached, so
 assembling it is a dict lookup plus a literal — that is what makes it affordable on every call. The
 evaluator publishes it as `input.mcp`, and lifts `input.direction` out of it, for MCP callers only;
 for every other caller `input.mcp` is `{}` and `input.direction` is `"call"`
@@ -428,16 +433,16 @@ That is deliberate: `none` is what a definition that *was* scanned and came back
 reporting it for a tool nobody looked at would spell "I never looked" exactly like "I looked and it
 was fine". `unknown` is outside the severity vocabulary, so it satisfies no allow list and no
 high/critical block — an operator who wants to admit unscanned tools must now say so
-(`firewall.py:508-525`).
+(`firewall.py` `McpFirewall._mcp_context`).
 
 Two honest caveats about this table:
 
-- **`catalog_stale` is `false` when there is no catalog entry** (`firewall.py:526`) — the signal is
+- **`catalog_stale` is `false` when there is no catalog entry** (`firewall.py` `McpFirewall._mcp_context`) — the signal is
   inverted for the most suspicious case. Use `definition_seen` for "was this ever scanned"; use
   `catalog_stale` only to mean "the entry I have may be out of date".
 - **`transport` reports `stdio` on the HTTP driver.** `HttpProxy` constructs its `McpFirewall`
-  without passing `transport=` (`http.py:173-179`), so the constructor default applies
-  (`firewall.py:339`). The control-plane pin rows record the transport correctly
+  without passing `transport=` (`http.py` `HttpProxy._firewall_for_caller`), so the constructor default applies
+  (`firewall.py` `McpFirewall.__init__`). The control-plane pin rows record the transport correctly
   (`pins.py:340-347`), so the console is right and the policy fact is not. Do not write a rule that
   branches on `input.mcp.transport` until this is fixed.
 
@@ -546,16 +551,16 @@ deliberate re-TOFU and destructive in the security-relevant direction.
 
 | `mcp_pin_store` | Survives process restart | Shared across replicas | Notes |
 |---|---|---|---|
-| `memory` (default in `config.py:192`) | no | no | correct for a stdio proxy whose lifetime *is* the session; a restart is a free re-TOFU |
+| `memory` (default in `config.py` `NorviqSettings.mcp_pin_store`) | no | no | correct for a stdio proxy whose lifetime *is* the session; a restart is a free re-TOFU |
 | `file` | yes | only if the path is shared storage | atomic write; a corrupt file **raises at construction** rather than degrading to "no pins" |
 | `control-plane` | yes | yes | the chart's default (`values.yaml:349`); pins live in `mcp_tool_pins`, tenant-scoped, RBAC'd, audited, console-visible |
 
 `memory` is **refused on the HTTP transport** — under a stateless protocol any request may land on any
 instance, so a per-process store means replica A approves what replica B has never seen. The HTTP
-driver upgrades it to `control-plane` and logs `NRVQ-MCP-5065` (`http.py:95-104`).
+driver upgrades it to `control-plane` and logs `NRVQ-MCP-5065` (`http.py` `HttpProxy.__init__`).
 
 The control-plane store reads once at startup and then **re-reads on a timer**
-(`mcp_pin_refresh_s`, default 30s, `config.py:200`). Without that refresh a running proxy holds its
+(`mcp_pin_refresh_s`, default 30s, `config.py` `NorviqSettings.mcp_pin_refresh_s`). Without that refresh a running proxy holds its
 startup copy for its whole lifetime, so an operator who revoked approval would see the console update
 while the tool stayed listed and callable until the pod restarted (`pins.py:375-392`).
 
@@ -599,7 +604,8 @@ one attested workload. Only the first page of a paginated listing is read.
 - **HTTP.** The list carries the headers a `tools/list` from that client would carry, not the call's:
   `Authorization`, `Mcp-Session-Id` and `Mcp-Protocol-Version` are copied, and `Mcp-Method` is set to
   `tools/list` when the client's request had an `Mcp-Method`. `Mcp-Name`, `Mcp-Param-*`, cookies and
-  every other header of the call are not sent. A server that authenticates by cookie or by a custom
+  every other header of the call are not sent, and the proxy's upstream client stores no cookie a
+  server sets. A server that authenticates by cookie or by a custom
   header (`X-API-Key` and the like) therefore refuses the list, and the call is decided unscanned. The
   list asks for `Accept-Encoding: identity` and fails on a compressed answer; the answer (one JSON
   body, or an SSE stream read until the matching frame) is capped at 8 MiB in total bytes received.
@@ -633,7 +639,7 @@ reads it into memory (`pins.py:432`).
 The control plane computes its **own** verdict when the proxy reports a catalog to
 `POST /api/v1/mcp/pins/observe` (`norviq/api/routers/mcp.py:154-203`). That report is sent *after*
 the `tools/list` response has already been forwarded, as a background task, and its reply is never
-read (`stdio.py:338-345`, `pins.py:470-476`) — so the server-side verdict is what the durable row and
+read (`stdio.py` `StdioProxy._report_catalog`, `pins.py:470-476`) — so the server-side verdict is what the durable row and
 the console show, not what stopped a call. The router's own module docstring
 (`norviq/api/routers/mcp.py:16-22`) still describes this the other way round; the code above is
 authoritative.
@@ -660,7 +666,7 @@ config (`webhook/mcp_injector.go:400-402`) — not by the API itself.
   request), the call follows `sdk_fallback_mode`, which ships `allow`
   (`norviq/sdk/client/engine.py:181-195`, `:197-229`).
 - **The HTTP driver never reports observations.** `ControlPlanePinStore.flush()` is the only writer to
-  `/mcp/pins/observe`, and only `stdio.py` calls it (`stdio.py:278-282, 343-345`); `http.py` has no
+  `/mcp/pins/observe`, and only `stdio.py` calls it (`stdio.py` `StdioProxy._shutdown, 343-345`); `http.py` has no
   such call. A server fronted with `--http` therefore loads approved pins but never appears in the
   console inventory, so there is nothing for approve/revoke to act on. Use the stdio placement where
   operator-visible approval matters.
@@ -756,9 +762,10 @@ schema violation, `5070` schema not fully enforceable, `5079` cold catalog liste
 `5080` the proxy's cold-catalog list failed, `5081` a late or duplicate answer to it dropped,
 `5082` SSE lines dropped, `5083` the proxy's list superseded by a client listing, `5084` a server
 response dropped because it matches no well-formed answer to a client request, `5085` an upstream
-message over the HTTP size limit, `5087` a session id withheld from the client, `5088` an over-long SSE event id dropped. Latency is recorded as
+message over the HTTP size limit, `5087` a session id withheld from the client, `5088` an over-long SSE event id dropped, `5089` a client message refused for an ambiguous key,
+`5090` a refusal not posted back because too many were in flight. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
-`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085`, `5087` and `5088` are
+`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` and `5087`–`5090` are
 listed in [Error Codes](../error-codes.md) so far.
 
 ---
@@ -809,21 +816,21 @@ individually:
   declared.
 - **Fencing is a request, not a control.** Flagged server-returned content is wrapped in
   `<untrusted-content>` with an instruction to treat it as data and delivered
-  (`firewall.py:100-112`). That is the right default for data the agent asked for — silently returning
+  (`firewall.py` `_fenced`). That is the right default for data the agent asked for — silently returning
   nothing is indistinguishable from a broken tool — but a model that ignores the fence has defeated the
   ingest path.
 - **Output DLP masks PAN and SSN only.** `mask_text` / `mask_structure_counted`
   (`norviq/engine/masking.py:14-16, 60-64`) match card-number and SSN shapes. An API key or a private
   key in a tool result is *not* redacted by this setting. Content past the 1 MiB per-response guard
   budget is fenced but neither scanned nor masked, and says so both to the model and in the log
-  (`firewall.py:88-97, 1545-1589`).
+  (`firewall.py` `_CONTENT_GUARD_BUDGET, 1545-1589`).
 - **The upstream server inherits the proxy's environment.** `asyncio.create_subprocess_exec` is called
-  with no `env=` (`stdio.py:216-222`), so the wrapped MCP server process sees `NRVQ_API_TOKEN` and, under
+  with no `env=` (`stdio.py` `StdioProxy.run`), so the wrapped MCP server process sees `NRVQ_API_TOKEN` and, under
   internal TLS, the client key material. A hostile stdio server package can read them at import time.
   Treat the MCP server image as being inside the trust boundary of the pod's Norviq credential, and
   prefer servers you build or vendor deliberately.
 - **The HTTP driver relays request headers to the upstream.** `authorization` is not in `_HOP_HEADERS`
-  (`http.py:55-58`), so a bearer token the agent holds reaches whatever `--upstream` names. It leaves
+  (`http.py` `_HOP_HEADERS`), so a bearer token the agent holds reaches whatever `--upstream` names. It leaves
   before any JSON-RPC decision exists, so no gate applies to it. Norviq brokers no OAuth on the
   agent-to-server leg and has no grant inventory.
 - **`resources/read` and `sampling/createMessage` are evaluated, but nothing shipped rules on them.**
@@ -831,7 +838,7 @@ individually:
   `"sampling/createMessage"` and honours a block — and no bundled policy or template contains a rule
   for either. That is a policy you write, not a control that is missing.
 - **`--tool-name-prefix` double-prefixes on the answer plane.** `_gate_answer` prefixes the tool name
-  and then calls `_evaluate`, which prefixes again (`firewall.py:1466-1470`, `firewall.py:545-557`).
+  and then calls `_evaluate`, which prefixes again (`firewall.py` `McpFirewall._gate_answer`, `firewall.py` `McpFirewall._evaluate`).
   With the default empty prefix there is no effect; with a prefix set, answer-plane decisions carry a
   doubled `tool_name` and miss the catalog lookup. Leave the flag off until this is fixed.
 

@@ -34,6 +34,7 @@ import contextlib
 import hashlib
 import http.cookiejar
 import json
+import time
 import uuid
 import weakref
 from typing import Any, AsyncIterator
@@ -67,6 +68,10 @@ _HOP_HEADERS = frozenset({
 # puts on one JSON-RPC line: far above a real catalogue, and it keeps a server from streaming without
 # end into memory while a client's call waits.
 _OWN_LIST_MAX_BYTES = 8 * 1024 * 1024
+# Refusals of server requests posted back upstream at once, and how long one may take. The pool has 32
+# connections and the client's own requests need them.
+_MAX_POST_BACKS = 8
+_POST_BACK_TIMEOUT_S = 10.0
 # Resumption bookkeeping, per attested caller (`_EventIds`). A resume with an evicted id resumes
 # nothing (its responses are dropped), which is the fail-closed direction.
 _MAX_EVENT_IDS = 4096                       # entries per caller
@@ -94,6 +99,9 @@ class HttpProxy:
         self._engine: PolicyEngineClient | None = None
         # Keyed by ATTESTED identity, never by anything the caller sends. See _firewall_for.
         self._firewalls: dict[str, McpFirewall] = {}
+        # Post-backs in flight, and when the cap was last logged (see `_spawn_post_back`).
+        self._post_backs = 0
+        self._post_back_logged = 0.0
         # Per attested caller (its firewall): minted SSE event id -> (the server's event id, the POST
         # scope it came from, or None for a GET stream). See `_mint_event_id` and `_EventIds`. Keyed by
         # the firewall OBJECT, weakly, so an id minted for one caller is never found for another and
@@ -719,7 +727,7 @@ class HttpProxy:
         if result.reply is not None:
             # A server-initiated request we refused. On this transport the reply travels back as a
             # separate POST rather than inline, so it is dispatched without blocking the stream.
-            asyncio.create_task(self._post_back(result.reply, corr.upstream_headers if corr else {}))
+            self._spawn_post_back(result.reply, corr.upstream_headers if corr else {})
         self._report_catalog(fw, result)
         if result.forward is None:
             return b""
@@ -749,6 +757,32 @@ class HttpProxy:
         if catalog is not None:
             asyncio.create_task(self._pin_store.flush(catalog))
 
+    def _spawn_post_back(self, payload: bytes, connection: dict[str, str]) -> None:
+        """Start a post-back, unless `_MAX_POST_BACKS` are already in flight.
+
+        Each refused server request posts one refusal, and the server chooses how many it sends and
+        whether it ever answers them: uncapped, a stream of refusable requests held thousands of tasks
+        and the shared connection pool the client's own requests need. Past the cap the refusal is
+        not posted (logged, NRVQ-MCP-5090); the server request stays unanswered, which is what a
+        server that floods them gets.
+        """
+        if self._post_backs >= _MAX_POST_BACKS:
+            now = time.monotonic()
+            if now - self._post_back_logged >= 60.0:
+                self._post_back_logged = now
+                log.warning("nrvq.mcp.http.post_back_dropped", limit=_MAX_POST_BACKS,
+                            server=self._server_id, code="NRVQ-MCP-5090",
+                            detail="too many refusals in flight; this one was not posted back")
+            return
+        self._post_backs += 1
+
+        async def _run() -> None:
+            try:
+                await self._post_back(payload, connection)
+            finally:
+                self._post_backs -= 1
+        asyncio.create_task(_run())
+
     async def _post_back(self, payload: bytes, connection: dict[str, str]) -> None:
         """POST the proxy's refusal of a server request back upstream.
 
@@ -763,7 +797,8 @@ class HttpProxy:
         headers = {**connection, "content-type": "application/json",
                    "accept": f"application/json, {_SSE}", "accept-encoding": "identity"}
         with contextlib.suppress(Exception):
-            async with self._client.stream("POST", self._upstream, headers=headers, content=payload):
+            async with self._client.stream("POST", self._upstream, headers=headers, content=payload,
+                                           timeout=_POST_BACK_TIMEOUT_S):
                 pass
 
     # ------------------------------------------------------------------ lifecycle
