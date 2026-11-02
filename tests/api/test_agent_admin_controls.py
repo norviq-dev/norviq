@@ -719,3 +719,39 @@ async def test_delete_refuses_a_cap_that_exists_only_in_redis(env) -> None:
     resp = await client.delete(f"/api/v1/agents/{spiffe}", headers=_hdr())
     assert resp.status_code == 409 and "trust cap" in resp.json()["detail"]
     assert await _row(spiffe) is not None
+
+
+async def test_a_boot_warm_never_writes_back_a_cap_or_freeze_an_admin_changed_meanwhile(env) -> None:
+    """FAIL-ON-BUG (raised in review of the boot-warm retry). A starting pod's warm reads every frozen or
+    capped row, then writes each to the store. Between the two another replica tightened one cap and lifted
+    one freeze; the warm then wrote the stale snapshot back: the looser cap, and a freeze nobody holds.
+    Now each agent is re-read under its admin lock just before its SET."""
+    _, client, cache, ids = env
+    capped, frozen = _agent(ids, "warm-cap"), _agent(ids, "warm-frozen")
+    assert (await client.put(f"/api/v1/agents/{capped}/trust", json={"score": 0.5}, headers=_hdr())).status_code == 200
+    assert (await client.put(f"/api/v1/agents/{frozen}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    gate, hit = asyncio.Event(), asyncio.Event()
+
+    class _PauseAfterSnapshot(_Proxy):
+        async def execute(self, stmt, *a, **k):
+            result = await self._real.execute(stmt, *a, **k)
+            if "frozen = true OR trust_cap IS NOT NULL" in str(stmt) and not hit.is_set():
+                hit.set()
+                await gate.wait()
+            return result
+
+    async def _factory():
+        gen = get_session()
+        try:
+            yield _PauseAfterSnapshot(await gen.__anext__())
+        finally:
+            await gen.aclose()
+
+    warm = asyncio.create_task(warm_agent_overrides(cache, _factory))
+    await asyncio.wait_for(hit.wait(), 5)
+    assert (await client.put(f"/api/v1/agents/{capped}/trust", json={"score": 0.2}, headers=_hdr())).status_code == 200
+    assert (await client.put(f"/api/v1/agents/{frozen}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+    gate.set()
+    await asyncio.wait_for(warm, 10)
+    assert float(await cache._client().get(f"agent_trust_override:{capped}")) == pytest.approx(0.2)
+    assert await cache._client().get(f"agent_frozen:{frozen}") is None, "the warm re-froze a lifted freeze"

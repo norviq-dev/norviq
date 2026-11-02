@@ -652,13 +652,26 @@ async def warm_agent_overrides(cache, session_factory=get_session) -> int:
         rows = (await session.execute(
             text("SELECT spiffe_id, frozen, trust_cap FROM agent_registry WHERE frozen = true OR trust_cap IS NOT NULL")
         )).mappings().all()
-        for r in rows:
-            if r["frozen"]:
-                await cache._client().set(f"agent_frozen:{r['spiffe_id']}", "1")
+        for candidate in rows:
+            # Under the agent's admin lock (_lock_agent) and from a fresh read. The list above is a snapshot:
+            # between it and the SET another replica may tighten a cap or lift a freeze, and writing the
+            # snapshot afterwards put the stale, looser cap back (or re-froze a cleared agent) with nothing to
+            # correct it until an admin wrote again. Locked, an admin write lands either wholly before this
+            # read or wholly after this SET. One short transaction per agent, so a large fleet never holds
+            # thousands of advisory locks at once.
+            spiffe_id = candidate["spiffe_id"]
+            await _lock_agent(session, spiffe_id)
+            fresh = (await session.execute(
+                text("SELECT spiffe_id, frozen, trust_cap FROM agent_registry WHERE spiffe_id = :s"), {"s": spiffe_id}
+            )).mappings().all()
+            r = next((x for x in fresh if x["spiffe_id"] == spiffe_id), None)
+            if r is not None and r["frozen"]:
+                await cache._client().set(f"agent_frozen:{spiffe_id}", "1")
                 seeded += 1
-            elif r["trust_cap"] is not None:
-                await cache.set_trust_override(r["spiffe_id"], float(r["trust_cap"]))
+            elif r is not None and r["trust_cap"] is not None:
+                await cache.set_trust_override(spiffe_id, float(r["trust_cap"]))
                 seeded += 1
+            await session.commit()
         log.info("nrvq.api.agent.overrides_warmed", count=seeded, code="NRVQ-API-7034")
     finally:
         await provider.aclose()

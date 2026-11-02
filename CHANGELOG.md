@@ -175,11 +175,13 @@ because they should be installed.
 - **`PUT /api/v1/agents/{spiffe_id}/trust` answers `503` when the freeze or cap was not persisted.** It
   used to log `NRVQ-API-7033` and answer `200`. A freeze is still applied at once and the `503` says it
   is not durable yet; a cap or a clear changes nothing until the write succeeds. A freeze or cap on an
-  agent the registry has not seen yet now creates its registry row, so it survives a Redis restart.
-  Before, it lived only in Redis. With Redis down a freeze is persisted and answers `503` (it takes
+  agent the registry has not seen yet now creates its registry row, so the next API start writes it
+  back after a store loss. Before, it lived only in Redis. With Redis down a freeze is persisted and answers `503` (it takes
   effect at the next API start) where it was a `500`. Admin trust writes for one agent (PUT trust,
   DELETE, the reset) are serialized by a per-agent Postgres lock, so two of them on different replicas
-  no longer leave the registry and Redis disagreeing. The three routes answer `422` for an id that is
+  no longer leave the registry and Redis disagreeing, and a starting API's write-back of freezes and
+  caps takes the same lock per agent, so it no longer restores a cap or freeze another replica changed
+  while it ran. The three routes answer `422` for an id that is
   not a well-formed SPIFFE ID. `NRVQ-API-7031` names the actor.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck

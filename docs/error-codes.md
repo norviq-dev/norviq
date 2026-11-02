@@ -23,25 +23,26 @@ individually described.
 
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
-| API | 87 | `norviq/api/main.py`, `norviq/api/routers/*` |
-| WHK | 55 | `webhook/main.go`, `webhook/handler.go`, `webhook/controller.go`, `webhook/injector.go` |
-| ENG | 46 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
-| DB | 42 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
-| FLT | 36 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
-| SDK | 29 | `norviq/sdk/*` |
-| REG | 23 | `norviq/engine/policy_loader.py` |
-| SDC | 20 | `norviq/sidecar/*` |
-| AUTH | 17 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py` |
+| API | 104 | `norviq/api/main.py`, `norviq/api/routers/*` |
+| WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/controller.go`, `webhook/injector.go` |
+| ENG | 54 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
+| MCP | 49 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
+| DB | 45 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
+| FLT | 39 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
+| SDK | 38 | `norviq/sdk/*` |
+| REG | 25 | `norviq/engine/policy_loader.py` |
+| SDC | 30 | `norviq/sidecar/*` |
+| AUTH | 29 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py` |
 | AUD | 13 | `norviq/engine/audit_emitter.py`, `norviq/api/audit_retention.py` |
 | GRP | 10 | `norviq/engine/graph/*` |
-| RED | 10 | `norviq/redteam/*`, `norviq/api/routers/redteam.py` |
+| RED | 12 | `norviq/redteam/*`, `norviq/api/routers/redteam.py` |
 | TEL | 8 | `norviq/telemetry/*` |
-| IDT | 7 | `norviq/engine/identity.py` |
+| IDT | 8 | `norviq/engine/identity.py` |
 | CLI | 5 | `norviq/cli/main.py`, `norviq/cli/api_client.py` |
-| SIEM | 3 | `norviq/api/siem.py` |
+| SIEM | 6 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **410** (including `*-DEBUG-*` traces).
+Total unique codes: **535** (including `*-DEBUG-*` traces). Counted 2026-11-02 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
 
 ## API
 

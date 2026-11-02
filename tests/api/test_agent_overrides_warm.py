@@ -63,6 +63,9 @@ class _Session:
             raise self._boom
         return _Rows(self._rows)
 
+    async def commit(self) -> None:
+        """warm_agent_overrides commits once per agent, releasing that agent's admin lock."""
+
 
 def _factory(*sessions):
     """A get_session stand-in that hands out the given sessions in order, one per call."""
