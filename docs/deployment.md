@@ -180,11 +180,14 @@ kubectl get mutatingwebhookconfiguration norviq-sidecar-injector \
   -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | head -c 20   # non-empty
 ```
 
-**Runtime guarantees** (already live on the dev chart, not prod-only): `initContainers` gate
-api/engine on Postgres+Redis and webhook on the API being reachable, so Helm's apply order never
-matters; `/readyz` returns 503 (drains traffic, no CrashLoop) when a backend is unreachable and
-self-heals on reconnect; `preStop` sleep + `terminationGracePeriodSeconds: 30` drain in-flight requests
-during a rollout.
+**Runtime guarantees** (already live on the dev chart, not prod-only): `initContainers` gate the
+webhook on the API being reachable, and gate api/engine on Postgres+Redis **whenever the chart can name
+the address** — the bundled datastores, or an external one with `postgresql.host` / `redis.host` set.
+With an external datastore given by `existingSecret` alone there is **no** datastore gate: the address
+is inside your Secret, which the chart cannot read at template time, so api and engine start at once
+and the order matters (see "Dependency waits" below). Once running, `/readyz` returns 503 (drains
+traffic, no CrashLoop) when a backend is unreachable and self-heals on reconnect; `preStop` sleep +
+`terminationGracePeriodSeconds: 30` drain in-flight requests during a rollout.
 
 ### What the chart actually renders
 
@@ -215,6 +218,31 @@ api/engine → Postgres and Redis, and webhook → API. Every one runs `runAsNon
 / `readOnlyRootFilesystem` / all caps dropped / `RuntimeDefault` seccomp, with bounded requests and
 limits — so the container that runs *before* the hardened app container isn't the least-hardened thing
 in the pod, and can't drag the pod's QoS class down.
+
+The datastore waits render only when the chart knows the host. Rendered with `helm template`,
+`postgresql.enabled=false redis.enabled=false` and `existingSecret=my-pg` / `my-redis`:
+
+| Values | api | engine | webhook |
+|---|---|---|---|
+| bundled (default) | `wait-for-postgres`, `wait-for-redis` | same | `wait-for-api` |
+| `existingSecret` only | **none** | **none** | `wait-for-api` |
+| `existingSecret` + `postgresql.host=mydb.example.com` + `redis.host=mycache.example.com` | `nc -z mydb.example.com 5432`, `nc -z mycache.example.com 6379` | same | `wait-for-api` |
+
+Without the gate, startup against a datastore that is not reachable yet goes like this. The **API**
+connects to Postgres first, in schema init, which retries only a timeout (5 attempts, 3/6/9/12 s
+apart); a refused or unresolvable host fails startup at once (`NRVQ-DB-DEBUG-2-ERR`). It then retries
+the Redis connect 5 times, sleeping 1, 2, 4 and 8 s between attempts (about 15 s), and exits with
+`NRVQ-REG-9034`. The **engine** does not retry either connection: it exits on the first failure, and
+waits (up to 60 s) only for the API to create the schema. Either way the kubelet restarts the container
+with its usual backoff, so an unreachable or mistyped datastore shows as `CrashLoopBackOff` with those
+log lines, not as a pod waiting in `Init`. A managed datastore that is already up when you install is
+unaffected.
+
+To get the wait back, set `postgresql.host` / `redis.host` (and `port`, if not 5432 / 6379) next to
+`existingSecret`. That only adds the gate: the pods still read `NRVQ_PG_URL` / `NRVQ_REDIS_URL` from your
+Secret. Keep the two in agreement — a `host` that differs from the host in the Secret's URL makes the
+gate wait on the wrong address, and a name that never resolves leaves api and engine in `Init`
+forever.
 
 **The injected sidecar gets a tmpfs at `/tmp`** — an `emptyDir` with `medium: Memory` and a 16Mi
 `sizeLimit`, mounted into the **sidecar only**, never the app container. It is required, not

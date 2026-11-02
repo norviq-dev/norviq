@@ -53,11 +53,14 @@ log.info(
 
 
 async def _connect_with_backoff(coro_factory, name: str, retry_code: str, fail_code: str, attempts: int = 5):
-    """Retry a startup connection with exponential backoff (1,2,4,8,16s).
+    """Retry a startup connection: `attempts` tries, sleeping 1, 2, 4, 8 s between them (15 s at 5).
 
-    Defense-in-depth atop the initContainers: a backend may accept TCP before it is
-    query-ready, so retry rather than crash. Raises after the final attempt so the pod
-    restarts (initContainers should normally prevent reaching that).
+    A backend may accept TCP before it is query-ready, so retry rather than crash. Raises after the
+    final attempt so the pod restarts. The chart's wait initContainers do not always run first: with
+    an external datastore given only by `existingSecret` the chart cannot name the host, renders no
+    gate, and this retry is the only wait there is (docs/deployment.md, "Dependency waits"). It does
+    not cover Postgres reachability: `init_db` only builds the engine, and the first connection is
+    `create_tables()`, which retries timeouts only.
     """
     delay = 1
     for attempt in range(1, attempts + 1):

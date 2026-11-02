@@ -71,6 +71,16 @@ helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n no
   --set redis.enabled=false      --set redis.existingSecret=my-redis
 ```
 
+Add `--set postgresql.host=mydb.example.com --set redis.host=mycache.example.com` (the hosts in those
+URLs) if api and engine should wait for the datastores before they start. The chart cannot read the
+address out of your Secret, so with `existingSecret` alone it renders **no** wait init containers: api
+and engine start at once and rely on their own startup handling, which is short (the API retries Redis
+for about 15 s and does not retry a refused Postgres; the engine retries neither) and ends in a
+container restart, so a datastore that is not reachable yet shows as `CrashLoopBackOff` until it is.
+`host` only adds the wait: the URL still comes from the Secret. A `host` that disagrees with the
+Secret's URL makes the wait watch the wrong address. See
+[deployment.md, "Dependency waits"](deployment.md#what-the-chart-actually-renders).
+
 `existingSecretKey` defaults to `url`. Keep `config.dbSslMode` at its derived `require` (any external/HA host) for a managed
 database; the bundled Postgres has no TLS listener, which is why a local install overrides it.
 
@@ -283,7 +293,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `redis.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a Spotahome `RedisFailover` (`databases.spotahome.com/v1`, Sentinel) instead of the single StatefulSet — requires that operator pre-installed. Swap `templates/redis-ha.yaml` + `redis.ha.serviceName` for a different Redis HA stack. `redis.ha.replicas` (`3`), `redis.ha.serviceName` (`norviq-redis-ha`), `redis.ha.image` (`redis:7.4-alpine`: the Redis 7.4 that 0.2.5's failover ran, RSALv2/SSPLv1. Kept off Valkey on purpose, because Valkey 8.1 cannot load the failover's RDB-12 data or sync from its 7.4 master; moving HA to Valkey means a renamed failover on fresh volumes). |
 | `redis.resources` | `100m/128Mi` req, `300m/256Mi` limit | Per-pod CPU/memory. |
 | `redis.port` | `6379` | |
-| `redis.enabled` / `redis.host` / `redis.existingSecret` | `true` / `""` / `""` | `false` = bring your own cache; then `host` (or `existingSecret`, holding the full URL under `existingSecretKey`, default `url`) is required. |
+| `redis.enabled` / `redis.host` / `redis.existingSecret` | `true` / `""` / `""` | `false` = bring your own cache; then `host` (or `existingSecret`, holding the full URL under `existingSecretKey`, default `url`) is required. With `existingSecret`, `host` (plus `port`) is optional and only renders the `wait-for-redis` init container on api/engine; without it they start at once, and a datastore that is not reachable yet shows as container restarts. It must match the host in the Secret's URL. |
 | `redis.password` | `""` (generated) | Empty = the chart generates a strong password on first install and reuses it on upgrade (see "Datastore credentials are generated, not shipped"). Set a value to bring your own; required when `redis.ha.enabled`. |
 | `redis.storage` | `1Gi` | Size of the store's PersistentVolumeClaim (`norviq-redis-pvc`; under HA, one per RedisFailover pod). The store is persistent: the single instance keeps its data in the `valkey/` subdirectory, and the volume root holds whatever 0.2.5's Redis 7.4 wrote, left in place for `helm rollback`. |
 
@@ -296,7 +306,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `postgresql.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a CloudNativePG `Cluster` (3 instances) instead of the single StatefulSet, and points the API's PG URL at its service — requires the CloudNativePG operator pre-installed. `postgresql.ha.instances` (`3`), `postgresql.ha.serviceName` (`norviq-postgresql-ha-rw`). |
 | `postgresql.resources` | `200m/256Mi` req, `500m/512Mi` limit | Per-pod CPU/memory. |
 | `postgresql.port` | `5432` | |
-| `postgresql.enabled` / `postgresql.host` / `postgresql.existingSecret` | `true` / `""` / `""` | `false` = bring your own database (the usual production shape); then `host` (or `existingSecret`, holding the full URL) is required. |
+| `postgresql.enabled` / `postgresql.host` / `postgresql.existingSecret` | `true` / `""` / `""` | `false` = bring your own database (the usual production shape); then `host` (or `existingSecret`, holding the full URL) is required. With `existingSecret`, `host` (plus `port`) is optional and only renders the `wait-for-postgres` init container on api/engine; without it they start at once, and a datastore that is not reachable yet shows as container restarts. It must match the host in the Secret's URL. |
 | `postgresql.database`/`username`/`password` | `norviq` / `norviq` / `""` (generated) | Empty password = the chart generates a strong one on first install and reuses it on upgrade. Set a value to bring your own; required when `postgresql.ha.enabled`. |
 | `postgresql.storage` | `5Gi` | PVC size. |
 
