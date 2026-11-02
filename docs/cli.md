@@ -435,22 +435,28 @@ on the agent's first call (`norviq/api/db/session.py::upsert_agent_registry`) do
 columns. Every admin trust write for one agent — `reset-trust`, `freeze`, `reset-history` and
 `DELETE /api/v1/agents/{spiffe_id}` — holds one per-agent Postgres lock for the whole operation,
 store write included (`norviq/api/routers/agents.py::_agent_lock`), so two of them on different replicas
-cannot interleave. The order of each change depends on its direction against the registry state read
-under that lock (`norviq/api/routers/agents.py::_is_tightening`), so that the store is never looser than
-the registry whatever fails:
+cannot interleave; within one API process a second change to the same agent waits in-process, without a
+database connection. The order of each change depends on its direction against the registry state read
+under that lock (`norviq/api/routers/agents.py::_is_tightening`). When something fails, the store ends
+stricter than or equal to the registry — except when the store itself cannot be written for a tightening:
+then the registry holds the new, stricter state, the store keeps the previous one, and the `503` says
+"NOT live" until the next successful change to that agent or the next API start.
 
 | Change | Order | If something fails (exit non-zero on a `503`) |
 |---|---|---|
-| Tightening: freeze, a cap added or lowered, or re-sending the current state | store, then registry | Commit failed or unacknowledged: "Applied live, but it may NOT be persisted" — retry. Store down: "Persisted but NOT live", applied at the next API start — or retry. |
-| Loosening: a freeze lifted, a cap raised or removed | registry, then store | Commit failed or unacknowledged: "not applied"; the store still enforces the previous, stricter state. Store failed after the commit: "Persisted, but the store still enforces the previous, stricter state" until you retry. |
+| Tightening: freeze, a cap added or lowered, or re-sending the current state | store, then registry | Commit failed or unacknowledged: "Applied live, but it may NOT be persisted" — retry. Store did not take it: "Persisted but NOT live" — retry. Both: "Not confirmed: the change may be persisted ... NOT live" — retry. |
+| Loosening: a freeze lifted, a cap raised or removed | registry, then store | Commit failed or unacknowledged: "not applied"; the store still enforces the previous, stricter state. Store failed after the commit: "Persisted, but the store still enforces the previous, stricter state" until you retry — or, if the store lost the agent's keys meanwhile (a flush), "the store's state for this agent is unknown". |
 
-A loosening reaches the store only through a write fenced on `agent_trust_owner:<id>`, so a request that
-lost its lock after committing can never land it over a newer change. A change that finds the agent
-locked by another one for more than 3 s exits on a `503` ("another admin change ... is in progress") and
-applies nothing (`NRVQ-API-7149`); store calls under the lock are cut off at 2 s. With the database down
-a freeze is still applied live, not durable (retry it), and nothing else changes. The id must start with
-`spiffe://`, as the evaluator requires, be at most 512 characters as `POST /api/v1/keys` allows, and not
-be empty after the prefix (`422` otherwise); any id an API key can be minted for is accepted. The retention
+Every store write is fenced on `agent_trust_owner:<id>`, claimed under the lock: a write that outlives
+its lock (cut off by the 2 s store bound but already sent, or from a request whose connection dropped)
+does nothing once another change has claimed the agent. The boot warm claims and writes the same way. A
+change that finds the agent locked by another one for more than 3 s exits on a `503` ("another admin
+change ... is in progress") and applies nothing (`NRVQ-API-7149`) — except a freeze, the kill switch: it
+claims the fence without the lock and is applied live, so the stuck change's later write cannot lift it
+("Freeze applied live but NOT persisted"; retry once the other change ends). The same holds with the
+database down or the connection pool exhausted (the `503` names which). The id must start with
+`spiffe://` (what the evaluator enforces), be at most 512 characters (what `POST /api/v1/keys` stores) and
+not be empty after the prefix (`422` otherwise); whitespace and glob characters are accepted. The retention
 pruner never ages out a frozen or capped agent
 (`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
 

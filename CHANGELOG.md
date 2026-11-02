@@ -179,8 +179,11 @@ because they should be installed.
   takes effect at the next API start) where it was a `500`; a lift changes nothing. Admin trust writes for one agent (PUT trust,
   DELETE, the reset) are serialized by a per-agent Postgres lock, so two of them on different replicas
   no longer leave the registry and Redis disagreeing. The lock is held across the store write, and a
-  tightening reaches the store before the registry while a loosening reaches it only after its commit,
-  so whatever fails the store is never looser than the registry. A starting API's write-back of freezes
+  tightening reaches the store before the registry while a loosening reaches it only after its commit;
+  every store write is fenced, so a late one cannot land over a newer change. When something fails the
+  store is never looser than the registry, except when the store itself cannot take a tightening, which
+  the `503` reports as "NOT live". A freeze that finds another change in progress, or no database, is
+  still applied live. A starting API's write-back of freezes
   and caps takes the same locks in batches, so it no longer restores a cap or freeze another replica
   changed while it ran, and a retried write-back resumes where it stopped. The three routes answer
   `422` for an id the evaluator and `POST /api/v1/keys` would not accept (no `spiffe://` prefix, empty,
@@ -235,10 +238,11 @@ freeze or cap lifted since: the restart adds what Postgres holds and removes not
 with `norviq agent reset-trust <id> --score 1.0` (which clears a cap too; `--score <cap>` lifts the
 freeze and keeps that cap). Details in docs/trust-score-design.md §5.
 
-An admin trust change (`PUT /api/v1/agents/{spiffe_id}/trust`) that fails part-way answers `503` and
-leaves the store stricter than the registry, never looser: a tightening may be live without being
-persisted, and a loosening that the registry took may not be live yet. Both say so in the `503`; retry the
-change.
+An admin trust change (`PUT /api/v1/agents/{spiffe_id}/trust`) that fails part-way answers `503` saying
+which state it left: a tightening may be live without being persisted, a loosening the registry took may not
+be live yet, and a tightening the store could not take is persisted but NOT live (the store then enforces
+the previous, looser state until the next successful change to that agent or the next API start). Retry
+the change.
 
 ## [0.2.5] — 2026-08-20 — log codes that named two things at once
 

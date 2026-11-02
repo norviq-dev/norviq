@@ -131,6 +131,18 @@ class _Cache:
     async def set_trust_override(self, spiffe_id, score):
         await self._client().set(f"agent_trust_override:{spiffe_id}", str(float(score)))
 
+    async def warm_admin_trust_controls(self, token, entries):
+        """RedisCache's fenced warm batch, reduced to its effect here: add each freeze or cap, in order."""
+        client = self._client()
+        outcomes = []
+        for spiffe_id, frozen, cap in entries:
+            if frozen:
+                await client.set(f"agent_frozen:{spiffe_id}", "1")
+            else:
+                await client.set(f"agent_trust_override:{spiffe_id}", str(float(cap)))
+            outcomes.append(1)
+        return outcomes
+
 
 _FROZEN = {"spiffe_id": "spiffe://c/ns/a/sa/x", "frozen": True, "trust_cap": None}
 _CAPPED = {"spiffe_id": "spiffe://c/ns/a/sa/y", "frozen": False, "trust_cap": 0.3}

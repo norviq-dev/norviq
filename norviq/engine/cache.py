@@ -644,16 +644,28 @@ class RedisCache:
         """Remove the admin trust cap (score cleared / set to 1.0 / frozen)."""
         await self._client().delete(f"agent_trust_override:{spiffe_id}")
 
-    # Fence for a LOOSENING admin trust write (norviq/api/routers/agents.py::_loosen). Every admin write claims
-    # agent_trust_owner:<id> under the agent's lock before it touches the store; a loosening reaches the store
-    # only after its registry commit, and only if it still owns the agent. A request that lost its lock after
-    # committing (its connection dropped) can then never land a loosening over a writer that took over.
+    # The owner fence on every admin trust store write (norviq/api/routers/agents.py::update_trust and the boot
+    # warm). Each writer claims agent_trust_owner:<id> under the agent's lock, then writes through a script that
+    # does nothing unless it still owns the agent. A write that outlives its lock — cut off by a timeout while
+    # already on the wire, or from a request whose connection dropped — can then never land over a writer that
+    # took over. A missing owner key (a flush, an eviction) fences everyone off: the next claim restores it.
     _OWNER_TTL_MS = 30_000
+    FENCE_APPLIED, FENCE_LOST, FENCE_MISSING = 1, 0, -1
     _FENCED_CONTROL_LUA = """
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+local owner = redis.call('GET', KEYS[1])
+if not owner then return -1 end
+if owner ~= ARGV[1] then return 0 end
 if ARGV[2] == '1' then redis.call('SET', KEYS[2], '1') else redis.call('DEL', KEYS[2]) end
 if ARGV[3] ~= '' then redis.call('SET', KEYS[3], ARGV[3]) else redis.call('DEL', KEYS[3]) end
 if ARGV[4] ~= '' then redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[5]) end
+return 1
+"""
+    # The boot warm's write: ADDS what Postgres holds (a freeze, else a cap) and deletes nothing, fenced the same way.
+    _FENCED_WARM_LUA = """
+local owner = redis.call('GET', KEYS[1])
+if not owner then return -1 end
+if owner ~= ARGV[1] then return 0 end
+if ARGV[2] == '1' then redis.call('SET', KEYS[2], '1') elseif ARGV[3] ~= '' then redis.call('SET', KEYS[3], ARGV[3]) end
 return 1
 """
 
@@ -663,32 +675,29 @@ return 1
 
     async def apply_admin_trust_control_if_owner(
         self, spiffe_id: str, token: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
-    ) -> bool:
-        """apply_admin_trust_control, atomically, only while ``token`` still owns the agent. True if applied."""
+    ) -> int:
+        """Write one agent's whole admin control state — freeze flag, cap, and optionally the displayed score —
+        atomically, and only while ``token`` owns the agent. Returns FENCE_APPLIED, FENCE_LOST (another writer
+        owns it) or FENCE_MISSING (the owner key is gone, so the store's state is unknown). One script, so a
+        freeze-to-cap change never has an instant with neither, as separate DEL and SET commands did."""
         keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}",
                 f"trust:{spiffe_id}"]
         args = [token, "1" if frozen else "0", "" if cap is None else str(float(cap)),
                 "" if display is None else display.model_dump_json(),
                 str(self._jitter_ttl(settings.redis_ttl_trust_s))]
-        return bool(await self._client().eval(self._FENCED_CONTROL_LUA, len(keys), *keys, *args))
+        return int(await self._client().eval(self._FENCED_CONTROL_LUA, len(keys), *keys, *args))
 
-    async def apply_admin_trust_control(
-        self, spiffe_id: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
-    ) -> None:
-        """Write one agent's whole admin control state — freeze flag, cap, and optionally the displayed score —
-        in ONE MULTI. Set as separate commands, a freeze-to-cap change deleted agent_frozen: before writing the
-        cap, so there was an instant with neither, and a Redis error between the two left neither for good."""
-        frozen_key, cap_key = f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}"
-        async with self._client().pipeline(transaction=True) as pipe:
-            if frozen:
-                await pipe.set(frozen_key, "1")
-            else:
-                await pipe.delete(frozen_key)
-            if cap is not None:
-                await pipe.set(cap_key, str(float(cap)))
-            else:
-                await pipe.delete(cap_key)
-            if display is not None:
-                await pipe.setex(f"trust:{spiffe_id}", self._jitter_ttl(settings.redis_ttl_trust_s),
-                                 display.model_dump_json())
+    async def warm_admin_trust_controls(self, token: str, entries: list[tuple[str, bool, float | None]]) -> list[int]:
+        """The boot warm's batch: claim every agent for ``token``, then add each agent's freeze or cap through the
+        fence, in two pipelines. A cut-off attempt's late writes are no-ops once an admin write re-claims."""
+        client = self._client()
+        async with client.pipeline(transaction=False) as pipe:
+            for spiffe_id, _frozen, _cap in entries:
+                await pipe.set(f"agent_trust_owner:{spiffe_id}", token, px=self._OWNER_TTL_MS)
             await pipe.execute()
+        async with client.pipeline(transaction=False) as pipe:
+            for spiffe_id, frozen, cap in entries:
+                keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}"]
+                await pipe.eval(self._FENCED_WARM_LUA, 3, *keys, token, "1" if frozen else "0",
+                                "" if cap is None else str(float(cap)))
+            return [int(r) for r in await pipe.execute()]

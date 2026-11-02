@@ -156,12 +156,15 @@ class FakeCache:
 
     async def apply_admin_trust_control_if_owner(
         self, spiffe_id: str, token: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
-    ) -> bool:
-        """The fenced write: applies only while ``token`` owns the agent."""
-        if await self.get(f"agent_trust_owner:{spiffe_id}") != token:
-            return False
+    ) -> int:
+        """The fenced write: applies only while ``token`` owns the agent (1), else 0 / -1 (no owner)."""
+        owner = await self.get(f"agent_trust_owner:{spiffe_id}")
+        if owner is None:
+            return -1
+        if owner != token:
+            return 0
         await self.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display)
-        return True
+        return 1
 
     async def apply_admin_trust_control(
         self, spiffe_id: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
