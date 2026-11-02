@@ -202,7 +202,11 @@ both transports, and a JSON object that names a key twice, or two keys that diff
 compatibility form, counts as undecodable, since parsers disagree on which value wins and some match
 keys case-insensitively. A client message whose key differs from a protocol field only that way is
 refused (`NRVQ-MCP-5089`), and an allowed client message is forwarded as the message the proxy decoded
-(compact JSON, every member kept in order), not as the client's bytes (`firewall.py` `McpFirewall.on_server_message`, `http.py` `HttpProxy._mediate_server_bytes`).
+(compact JSON, every member kept in order), not as the client's bytes. In the other direction, a
+server object the proxy reads by member name (a list entry, a result, a content block, a prompt or
+sampling message, a notification's params) with a key that differs from such a member only by case or
+compatibility form fails closed: list entries are withheld (`mcp_a_alias_key`), other messages are
+refused or replaced (`NRVQ-MCP-5091`) (`firewall.py` `McpFirewall.on_server_message`, `http.py` `HttpProxy._mediate_server_bytes`).
 
 A server response is mediated as the answer to the client request it answers, and a response that
 answers none is dropped (`NRVQ-MCP-5084`). Ids are matched the way the reference client SDKs match
@@ -763,9 +767,10 @@ schema violation, `5070` schema not fully enforceable, `5079` cold catalog liste
 `5082` SSE lines dropped, `5083` the proxy's list superseded by a client listing, `5084` a server
 response dropped because it matches no well-formed answer to a client request, `5085` an upstream
 message over the HTTP size limit, `5087` a session id withheld from the client, `5088` an over-long SSE event id dropped, `5089` a client message refused for an ambiguous key,
-`5090` a refusal not posted back because too many were in flight. Latency is recorded as
+`5090` a refusal not posted back because too many were in flight, `5091` a server message with an
+alias key withheld. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
-`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` and `5087`–`5090` are
+`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` and `5087`–`5091` are
 listed in [Error Codes](../error-codes.md) so far.
 
 ---

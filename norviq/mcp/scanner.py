@@ -497,6 +497,10 @@ def _walk_strings(node: Any, path: str, out: list[tuple[str, str]], depth: int =
 _SCHEMA_TEXT_KEYS = frozenset({"description", "title", "default", "const", "examples", "$comment", "pattern"})
 
 
+def _fold_key(key: str) -> str:
+    return unicodedata.normalize("NFKC", key).casefold()
+
+
 def _scan_pairs(
     pairs: Iterable[tuple[str, str]],
     report: ScanReport,
@@ -614,7 +618,9 @@ def scan_tool_definition(tool: dict, budget: int = _MAX_TOTAL_SCAN_CHARS) -> Sca
         leaf = path.rsplit(".", 1)[-1].split("[", 1)[0]
         # Scan free-text schema keys always; scan other values only when long enough to hide prose in
         # (an enum of "read"/"write" is not a payload and scanning it is pure noise).
-        return leaf in _SCHEMA_TEXT_KEYS or len(value) > 80
+        # Folded, so `Description` or `deſcription` inside a schema is read as the prose it is to a
+        # case-insensitive client (Go's encoding/json), not skipped as an unknown short leaf.
+        return _fold_key(leaf) in _SCHEMA_TEXT_KEYS or len(value) > 80
 
     # `low` for the walk bound only: see `_scan_pairs`. The `wanted` predicate above discards short
     # non-prose leaves, so the nodes a walk bound cuts off here are overwhelmingly `enum` values that

@@ -535,6 +535,11 @@ class Correlation:
         return view
 
 
+# How many nodes of a call's arguments `_sets_transport_headers` will walk. Past it the call is refused:
+# a tree the proxy cannot inspect is not one it can say sets no header. 65536 is far above a real
+# argument object (the old bound, 4096, was below a large but legitimate array argument).
+_HEADER_WALK_NODES = 65536
+
 # The members the firewall READS from a client message, at the top level and in `params`. A key that
 # differs from one of these only by case or compatibility form is read by this proxy as absent and by a
 # case-insensitive upstream (Go's encoding/json) as that member — so the two would act on different
@@ -553,6 +558,75 @@ def _alias_in(obj: Any, reserved: frozenset) -> str:
         if exact is not None and key != exact:
             return key
     return ""
+
+
+# The members of the server->client objects the firewall reads BY NAME: list entries, result
+# envelopes, content blocks, prompt and sampling messages, notification params. A key in one of those
+# objects that folds to one of these without being it is read by this proxy as absent — so whatever it
+# holds is not scanned or masked — and by a case-insensitive client (Go's encoding/json) as that member.
+_SERVER_MEMBERS = frozenset({
+    # list entries (tools, prompts, resources, resource templates)
+    "name", "title", "description", "inputSchema", "outputSchema", "annotations", "uri", "uriTemplate",
+    "mimeType", "arguments", "size", "icons", "_meta",
+    # result envelopes
+    "content", "structuredContent", "isError", "contents", "messages", "tools", "prompts", "resources",
+    "resourceTemplates", "nextCursor", P.RESULT_TYPE, P.INPUT_REQUESTS, P.REQUEST_STATE,
+    # content blocks and messages
+    "type", "text", "resource", "data", "blob", "role",
+    # sampling request params
+    "systemPrompt", "maxTokens", "modelPreferences", "includeContext", "temperature", "stopSequences",
+    "metadata",
+})
+_SERVER_FOLDS = {P._fold(k): k for k in _SERVER_MEMBERS}
+
+
+def _server_alias(obj: Any) -> str:
+    """A key of `obj` that folds to a member in `_SERVER_MEMBERS` without being it, or ""."""
+    if not isinstance(obj, dict):
+        return ""
+    for key in obj:
+        exact = _SERVER_FOLDS.get(P._fold(key))
+        if exact is not None and key != exact:
+            return key
+    return ""
+
+
+def _blocks_alias(blocks: Any) -> str:
+    """The first alias in a content-block value (a block, or a list of blocks) and its `resource`."""
+    for block in (blocks if isinstance(blocks, list) else [blocks]):
+        alias = _server_alias(block) or (_server_alias(block.get("resource")) if isinstance(block, dict) else "")
+        if alias:
+            return alias
+    return ""
+
+
+def _message_alias(container: Any) -> str:
+    """An alias anywhere in the structure of a server result or params object the firewall reads:
+    the object itself, its content blocks, and its messages and their content. Never inside
+    `structuredContent`, schemas or arguments, which are data with keys of their own."""
+    if not isinstance(container, dict):
+        return ""
+    alias = _server_alias(container)
+    if alias:
+        return alias
+    for key in ("content", "contents"):
+        alias = _blocks_alias(container.get(key))
+        if alias:
+            return alias
+    messages = container.get("messages")
+    for message in (messages if isinstance(messages, list) else []):
+        alias = _server_alias(message) or (_blocks_alias(message.get("content")) if isinstance(message, dict) else "")
+        if alias:
+            return alias
+    return ""
+
+
+def _alias_finding(alias: str, path: str) -> Finding:
+    return Finding(
+        "mcp_a_alias_key", "critical", path, alias[:120],
+        f"key '{alias[:64]}' differs from a member this firewall reads only by case or compatibility "
+        "form: unread here, and read as that member by a case-insensitive client",
+    )
 
 
 def _envelope_alias(msg: P.JsonRpcMessage) -> str:
@@ -843,6 +917,10 @@ class McpFirewall:
         # Server-INITIATED request (the reverse direction: sampling, roots/list, elicitation).
         if msg.is_request:
             self._server_pending.put(msg.id, msg.method)
+            if msg.method == P.M_SAMPLING_CREATE:
+                alias = _message_alias(msg.params)
+                if alias:
+                    return self._refuse_alias(msg, msg.method, alias)
             if msg.method == P.M_SAMPLING_CREATE and settings.mcp_govern_sampling:
                 return await self._gate_b_sampling(msg)
             # The server asking a HUMAN a question it composed. Sampling was gated; this was not.
@@ -851,6 +929,9 @@ class McpFirewall:
             return MediationResult(forward=msg.framed)
 
         if msg.is_notification:
+            alias = _message_alias(msg.params)
+            if alias:
+                return self._refuse_alias(msg, msg.method, alias)
             if msg.method in (P.N_TOOLS_CHANGED, P.N_PROMPTS_CHANGED, P.N_RESOURCES_CHANGED):
                 self._on_catalog_changed(msg.method)
             # 2026-07-28 replaces the standalone GET stream and resources/subscribe with ONE opted-in
@@ -913,6 +994,11 @@ class McpFirewall:
             if defect:
                 return self._drop_unmatched(msg, f"not a well-formed answer: {defect}")
             corr.pending.pop(pending_key)
+            # Results the firewall reads by member name: an alias key fails closed (`_refuse_alias`).
+            if requested in (P.M_TOOLS_CALL, P.M_RESOURCES_READ, P.M_PROMPTS_GET):
+                alias = _message_alias(msg.result)
+                if alias:
+                    return self._refuse_alias(msg, requested, alias)
             # `server/discover` replaces the initialize handshake and is the FIRST thing a 2026-07-28
             # client asks. It advertises the server's identity and capabilities as free text, so it is
             # a discovery surface exactly like tools/list — and Gate A never saw it.
@@ -965,6 +1051,30 @@ class McpFirewall:
         self._bump("malformed_from_server")
         log.warning("nrvq.mcp.malformed_dropped", direction="server", code="NRVQ-MCP-5011")
         return MediationResult(blocked=True, note="malformed")
+
+    def _refuse_alias(self, msg: P.JsonRpcMessage, surface: str, alias: str) -> MediationResult:
+        """Fail closed on a server message whose structure carries an alias key (`_SERVER_MEMBERS`).
+
+        Whatever sits under the alias was not scanned, masked or fenced, and a case-insensitive client
+        reads it as the member it aliases. A tool result becomes a tool error; a resource or prompt
+        result an error; a server request is refused back to the server; a notification is dropped.
+        """
+        self._bump("alias_key_refused")
+        log.warning("nrvq.mcp.server.alias_key_refused", surface=surface, key=alias[:64],
+                    server=self._server_id, code="NRVQ-MCP-5091")
+        text = (f"Norviq MCP firewall withheld this {surface} message: its key '{alias[:64]}' differs "
+                "from a protocol field only by case or compatibility form, so its content was not "
+                "inspected.")
+        if msg.is_notification:
+            return MediationResult(blocked=True, note="alias_key")
+        if msg.is_request:
+            return MediationResult(reply=P.encode(P.error_response(msg.id, P.E_POLICY_DENIED, text)),
+                                   blocked=True, note="alias_key")
+        if surface == P.M_TOOLS_CALL:
+            return MediationResult(forward=P.encode(P.tool_error_result(msg.id, text, {
+                "gate": "A", "server": self._server_id, "alias_key": True})), note="alias_key")
+        return MediationResult(forward=P.encode(P.error_response(msg.id, P.E_POLICY_DENIED, text)),
+                               note="alias_key")
 
     def _drop_unmatched(self, msg: P.JsonRpcMessage, reason: str) -> MediationResult:
         """Drop a server response that cannot be mediated as the answer to a client request.
@@ -1776,6 +1886,10 @@ class McpFirewall:
 
             report = scan_tool_definition(tool, budget)
             budget = max(0, budget - report.scanned_chars)
+            alias = _server_alias(tool)
+            if alias:
+                # The definition's prose may sit under the alias, unscanned. Withheld (critical).
+                report.findings.append(_alias_finding(alias, alias))
             severity = report.severity
 
             # Cross-tool shadowing: two names that fold to the same skeleton ("send_email" and
@@ -1992,6 +2106,9 @@ class McpFirewall:
             # whole of the charset rule's tool-specific justification, and it transfers.
             report = scan_catalog_item(item, key, budget, name_is_identifier=(key == "prompts"))
             budget = max(0, budget - report.scanned_chars)
+            alias = _server_alias(item)
+            if alias:
+                report.findings.append(_alias_finding(alias, f"{key}[{index}].{alias[:64]}"))
             if report.clean:
                 kept.append(item)
                 continue
@@ -2196,12 +2313,18 @@ class McpFirewall:
         """
         stack = [arguments]
         seen = 0
-        while stack and seen < 4096:
+        while stack:
+            if seen >= _HEADER_WALK_NODES:
+                # FAIL CLOSED. This returned False when the walk ran out, so an `x-mcp-header` placed
+                # after 4096 padding nodes was never seen and the call went on to Gate B as if it set
+                # no header. An argument tree too large to inspect is refused, as one that sets a
+                # header is.
+                return True
             node = stack.pop()
             seen += 1
             if isinstance(node, dict):
                 for key, value in node.items():
-                    if isinstance(key, str) and key.lower() == P.X_MCP_HEADER:
+                    if isinstance(key, str) and P._fold(key) == P.X_MCP_HEADER:
                         return True
                     stack.append(value)
             elif isinstance(node, list):

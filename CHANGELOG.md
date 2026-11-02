@@ -269,7 +269,10 @@ JSON-RPC message in which an object names a key twice, or names two keys that di
 compatibility form, in either direction; it also refuses a client message whose key differs from a
 protocol field only that way, and forwards an allowed client message as the message it decoded rather
 than as the client's bytes. The HTTP MCP proxy no longer stores cookies an upstream server sets; a client's own
-`Cookie` header still reaches the server on that client's requests. Two security booleans no longer fall back to off when an
+`Cookie` header still reaches the server on that client's requests. Server messages whose structure carries a key that
+differs from a protocol field only by case or compatibility form are withheld or refused
+(`NRVQ-MCP-5091`), and a tool call whose arguments are too large to inspect for outbound-header
+parameters is refused. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way
