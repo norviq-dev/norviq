@@ -190,13 +190,24 @@ silence a real finding.
 ## Developer Certificate of Origin
 
 Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/)
-(DCO): by signing off a commit you certify that you wrote it, or otherwise have the right to submit
-it under the project licence. Sign off with `git commit -s`, which appends
+(DCO). A `Signed-off-by` line is your statement that you can make the DCO's certification for that
+commit: that you wrote it, or otherwise have the right to submit it under the project licence, and
+that you understand the contribution and the sign-off are public and kept with the project. It is a
+statement about origin, not an approval or a review. Sign off with `git commit -s`, which appends
 
     Signed-off-by: Your Name <you@example.com>
 
-using the name and email you commit as. Every commit in a pull request needs it. This applies from
-the date this section landed; earlier history is not rewritten.
+using the name and email you commit as; the sign-off has to match the commit's author. To sign off
+commits you have already made on a branch, run `git rebase --signoff main` and force-push the branch.
+
+**Why it is required.** The CNCF charter (§11) requires inbound code contributions to carry a DCO
+sign-off once a project is accepted, and Norviq follows that now rather than at acceptance.
+
+**What is checked.** Every commit in a pull request needs a sign-off. A DCO check on pull requests
+will enforce it once the DCO check is enabled on the repository; commits merged before that are not
+rewritten. A commit that slipped through unsigned is fixed with a remediation commit, an empty
+commit stating that its author adds the `Signed-off-by` to the listed SHA, rather than by rewriting
+`main`. For commits written with AI assistance, see the next section: the human author signs off.
 
 ## AI-assisted commits and provenance
 
