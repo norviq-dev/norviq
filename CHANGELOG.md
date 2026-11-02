@@ -178,17 +178,18 @@ because they should be installed.
   lived only in Redis. With Redis down a freeze or a new or lower cap is persisted and answers `503` (it
   takes effect at the next API start) where it was a `500`; a lift changes nothing. Admin trust writes for one agent (PUT trust,
   DELETE, the reset) are serialized by a per-agent Postgres lock, so two of them on different replicas
-  no longer leave the registry and Redis disagreeing. The lock is held across the store write, and a
+  no longer interleave. The lock is held across the store write, and a
   tightening reaches the store before the registry while a loosening reaches it only after its commit;
   every store write is fenced, so a late one cannot land over a newer change. When something fails the
   store is never looser than the registry, except when the store itself cannot take a tightening, which
   the `503` reports as "NOT live". A freeze that finds another change in progress, or no database, is
-  still applied live. A starting API's write-back of freezes
+  still applied live, not persisted; a change already under way can replace it when it finishes, and the
+  `503` says to check the agent. A starting API's write-back of freezes
   and caps takes the same locks in batches, so it no longer restores a cap or freeze another replica
   changed while it ran, and a retried write-back resumes where it stopped. The three routes answer
-  `422` for an id the evaluator and `POST /api/v1/keys` would not accept (no `spiffe://` prefix, empty,
-  over 512 characters). A change that finds the agent locked by another for over 3 s is a `503` that
-  applies nothing (`NRVQ-API-7149`). `NRVQ-API-7031` names the actor.
+  `422` for an id without the `spiffe://` prefix, empty or only whitespace after it, or over 512 characters
+  (the registry column). A change that finds the agent locked by another past the lock timeout (3 s by
+  default) is a `503` that applies nothing except a freeze, which goes live unpersisted (`NRVQ-API-7149`). `NRVQ-API-7031` names the actor.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck
 reports 47 standard-library advisories, 29 of them reachable from the webhook. An older Go fetches

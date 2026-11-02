@@ -445,18 +445,24 @@ then the registry holds the new, stricter state, the store keeps the previous on
 | Change | Order | If something fails (exit non-zero on a `503`) |
 |---|---|---|
 | Tightening: freeze, a cap added or lowered, or re-sending the current state | store, then registry | Commit failed or unacknowledged: "Applied live, but it may NOT be persisted" — retry. Store did not take it: "Persisted but NOT live" — retry. Both: "Not confirmed: the change may be persisted ... NOT live" — retry. |
-| Loosening: a freeze lifted, a cap raised or removed | registry, then store | Commit failed or unacknowledged: "not applied"; the store still enforces the previous, stricter state. Store failed after the commit: "Persisted, but the store still enforces the previous, stricter state" until you retry — or, if the store lost the agent's keys meanwhile (a flush), "the store's state for this agent is unknown". |
+| Loosening: a freeze lifted, a cap raised or removed | registry, then store (retried once) | Commit failed or unacknowledged: "not confirmed"; the store was not touched. Store did not confirm after the commit: "Persisted, but the store did not confirm the update" — it may have taken it, or it holds whatever it held before this change. That is the previous, stricter state, unless an earlier change was itself answered "NOT live" (then older and looser than the registry). Retry, or restart the API to re-apply the registry. |
 
 Every store write is fenced on `agent_trust_owner:<id>`, claimed under the lock: a write that outlives
 its lock (cut off by the 2 s store bound but already sent, or from a request whose connection dropped)
 does nothing once another change has claimed the agent. The boot warm claims and writes the same way. A
-change that finds the agent locked by another one for more than 3 s exits on a `503` ("another admin
-change ... is in progress") and applies nothing (`NRVQ-API-7149`) — except a freeze, the kill switch: it
-claims the fence without the lock and is applied live, so the stuck change's later write cannot lift it
-("Freeze applied live but NOT persisted"; retry once the other change ends). The same holds with the
-database down or the connection pool exhausted (the `503` names which). The id must start with
-`spiffe://` (what the evaluator enforces), be at most 512 characters (what `POST /api/v1/keys` stores) and
-not be empty after the prefix (`422` otherwise); whitespace and glob characters are accepted. The retention
+change that finds the agent locked by another one for longer than the lock timeout (3 s by default:
+`db_command_timeout` − 2 s if that is smaller, never under 0.2 s) exits on a `503` ("another admin change
+... is in progress") and applies nothing (`NRVQ-API-7149`). So does one that finds no database, an exhausted
+connection pool, or half the pool already in admin writes in that API process (the `503` names which). The
+exception is a freeze, the kill switch: it claims the fence without the lock and is applied live ("Freeze
+applied live but NOT persisted"). That stops any write claimed before it. A change already under way that
+claims after it — it claims once it holds the lock and has read the registry — replaces the freeze with
+the state it commits and answers for itself, so check the agent (`agent get`) and retry the freeze. A
+backend whose API side vanished while holding an agent's lock is ended by Postgres after its
+`idle_session_timeout` (set on the admin connection to the fence's lifetime, at least 30 s), which frees
+the agent. The id must start with `spiffe://`, not be empty or only whitespace after it, and be at most 512
+characters (`422` otherwise; 512 is the registry column, and what `POST /api/v1/keys` stores). Any other
+character, glob characters included, is accepted. The retention
 pruner never ages out a frozen or capped agent
 (`norviq/api/audit_retention.py::RetentionPruner._prune_agent_registry`).
 

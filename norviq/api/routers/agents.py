@@ -475,9 +475,11 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
 # The agent ids the product itself accepts: POST /keys mints any spiffe_id up to 512 characters (keys.py) and
 # the evaluator requires only the "spiffe://" prefix (Evaluator._validate_spiffe), so an operator-chosen id
 # such as "spiffe://acme-agent", ".../sa/agent:v2" or one with a space or "*" in it is registered, enforced
-# and listed — and must stay freezable. These routes refuse exactly what that rule refuses, plus an id that
-# is empty after the prefix. The id only ever names Redis keys used with GET/SET/DEL/EVAL, never a SCAN or
-# KEYS pattern, so glob characters in it are inert. 512 is also the registry column's width.
+# and listed — and must stay freezable. These routes refuse an id without the prefix, an id that is empty or
+# only whitespace after it, and one over 512 characters: the registry column's width, so a longer id could
+# never be persisted (POST /keys also stores at most 512; the evaluator itself takes longer ones from admin
+# callers, which no admin control can then cover — stated, not fixed here). The id only ever names Redis keys
+# used with GET/SET/DEL/EVAL, never a SCAN or KEYS pattern, so glob characters in it are inert.
 def _require_agent_id(spiffe_id: str) -> None:
     """422 unless ``spiffe_id`` is an agent id the key API mints and the evaluator enforces."""
     if not spiffe_id.startswith("spiffe://") or not spiffe_id[len("spiffe://"):].strip() or len(spiffe_id) > 512:
@@ -499,6 +501,15 @@ def _lock_timeout_ms() -> int:
     return int(min(3.0, max(0.2, float(settings.db_command_timeout) - 2.0)) * 1000)
 
 
+def _owner_ttl_ms() -> int:
+    """How long a writer's claim on agent_trust_owner:<id> lives: at least 30 s and longer than the worst case of
+    one admin operation (lock wait, three database round trips at db_command_timeout, six store calls), so a
+    live writer never finds its own fence expired. Also the admin connection's idle_session_timeout: a backend
+    whose API side vanished drops its lock after that long instead of after TCP keepalive (hours)."""
+    worst_s = _lock_timeout_ms() / 1000 + 3 * float(settings.db_command_timeout) + 6 * _STORE_TIMEOUT_S + 5
+    return int(max(30.0, worst_s) * 1000)
+
+
 class _LockContended(Exception):
     """Another admin trust write holds this agent's lock for longer than _lock_timeout_ms()."""
 
@@ -509,6 +520,25 @@ class _AdminDbUnavailable(Exception):
 
 class _PoolExhausted(_AdminDbUnavailable):
     """This process' DB connection pool had no connection free within its pool timeout."""
+
+
+class _AdminBusy(_AdminDbUnavailable):
+    """This process already has its share of admin trust writes holding connections (_admin_slots)."""
+
+
+# Process-wide cap on admin trust writes holding a lock connection at once: half the pool. The per-agent gate
+# does not bound writes to DIFFERENT agents, and each holds a pooled connection through its store calls; 60
+# freezes on distinct agents during a store hang starved every other DB user for ~5 s (review round 5).
+_slots: dict[int, asyncio.Semaphore] = {}
+
+
+def _admin_slots() -> asyncio.Semaphore:
+    loop_id = id(asyncio.get_running_loop())
+    sem = _slots.get(loop_id)
+    if sem is None:
+        _slots.clear()  # one event loop per process in production; tests start a new one per test
+        sem = _slots[loop_id] = asyncio.Semaphore(max(1, int(settings.pg_pool_size) // 2))
+    return sem
 
 
 def _is_lock_timeout(exc: BaseException) -> bool:
@@ -588,38 +618,61 @@ async def _agent_lock(db, spiffe_id: str):
     the same keys as transaction-level locks, which conflict with these.
 
     Raises _LockContended after _lock_timeout_ms() (in-process or in Postgres); _PoolExhausted when no pooled
-    connection is free; _AdminDbUnavailable for any other failure to connect or lock. Exceptions from the
-    body pass through unchanged."""
+    connection is free; _AdminBusy when this process already has half its pool in admin writes;
+    _AdminDbUnavailable for any other failure to connect or lock. Exceptions from the body pass through."""
+    # Order: the per-agent gate first, so writers queued behind one agent wait without a slot; then a slot;
+    # then the connection and the Postgres lock.
+    async with _local_gate(spiffe_id):
+        slots = _admin_slots()
+        try:
+            await asyncio.wait_for(slots.acquire(), _lock_timeout_ms() / 1000)
+        except TimeoutError:
+            raise _AdminBusy(spiffe_id) from None
+        try:
+            async with _agent_lock_held(db, spiffe_id) as conn:
+                yield conn
+        finally:
+            slots.release()
+
+
+@asynccontextmanager
+async def _agent_lock_held(db, spiffe_id: str):
     from sqlalchemy.exc import TimeoutError as PoolTimeout
 
-    async with _local_gate(spiffe_id):
+    try:
+        conn = await db.connect()
+    except PoolTimeout as exc:
+        raise _PoolExhausted(spiffe_id) from exc
+    except Exception as exc:
+        raise _AdminDbUnavailable(spiffe_id) from exc
+    state = "none"  # none -> maybe (lock statement sent) -> held (granted and committed)
+    try:
         try:
-            conn = await db.connect()
-        except PoolTimeout as exc:
-            raise _PoolExhausted(spiffe_id) from exc
+            await conn.execute(text(f"SET LOCAL lock_timeout = '{_lock_timeout_ms()}ms'"))
+            state = "maybe"
+            await conn.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), _lock_key(spiffe_id))
+            # A backend whose API side vanished (partition, node loss) would keep the lock until TCP keepalive
+            # notices — hours by default. Idle for longer than any live operation, it is ended instead.
+            await conn.execute(
+                text("SELECT set_config('idle_session_timeout', :v, false) "
+                     "WHERE current_setting('idle_session_timeout', true) IS NOT NULL"),
+                {"v": f"{_owner_ttl_ms()}ms"},
+            )
+            await conn.commit()
+            state = "held"
         except Exception as exc:
+            if _is_lock_timeout(exc):
+                state = "none"  # Postgres refused the lock: nothing is held
+                await _quietly(conn.rollback())
+                raise _LockContended(spiffe_id) from exc
             raise _AdminDbUnavailable(spiffe_id) from exc
-        state = "none"  # none -> maybe (lock statement sent) -> held (granted and committed)
-        try:
-            try:
-                await conn.execute(text(f"SET LOCAL lock_timeout = '{_lock_timeout_ms()}ms'"))
-                state = "maybe"
-                await conn.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), _lock_key(spiffe_id))
-                await conn.commit()
-                state = "held"
-            except Exception as exc:
-                if _is_lock_timeout(exc):
-                    state = "none"  # Postgres refused the lock: nothing is held
-                    await _quietly(conn.rollback())
-                    raise _LockContended(spiffe_id) from exc
-                raise _AdminDbUnavailable(spiffe_id) from exc
-            yield conn
-        finally:
-            if state == "held":
-                await _release_agent_lock(conn, spiffe_id)
-            elif state == "maybe":
-                await _quietly(conn.invalidate())
-            await _quietly(conn.close())
+        yield conn
+    finally:
+        if state == "held":
+            await _release_agent_lock(conn, spiffe_id)
+        elif state == "maybe":
+            await _quietly(conn.invalidate())
+        await _quietly(conn.close())
 
 
 async def _release_agent_lock(conn, spiffe_id: str) -> None:
@@ -628,6 +681,8 @@ async def _release_agent_lock(conn, spiffe_id: str) -> None:
         await conn.rollback()  # a transaction the body left open (or failed) must not outlive the request
         released = bool((await conn.execute(
             text("SELECT pg_advisory_unlock(hashtext(:k))"), _lock_key(spiffe_id))).scalar())
+        await conn.execute(text("SELECT set_config('idle_session_timeout', reset_val, false) FROM pg_settings "
+                                "WHERE name = 'idle_session_timeout'"))
         await conn.commit()
     except BaseException as exc:  # noqa: BLE001 - handled below: the connection is in doubt (incl. cancellation)
         log.warning("nrvq.api.agent.trust_lock_release_failed", spiffe_id=spiffe_id,
@@ -672,19 +727,33 @@ def _is_tightening(prior: tuple[bool, float | None], new: tuple[bool, float | No
     return prior_cap is None or new_cap <= prior_cap
 
 
-async def _fenced_write(cache, spiffe_id, token, frozen, cap, display) -> tuple[int | None, str]:
-    """Claim the agent for ``token`` and write the state through the fence. (outcome, error text)."""
+async def _fenced_write(cache, spiffe_id, frozen, cap, display, attempts: int = 2, conn=None) -> tuple[int | None, str]:
+    """Claim the agent for a fresh token and write the state through the fence; once more if the store failed or
+    the owner key was gone, never over a newer claim. (outcome, error text). Only ever writes the state the
+    caller is making (or, for a loosening, has committed)."""
     from norviq.engine.cache import RedisCache
 
-    try:
-        await _store(cache.claim_admin_trust_owner(spiffe_id, token))
-        outcome = await _store(cache.apply_admin_trust_control_if_owner(
-            spiffe_id, token, frozen=frozen, cap=cap, display=display))
-    except Exception as exc:  # noqa: BLE001 - the caller reports it
-        return None, f"{type(exc).__name__}: {exc}"
-    errors = {RedisCache.FENCE_LOST: "fence: another admin write owns the agent",
-              RedisCache.FENCE_MISSING: "fence: the owner key is gone (store flushed or evicted)"}
-    return outcome, errors.get(outcome, "")
+    outcome, error = None, ""
+    for attempt in range(attempts):
+        if attempt and conn is not None and not await _still_connected(conn):
+            break  # the lock went with the connection: a claim now could land inside another writer's change
+        token = uuid.uuid4().hex
+        try:
+            await _store(cache.claim_admin_trust_owner(spiffe_id, token, _owner_ttl_ms()))
+            outcome = await _store(cache.apply_admin_trust_control_if_owner(
+                spiffe_id, token, frozen=frozen, cap=cap, display=display))
+        except Exception as exc:  # noqa: BLE001 - the caller reports it
+            outcome, error = None, f"{type(exc).__name__}: {exc}"
+            continue
+        if outcome == RedisCache.FENCE_APPLIED:
+            return outcome, ""
+        error = {RedisCache.FENCE_LOST: "fence: another admin write owns the agent",
+                 RedisCache.FENCE_MISSING: "fence: the owner key is gone (expired, or the store lost it)"}.get(outcome, "")
+        if outcome == RedisCache.FENCE_LOST:
+            # Someone claimed after us — a freeze stealing the fence, or a dead writer's late claim. Re-claiming
+            # would write over a stolen freeze, so this write gives up and says it did not land.
+            break
+    return outcome, error
 
 
 @router.put("/agents/{spiffe_id:path}/trust")
@@ -711,12 +780,15 @@ async def update_trust(
         previous, LOOSER state: 503 "persisted, NOT live" (7147) — the one case where the store is looser
         than the registry; it ends at the next successful write for the agent or the next API start.
       LOOSENING (a freeze lifted, a cap raised or removed): the registry first; the store only after a
-        successful commit. A failed commit: the store is untouched and still stricter, 503 "not applied". A
-        store failure or a lost fence after the commit: 503 saying the store still enforces the previous,
-        stricter state (or, if the fence key vanished in a flush, that the store's state is unknown) (7147).
-    Contention past the lock timeout, or no database: nothing is applied — except a freeze, which is the
-    kill switch: it STEALS the fence (claims the owner key without the lock) and is written live, so a
-    stranded lock holder's later fenced write becomes a no-op; 503 "freeze applied live, NOT persisted".
+        successful commit, retried once under a fresh claim. A failed commit: the store is untouched, 503 "not
+        confirmed". A store that still did not take it: 503 "persisted, the store did not confirm the update"
+        — it holds whatever it held before this change, which is the previous, stricter state unless an
+        earlier change was itself answered "NOT live" (7147).
+    Contention past the lock timeout, no database, an exhausted pool or too many admin writes in this process:
+    nothing is applied — except a freeze, the kill switch: it claims the fence without the lock and is written
+    live (503 "freeze applied live, NOT persisted"). That stops any write claimed BEFORE it; a change already
+    under way that claims after it (it claims once it has the lock and has read the registry) replaces it with
+    the state that change commits, and answers for it.
     An identity with no registry row gets one carrying the freeze or cap: the evaluator's first-call upsert
     (``upsert_agent_registry``) does not touch ``frozen``/``trust_cap``."""
     require_admin(user)
@@ -739,7 +811,7 @@ async def update_trust(
         contended = isinstance(exc, _LockContended)
         live = False
         if frozen:
-            outcome, _ = await _fenced_write(cache, spiffe_id, uuid.uuid4().hex, True, None, display)
+            outcome, _ = await _fenced_write(cache, spiffe_id, True, None, display)
             live = outcome == 1
         if contended:
             log.warning("nrvq.api.agent.trust_write_contended", spiffe_id=spiffe_id, score=body.score, live=live,
@@ -750,9 +822,12 @@ async def update_trust(
                         error=str(exc.__cause__ or exc), live=live, pool=isinstance(exc, _PoolExhausted),
                         actor=user.get("sub"), code="NRVQ-API-7033")
             reason = ("the API's database connection pool is exhausted" if isinstance(exc, _PoolExhausted)
-                      else "the registry could not be reached")
+                      else "too many admin trust changes are in progress in this API process"
+                      if isinstance(exc, _AdminBusy) else "the registry could not be reached")
         if live:
-            detail = f"Freeze applied live but NOT persisted ({reason}); it is lost on a store flush or restart. Retry."
+            detail = (f"Freeze applied live but NOT persisted ({reason}). A change to this agent that was already "
+                      "under way may replace it when it finishes, and a store flush or restart loses it. Check the "
+                      "agent and retry.")
         else:
             detail = f"Trust change not applied: {reason}. Retry."
         raise HTTPException(status_code=503, detail=detail) from None if contended else exc
@@ -764,7 +839,7 @@ async def update_trust(
 async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) -> None:
     """Store first, then registry. Every failure leaves the store stricter than or equal to Postgres, except a
     store that did not take the write — then Postgres holds the stricter state and the 503 says 'NOT live'."""
-    outcome, store_error = await _fenced_write(cache, spiffe_id, uuid.uuid4().hex, frozen, cap, display)
+    outcome, store_error = await _fenced_write(cache, spiffe_id, frozen, cap, display, conn=conn)
     live = outcome == 1
     try:
         await _persist_trust_control(conn, spiffe_id, frozen, cap, score)
@@ -786,14 +861,15 @@ async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) ->
 
 
 async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> None:
-    """Registry first; the store only after a successful commit, and only while this request still owns
-    the agent. Every failure leaves the store enforcing the previous, stricter state (or, after a flush, an
-    unknown one — said so)."""
+    """Registry first; the store only after a successful commit, and only through the fence. On any failure the
+    answer says what is known: the store was not updated by this change and holds whatever it held before it —
+    the previous, stricter state, unless an earlier change was itself reported 'NOT live', in which case it is
+    older and looser than the registry."""
     from norviq.engine.cache import RedisCache
 
     token = uuid.uuid4().hex
     try:
-        await _store(cache.claim_admin_trust_owner(spiffe_id, token))
+        await _store(cache.claim_admin_trust_owner(spiffe_id, token, _owner_ttl_ms()))
     except Exception as exc:  # noqa: BLE001 - without the fence the store write could not be made safely
         log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
                     score=score, direction="loosening", durable=False, actor=user.get("sub"), code="NRVQ-API-7147")
@@ -802,30 +878,41 @@ async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> 
     try:
         await _persist_trust_control(conn, spiffe_id, frozen, cap, score)
         await conn.commit()
-    except Exception as exc:  # noqa: BLE001 - the store is untouched, so it still holds the stricter state
+    except Exception as exc:  # noqa: BLE001 - the store is untouched by this change
         await _quietly(conn.rollback())
         log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
                     direction="loosening", live=False, actor=user.get("sub"), code="NRVQ-API-7033")
         raise HTTPException(status_code=503, detail=(
-            "Trust change not applied. If the registry write did land, the store still enforces the previous, "
-            "stricter state. Retry.")) from exc
+            "Trust change not confirmed: the registry did not confirm it, and the store was not touched — it holds "
+            "whatever it held before this change. Retry.")) from exc
     try:
         outcome = await _store(cache.apply_admin_trust_control_if_owner(
             spiffe_id, token, frozen=frozen, cap=cap, display=display))
-        error = {RedisCache.FENCE_LOST: "fence: another admin write owns the agent",
-                 RedisCache.FENCE_MISSING: "fence: the owner key is gone (store flushed or evicted)"}.get(outcome, "")
-    except Exception as exc:  # noqa: BLE001 - reported below
+        error = ""
+    except Exception as exc:  # noqa: BLE001 - retried below
         outcome, error = None, f"{type(exc).__name__}: {exc}"
+    if outcome not in (RedisCache.FENCE_APPLIED, RedisCache.FENCE_LOST) and await _still_connected(conn):
+        # The change is committed and we still hold the lock (its connection answers): one more attempt to bring
+        # the store to exactly the state the registry now holds, under a fresh claim. Not after FENCE_LOST — a
+        # newer claim (a stolen freeze) must not be written over — and not once the connection is gone, because
+        # the lock went with it and a claim now could land in the middle of another writer's change.
+        outcome, error = await _fenced_write(cache, spiffe_id, frozen, cap, display, attempts=1)
     if outcome != RedisCache.FENCE_APPLIED:
         log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=error, score=score,
                     direction="loosening", durable=True, actor=user.get("sub"), code="NRVQ-API-7147")
-        if outcome == RedisCache.FENCE_MISSING:
-            raise HTTPException(status_code=503, detail=(
-                "Persisted, but the store's state for this agent is unknown: its keys were lost (a flush or an "
-                "eviction), possibly with the previous freeze or cap. The next API start writes the registry's "
-                "state back; retry now."))
         raise HTTPException(status_code=503, detail=(
-            "Persisted, but the store still enforces the previous, stricter state until the change is retried."))
+            "Persisted, but the store did not confirm the update: it may have taken it, or it still holds whatever "
+            "it held before this change (if an earlier change was answered 'Persisted but NOT live', that is older "
+            "than the registry). Retry, or restart the API to re-apply the registry."))
+
+
+async def _still_connected(conn) -> bool:
+    """Whether the lock connection still answers, i.e. its session (and so its advisory lock) is alive."""
+    try:
+        await conn.execute(text("SELECT 1"))  # inside whatever transaction is open; the caller ends it
+        return True
+    except Exception:  # noqa: BLE001 - any failure means the lock cannot be relied on
+        return False
 
 
 async def _persist_trust_control(conn, spiffe_id: str, frozen: bool, cap: float | None, score: float) -> None:
@@ -845,8 +932,10 @@ async def _persist_trust_control(conn, spiffe_id: str, frozen: bool, cap: float 
             id=uuid.uuid4(),
             spiffe_id=spiffe_id,
             # The same fallbacks the evaluator's write-through uses, so its first call lands on this row.
-            namespace=_namespace_from_spiffe(spiffe_id) or "default",
-            agent_class=_class_from_spiffe(spiffe_id) or "",
+            # Truncated to the columns' width: an id whose ns or sa segment is longer would otherwise fail every
+            # insert, and its freeze could never be persisted. The evaluator's own upsert sets them from the event.
+            namespace=(_namespace_from_spiffe(spiffe_id) or "default")[:255],
+            agent_class=(_class_from_spiffe(spiffe_id) or "")[:255],
             # Display only, until the evaluator's first call overwrites them: a cap is the highest score
             # the agent can have, so it is shown in the band the console would put that score in.
             trust_score=score,
@@ -894,12 +983,14 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
     deadlock with an admin write, which holds exactly one; two warms take theirs in the same (lock-key)
     order. `progress` carries the last committed spiffe_id across the caller's retries, so a retry resumes
     where the previous attempt was cut off instead of re-warming the same head of the table.
-    Measured on loopback (Postgres 5433, Redis 6379), batches of 500: 5 000 frozen or capped agents in 0.3 s and
-    20 000 in 1.0-1.1 s, against the 10 s attempt bound; with the bound forced down to 0.45 s, 20 000 still
-    completed on the third attempt because each retry resumed. One transaction per agent took 16.9 s for
-    5 000 and never finished past ~2.8k at startup. Each batch costs about four database round trips, so the
-    time grows with the round-trip time to Postgres: at 5 ms RTT, 20 000 agents add roughly 0.8 s. The
-    resumable cursor, not the batch size, is what keeps a slow link from losing the tail."""
+    Measured with batches of 500 (round-5 review, TCP delay proxy in front of Postgres): 20 000 frozen or capped
+    agents take 1.5-1.6 s on loopback, 5.5 s at ~10 ms round-trip time and 19 s at ~50 ms, against a 10 s attempt
+    bound; three replicas warming the same 22 000 rows at once while admin writes run take about 4x one warm's
+    time. Past roughly 80 ms RTT, or with several replicas starting together, 20 000 agents can exhaust the
+    3 x 10 s budget: the tail then stays unwarmed and NRVQ-API-7035 is logged at ERROR. The resumable cursor
+    keeps every attempt's progress; one transaction per agent took 16.9 s for 5 000 even on loopback.
+    A batch whose fenced adds do not all land after re-claiming (RedisCache.warm_admin_trust_controls) fails
+    the attempt before the cursor moves, so the retry re-runs it rather than counting the agents as handled."""
     batch_size = batch_size or _WARM_BATCH
     progress = progress if progress is not None else {}
     progress.setdefault("after", "")
@@ -933,6 +1024,12 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
             if entries:
                 outcomes = await cache.warm_admin_trust_controls(uuid.uuid4().hex, entries)
                 seeded = sum(1 for o in outcomes if o == 1)
+                missed = [e[0] for e, o in zip(entries, outcomes) if o != 1]
+                if missed:
+                    # Not counted, not skipped: the attempt fails here, before the cursor moves, and the caller's
+                    # retry re-runs this batch (warm_with_backoff logs 7158, then 7035 at ERROR with these ids).
+                    raise RuntimeError(f"{len(missed)} agent(s) did not take their freeze/cap after re-claiming the "
+                                       f"fence: {', '.join(missed[:5])}{' ...' if len(missed) > 5 else ''}")
             await session.commit()
             progress["after"] = ids[-1]
             progress["seeded"] += seeded

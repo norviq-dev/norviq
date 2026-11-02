@@ -47,8 +47,11 @@ def _env(name: str) -> str:
 
 @pytest.fixture
 async def env():
-    old_url = settings.pg_url
+    old_url, old_rate = settings.pg_url, settings.http_rate_limit_enabled
     settings.pg_url = _env("NRVQ_PG_URL")
+    # The HTTP rate limiter's fixed windows live in the shared test Redis; a re-run of this file inside one
+    # window got 429s (review round 5). These tests are not about rate limiting.
+    settings.http_rate_limit_enabled = False
     await init_db()
     await create_tables()
     cache = RedisCache(url=_env("NRVQ_REDIS_URL"))
@@ -80,7 +83,7 @@ async def env():
             await session.commit()
         await cache.close()
         await close_db()
-        settings.pg_url = old_url
+        settings.pg_url, settings.http_rate_limit_enabled = old_url, old_rate
 
 
 class _session:
@@ -1172,7 +1175,8 @@ async def test_a_loosening_whose_commit_fails_leaves_the_store_stricter_and_says
         resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
     finally:
         app.dependency_overrides.pop(get_admin_db, None)
-    assert resp.status_code == 503 and resp.json()["detail"].startswith("Trust change not applied")
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Trust change not confirmed")
+    assert "store was not touched" in resp.json()["detail"]
     assert await _live(cache, spiffe) == (True, None) == await _durable(spiffe)
 
 
@@ -1187,7 +1191,7 @@ async def test_a_loosening_whose_commit_ack_is_lost_keeps_the_store_stricter_unt
         resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
     finally:
         app.dependency_overrides.pop(get_admin_db, None)
-    assert resp.status_code == 503 and "still enforces the previous, stricter state" in resp.json()["detail"]
+    assert resp.status_code == 503 and "store was not touched" in resp.json()["detail"]
     assert await _durable(spiffe) == (False, None) and await _live(cache, spiffe) == (True, None)
     assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
     assert await _live(cache, spiffe) == (False, None)
@@ -1207,7 +1211,8 @@ async def test_a_loosening_the_store_does_not_take_after_its_commit_says_persist
         resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr())
     finally:
         app.state.cache = cache
-    assert resp.status_code == 503 and resp.json()["detail"].startswith("Persisted, but the store still enforces")
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Persisted, but the store did not confirm")
+    assert "Retry, or restart the API" in resp.json()["detail"]
     assert await _durable(spiffe) == (False, pytest.approx(0.4)) and await _live(cache, spiffe) == (True, None)
 
 
@@ -1438,24 +1443,35 @@ async def test_a_lock_granted_before_its_commit_failed_never_reaches_the_pool(en
     assert await _advisory_held(spiffe) == 0, "a connection that may hold the agent's lock went back to the pool"
 
 
-async def test_a_loosening_whose_fence_vanished_says_the_store_state_is_unknown(env) -> None:
-    """Round 4, N15: the owner key disappeared (a flush) between the claim and the write. The store may have
-    lost the freeze too, so 'the store still enforces the previous, stricter state' would be false."""
+async def test_a_loosening_whose_fence_vanished_is_rewritten_once_and_never_claimed_stricter(env) -> None:
+    """Round 4, N15 / round 5: the owner key disappeared (a flush) between the claim and the write, taking the
+    freeze with it. A vanished fence (unlike a lost one) is retried once under a fresh claim, which converges the
+    store on the committed state; if the store keeps losing it, the answer may not claim it is still stricter."""
     app, client, cache, ids = env
-    spiffe = _agent(ids, "n15")
-    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    for label, flushes, expected in (("n15-once", 1, 200), ("n15-always", 99, 503)):
+        spiffe = _agent(ids, label)
+        assert (
+            await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        ).status_code == 200
+        left = {"n": flushes}
 
-    class _Flushed(_Proxy):
-        async def apply_admin_trust_control_if_owner(self, spiffe_id, token, **k):
-            await self._real._client().delete(f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}")
-            return await self._real.apply_admin_trust_control_if_owner(spiffe_id, token, **k)
+        class _Flushed(_Proxy):
+            async def apply_admin_trust_control_if_owner(self, spiffe_id, token, **k):
+                if left["n"]:
+                    left["n"] -= 1
+                    await self._real._client().delete(f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}")
+                return await self._real.apply_admin_trust_control_if_owner(spiffe_id, token, **k)
 
-    app.state.cache = _Flushed(cache)
-    try:
-        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
-    finally:
-        app.state.cache = cache
-    assert resp.status_code == 503 and "state for this agent is unknown" in resp.json()["detail"]
+        app.state.cache = _Flushed(cache)
+        try:
+            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+        finally:
+            app.state.cache = cache
+        assert resp.status_code == expected, (label, resp.text)
+        if expected == 200:
+            assert await _live(cache, spiffe) == (False, None) == await _durable(spiffe)
+        else:
+            assert resp.json()["detail"].startswith("Persisted, but the store did not confirm")
 
 
 async def test_a_delete_whose_commit_ack_is_lost_says_it_may_have_been_deleted(env) -> None:
@@ -1566,7 +1582,10 @@ async def test_the_fenced_write_keeps_the_displayed_score_and_the_owner_key_on_a
     spiffe = _agent(ids, "ttl")
     assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr())).status_code == 200
     assert 0 < await cache._client().ttl(f"trust:{spiffe}") <= settings.redis_ttl_trust_s * 2
-    assert 0 < await cache._client().pttl(f"agent_trust_owner:{spiffe}") <= 30_000
+    from norviq.api.routers.agents import _owner_ttl_ms
+
+    assert 30_000 <= _owner_ttl_ms()
+    assert 0 < await cache._client().pttl(f"agent_trust_owner:{spiffe}") <= _owner_ttl_ms()
 
 
 @pytest.fixture
@@ -1589,3 +1608,381 @@ async def test_across_replicas_a_freeze_crossing_a_clear_still_agrees(env, separ
 
 async def test_across_replicas_a_delete_crossing_a_freeze_never_loses_it(env, separate_replicas) -> None:
     await test_a_delete_crossing_a_freeze_never_loses_the_freeze(env)
+
+
+# --- Round 5 -------------------------------------------------------------------------------------------------
+
+
+class _LateClaimClient(_Proxy):
+    """The store link of a warm, where a dead writer's late claim (a SET cut off on the wire) lands right after
+    the warm's own claim pipeline, `rounds` times."""
+
+    def __init__(self, real, spiffe: str, rounds: int) -> None:
+        super().__init__(real)
+        self._spiffe, self._rounds = spiffe, rounds
+
+    def pipeline(self, *a, **k):
+        outer, ctx = self, self._real.pipeline(*a, **k)
+
+        class _Ctx:
+            async def __aenter__(_self):
+                pipe = await ctx.__aenter__()
+                claims: list[str] = []
+
+                class _P(_Proxy):
+                    async def set(_p, key, *sa, **sk):
+                        claims.append(key)
+                        return await pipe.set(key, *sa, **sk)
+
+                    async def execute(_p, *ea, **ek):
+                        result = await pipe.execute(*ea, **ek)
+                        if outer._rounds and f"agent_trust_owner:{outer._spiffe}" in claims:
+                            outer._rounds -= 1
+                            await outer._real.set(f"agent_trust_owner:{outer._spiffe}", "dead-writer", px=30_000)
+                        return result
+
+                return _P(pipe)
+
+            async def __aexit__(_self, *exc):
+                return await ctx.__aexit__(*exc)
+
+        return _Ctx()
+
+
+class _LossyWarmCache(_Proxy):
+    """The real cache, with the warm's store link replaced (the method runs against this object's _client)."""
+
+    def __init__(self, real, spiffe: str, rounds: int) -> None:
+        super().__init__(real)
+        self._link = _LateClaimClient(real._client(), spiffe, rounds)
+
+    def _client(self):
+        return self._link
+
+    async def warm_admin_trust_controls(self, *a, **k):
+        return await RedisCache.warm_admin_trust_controls(self, *a, **k)
+
+
+async def _seed_frozen_rows(agents: list[str]) -> None:
+    async with _session() as session:
+        for spiffe in agents:
+            await session.execute(
+                text(
+                    "INSERT INTO agent_registry (id, spiffe_id, namespace, agent_class, trust_score, trust_category, "
+                    "violation_count, last_seen, created_at, frozen) VALUES (gen_random_uuid(), :s, 'w', 'w', 0, "
+                    "'Frozen', 0, now(), now(), true)"
+                ),
+                {"s": spiffe},
+            )
+        await session.commit()
+
+
+async def test_the_warm_reclaims_after_a_dead_writers_late_claim(env) -> None:
+    """FAIL-ON-BUG (review round 5, D1). A late claim landed between the warm's claim and its fenced add; the
+    warm read FENCE_LOST as 'an admin took over', counted the agent handled and moved on, so a freeze answered
+    'applied at the next API start' stayed un-enforced after that start. The warm holds the agents' locks, so
+    no live writer owns them: it re-claims and re-adds."""
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-late-claim-{uuid.uuid4().hex[:8]}"
+    spiffe = f"{prefix}/a"
+    ids.append(spiffe)
+    await _seed_frozen_rows([spiffe])
+    lossy = _LossyWarmCache(cache, spiffe, rounds=1)
+    progress = {"after": prefix}
+    seeded = await warm_agent_overrides(lossy, progress=progress)
+    assert lossy._link._rounds == 0, "the late claim was never injected"
+    assert seeded == 1 and await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+
+
+async def test_a_warm_batch_that_cannot_take_its_fence_fails_the_attempt_instead_of_advancing(env) -> None:
+    """Round 5, D1: if re-claiming does not help either, the batch is not counted and the cursor does not move;
+    the attempt fails, so warm_with_backoff retries it and then logs NRVQ-API-7035 at ERROR with the ids."""
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-late-claim-{uuid.uuid4().hex[:8]}"
+    spiffe = f"{prefix}/a"
+    ids.append(spiffe)
+    await _seed_frozen_rows([spiffe])
+    progress = {"after": prefix}
+    with pytest.raises(RuntimeError, match=spiffe):
+        await warm_agent_overrides(_LossyWarmCache(cache, spiffe, rounds=99), progress=progress)
+    assert progress["after"] == prefix and progress["seeded"] == 0
+
+
+async def test_a_loosening_after_a_not_live_tightening_does_not_claim_the_store_is_stricter(env) -> None:
+    """FAIL-ON-BUG (review round 5, D2). A freeze the store could not take (503 'NOT live') left the store
+    older and looser than the registry; a following loosening whose store write also failed answered 'the
+    store still enforces the previous, stricter state', which was false (the agent was unpoliced)."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "d2")
+
+    class _StoreFails(_Proxy):
+        async def apply_admin_trust_control_if_owner(self, *a, **k):
+            raise ConnectionError("redis dropped")
+
+    app.state.cache = _StoreFails(cache)
+    try:
+        first = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        second = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.5}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+    assert first.status_code == 503 and first.json()["detail"].startswith("Persisted but NOT live")
+    detail = second.json()["detail"]
+    assert second.status_code == 503 and "still enforces the previous, stricter state" not in detail
+    assert "holds whatever it held before this change" in detail and "older than the registry" in detail
+    assert await _durable(spiffe) == (False, 0.5) and await _live(cache, spiffe) == (False, None)
+
+
+async def test_a_loosening_whose_store_write_fails_once_converges_on_the_retry(env) -> None:
+    """Round 5, D2: the committed state is written once more under a fresh claim before answering."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "d2retry")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    failed: list = []
+
+    class _FailsOnce(_Proxy):
+        async def apply_admin_trust_control_if_owner(self, *a, **k):
+            if not failed:
+                failed.append(1)
+                raise ConnectionError("redis blip")
+            return await self._real.apply_admin_trust_control_if_owner(*a, **k)
+
+    app.state.cache = _FailsOnce(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.5}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+    assert resp.status_code == 200 and failed == [1]
+    assert await _live(cache, spiffe) == (False, 0.5) == await _durable(spiffe)
+
+
+class _LoseFence(_Proxy):
+    """Another claim lands between this request's claim and its fenced write."""
+
+    async def apply_admin_trust_control_if_owner(self, spiffe_id, token, **k):
+        await self._real.claim_admin_trust_owner(spiffe_id, "someone-else")
+        return await self._real.apply_admin_trust_control_if_owner(spiffe_id, token, **k)
+
+
+async def test_a_tightening_that_loses_its_fence_is_not_answered_as_live(env) -> None:
+    """Round 5 mutation gap: FENCE_LOST is not 'live'. The store did not take it, so 'Persisted but NOT live'."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "tlost")
+    app.state.cache = _LoseFence(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Persisted but NOT live")
+    assert await _live(cache, spiffe) == (False, None)
+
+
+async def test_a_steal_that_loses_its_fence_is_not_answered_as_live(env, short_waits) -> None:
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "slost")
+    await _seed_registered(spiffe)
+    app.state.cache = _LoseFence(cache)
+    try:
+        async with _HeldLock(spiffe):
+            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Trust change not applied")
+    assert await cache._client().get(f"agent_frozen:{spiffe}") is None
+
+
+async def test_the_real_fenced_script_deletes_a_cap_on_a_clear(env) -> None:
+    """Round 5 mutation gap: only the fake cache's emulation of the cap delete was tested."""
+    _, _, cache, ids = env
+    spiffe = _agent(ids, "lua")
+    for frozen, cap in ((False, 0.3), (True, None), (False, None)):
+        token = uuid.uuid4().hex
+        await cache.claim_admin_trust_owner(spiffe, token)
+        assert await cache.apply_admin_trust_control_if_owner(spiffe, token, frozen=frozen, cap=cap) == 1
+        assert await _live(cache, spiffe) == (frozen, cap)
+
+
+async def test_the_warm_cursor_follows_the_ordered_ids_not_the_batch_rows(env) -> None:
+    """Round 5 mutation gap: the cursor must come from the ORDERED id list; the re-read rows (ANY(:ids)) come
+    back in storage order, and a cursor taken from them re-warms or skips agents."""
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-cursor-{uuid.uuid4().hex[:8]}"
+    agents = [f"{prefix}/{n}" for n in "abcd"]
+    ids.extend(agents)
+    await _seed_frozen_rows(list(reversed(agents)))  # stored d, c, b, a
+    writes: dict[str, int] = {}
+
+    class _Count(_Proxy):
+        async def warm_admin_trust_controls(self, token, entries, *a, **k):
+            for spiffe_id, _f, _c in entries:
+                writes[spiffe_id] = writes.get(spiffe_id, 0) + 1
+            return await self._real.warm_admin_trust_controls(token, entries, *a, **k)
+
+    class _SeqScan(_Proxy):
+        async def execute(self, stmt, *a, **k):
+            if "agent_registry" in str(stmt):
+                for setting in ("enable_indexscan", "enable_bitmapscan", "enable_indexonlyscan"):
+                    await self._real.execute(text(f"SET LOCAL {setting} = off"))
+            return await self._real.execute(stmt, *a, **k)
+
+    async def _factory():
+        gen = get_session()
+        try:
+            yield _SeqScan(await gen.__anext__())
+        finally:
+            await gen.aclose()
+
+    assert await warm_agent_overrides(_Count(cache), _factory, {"after": prefix}, batch_size=2) == 4
+    assert writes == dict.fromkeys(agents, 1), writes
+
+
+async def test_admin_writes_in_one_process_never_take_more_than_half_the_pool(env, short_waits, monkeypatch) -> None:
+    """Round 5: the per-agent gate does not bound writes to DIFFERENT agents; each holds a pooled connection
+    through its store calls. A process-wide cap of half the pool keeps the rest for everything else."""
+    import norviq.api.routers.agents as agents_mod
+
+    app, client, cache, ids = env
+    monkeypatch.setattr(settings, "pg_pool_size", 2)  # one admin slot
+    monkeypatch.setattr(agents_mod, "_STORE_TIMEOUT_S", 3.0)
+    agents_mod._slots.clear()
+    first, second = _agent(ids, "slot-a"), _agent(ids, "slot-b")
+    gate, hit = asyncio.Event(), asyncio.Event()
+
+    class _Pause(_Proxy):
+        async def apply_admin_trust_control_if_owner(self, *a, **k):
+            if not hit.is_set():
+                hit.set()
+                await gate.wait()
+            return await self._real.apply_admin_trust_control_if_owner(*a, **k)
+
+    app.state.cache = _Pause(cache)
+    try:
+        held = asyncio.create_task(client.put(f"/api/v1/agents/{first}/trust", json={"score": 0.4}, headers=_hdr()))
+        await asyncio.wait_for(hit.wait(), 5)
+        other = await client.put(f"/api/v1/agents/{second}/trust", json={"score": 0.4}, headers=_hdr())
+        gate.set()
+        assert (await asyncio.wait_for(held, 10)).status_code == 200
+    finally:
+        app.state.cache = cache
+        agents_mod._slots.clear()
+    assert other.status_code == 503 and "too many admin trust changes" in other.json()["detail"]
+
+
+async def test_the_admin_connection_bounds_its_idle_time_and_resets_it_before_the_pool(env) -> None:
+    """Round 5: a backend whose API side vanished kept the agent's lock until TCP keepalive (hours). The admin
+    connection sets idle_session_timeout for the operation and puts the server default back on release."""
+    app, client, _, ids = env
+    spiffe = _agent(ids, "idle")
+    seen: list[str] = []
+
+    class _Record(_Proxy):
+        async def execute(self, stmt, *a, **k):
+            seen.append(str(stmt))
+            return await self._real.execute(stmt, *a, **k)
+
+    import norviq.api.routers.agents as agents_mod
+
+    class _Db:
+        async def connect(self):
+            return _Record(await agents_mod._EngineConnector().connect())
+
+    app.dependency_overrides[get_admin_db] = _Db
+    try:
+        assert (
+            await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        ).status_code == 200
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    set_at = next(i for i, sql in enumerate(seen) if "set_config('idle_session_timeout', :v" in sql)
+    lock_at = next(i for i, sql in enumerate(seen) if "pg_advisory_lock" in sql)
+    reset_at = next(i for i, sql in enumerate(seen) if "reset_val" in sql)
+    assert lock_at < set_at < reset_at
+    async with _session() as session:
+        assert (await session.execute(text("SHOW idle_session_timeout"))).scalar() in ("0", "0ms")
+
+
+async def test_an_id_whose_namespace_is_longer_than_the_column_can_still_be_frozen(env) -> None:
+    """Round 5: the derived namespace/class went into String(255) columns, so such an id's freeze could never
+    be persisted; they are truncated (display fields the evaluator's own upsert overwrites)."""
+    _, client, _, ids = env
+    spiffe = f"spiffe://norviq/ns/{'n' * 300}/sa/x-{uuid.uuid4().hex[:6]}"
+    ids.append(spiffe)
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    row = await _row(spiffe)
+    assert row["frozen"] is True and len(row["namespace"]) == 255
+
+
+async def test_a_tightening_that_lost_its_fence_to_a_stolen_freeze_does_not_retry_over_it(
+    env, short_waits, monkeypatch
+) -> None:
+    """Round 5: a write retries under a fresh claim only after a store error or a vanished owner key, never after
+    FENCE_LOST — a newer claim may be a stolen freeze, and re-claiming would write a cap over it."""
+    import norviq.api.routers.agents as agents_mod
+
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "tsteal")
+    gate, hit = asyncio.Event(), asyncio.Event()
+
+    class _PauseFirst(_Proxy):
+        async def apply_admin_trust_control_if_owner(self, spiffe_id, token, *, frozen, cap, display=None):
+            if not frozen and not hit.is_set():
+                hit.set()
+                await gate.wait()
+            return await self._real.apply_admin_trust_control_if_owner(
+                spiffe_id, token, frozen=frozen, cap=cap, display=display
+            )
+
+    monkeypatch.setattr(agents_mod, "_STORE_TIMEOUT_S", 30)
+    app.state.cache = _PauseFirst(cache)
+    try:
+        capping = asyncio.create_task(client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr()))
+        await asyncio.wait_for(hit.wait(), 5)
+        freeze = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        gate.set()
+        cap_resp = await asyncio.wait_for(capping, 10)
+    finally:
+        app.state.cache = cache
+    assert freeze.status_code == 503 and freeze.json()["detail"].startswith("Freeze applied live")
+    assert cap_resp.status_code == 503 and cap_resp.json()["detail"].startswith("Persisted but NOT live")
+    assert await _live(cache, spiffe) == (True, None)
+
+
+async def test_writers_queued_on_one_agent_do_not_take_slots_from_other_agents(env, short_waits, monkeypatch) -> None:
+    """Round 5: the per-agent gate is entered before a process slot, so a queue behind one agent waits without
+    a slot (or a connection) and a write to another agent still gets through."""
+    import norviq.api.routers.agents as agents_mod
+
+    app, client, cache, ids = env
+    monkeypatch.setattr(settings, "pg_pool_size", 4)  # two admin slots
+    monkeypatch.setattr(agents_mod, "_STORE_TIMEOUT_S", 3.0)
+    # Long enough that a queued writer holding a slot (without the gate) would outlast the other agent's wait.
+    monkeypatch.setattr(agents_mod, "_lock_timeout_ms", lambda: 2000)
+    agents_mod._slots.clear()
+    busy, other = _agent(ids, "q-busy"), _agent(ids, "q-other")
+    gate, hit = asyncio.Event(), asyncio.Event()
+
+    class _PauseBusy(_Proxy):
+        async def apply_admin_trust_control_if_owner(self, spiffe_id, *a, **k):
+            if spiffe_id == busy:
+                hit.set()
+                await gate.wait()
+            return await self._real.apply_admin_trust_control_if_owner(spiffe_id, *a, **k)
+
+    app.state.cache = _PauseBusy(cache)
+    try:
+        holder = asyncio.create_task(client.put(f"/api/v1/agents/{busy}/trust", json={"score": 0.4}, headers=_hdr()))
+        await asyncio.wait_for(hit.wait(), 5)
+        queued = [
+            asyncio.create_task(client.put(f"/api/v1/agents/{busy}/trust", json={"score": 0.4}, headers=_hdr()))
+            for _ in range(3)
+        ]
+        await asyncio.sleep(0.5)  # the queued writers reach the gate (or, without one, a slot) first
+        started = time.monotonic()
+        elsewhere = await client.put(f"/api/v1/agents/{other}/trust", json={"score": 0.4}, headers=_hdr())
+        waited = time.monotonic() - started
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(holder, *queued), 15)
+    finally:
+        app.state.cache = cache
+        agents_mod._slots.clear()
+    assert elsewhere.status_code == 200, elsewhere.text
+    assert waited < 1.0, f"the other agent's write waited {waited:.1f}s for a slot held by a queued writer"

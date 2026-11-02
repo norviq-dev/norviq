@@ -150,7 +150,7 @@ class FakeCache:
         """Remove the admin trust cap."""
         await self.delete(f"agent_trust_override:{spiffe_id}")
 
-    async def claim_admin_trust_owner(self, spiffe_id: str, token: str) -> None:
+    async def claim_admin_trust_owner(self, spiffe_id: str, token: str, ttl_ms: int | None = None) -> None:
         """RedisCache's admin-writer fence, over the generic keys."""
         await self.set(f"agent_trust_owner:{spiffe_id}", token)
 

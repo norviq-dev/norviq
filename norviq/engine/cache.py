@@ -669,9 +669,10 @@ if ARGV[2] == '1' then redis.call('SET', KEYS[2], '1') elseif ARGV[3] ~= '' then
 return 1
 """
 
-    async def claim_admin_trust_owner(self, spiffe_id: str, token: str) -> None:
-        """Make ``token`` the agent's current admin writer (30 s), voiding any earlier writer's fence."""
-        await self._client().set(f"agent_trust_owner:{spiffe_id}", token, px=self._OWNER_TTL_MS)
+    async def claim_admin_trust_owner(self, spiffe_id: str, token: str, ttl_ms: int | None = None) -> None:
+        """Make ``token`` the agent's current admin writer, voiding any earlier writer's fence. ``ttl_ms`` (default
+        30 s) must outlast the writer's whole operation, or its own write finds the key gone."""
+        await self._client().set(f"agent_trust_owner:{spiffe_id}", token, px=ttl_ms or self._OWNER_TTL_MS)
 
     async def apply_admin_trust_control_if_owner(
         self, spiffe_id: str, token: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
@@ -687,17 +688,34 @@ return 1
                 str(self._jitter_ttl(settings.redis_ttl_trust_s))]
         return int(await self._client().eval(self._FENCED_CONTROL_LUA, len(keys), *keys, *args))
 
-    async def warm_admin_trust_controls(self, token: str, entries: list[tuple[str, bool, float | None]]) -> list[int]:
+    async def warm_admin_trust_controls(
+        self, token: str, entries: list[tuple[str, bool, float | None]], rounds: int = 3
+    ) -> list[int]:
         """The boot warm's batch: claim every agent for ``token``, then add each agent's freeze or cap through the
-        fence, in two pipelines. A cut-off attempt's late writes are no-ops once an admin write re-claims."""
+        fence, in two pipelines. A cut-off attempt's late writes are no-ops once an admin write re-claims.
+
+        The caller holds the batch's Postgres locks, so no LIVE admin writer can own these agents: a lost or
+        missing fence here is a dead writer's late claim (a SET cut off on the wire that landed after the warm's
+        claim) or a freeze steal (add-only, so re-adding over it is safe). Those agents are re-claimed and
+        re-added, up to ``rounds`` times; the outcomes returned are the last ones, so the caller can see any
+        agent that still did not take its control."""
         client = self._client()
-        async with client.pipeline(transaction=False) as pipe:
-            for spiffe_id, _frozen, _cap in entries:
-                await pipe.set(f"agent_trust_owner:{spiffe_id}", token, px=self._OWNER_TTL_MS)
-            await pipe.execute()
-        async with client.pipeline(transaction=False) as pipe:
-            for spiffe_id, frozen, cap in entries:
-                keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}"]
-                await pipe.eval(self._FENCED_WARM_LUA, 3, *keys, token, "1" if frozen else "0",
-                                "" if cap is None else str(float(cap)))
-            return [int(r) for r in await pipe.execute()]
+        outcomes = [self.FENCE_LOST] * len(entries)
+        for _ in range(rounds):
+            pending = [i for i, outcome in enumerate(outcomes) if outcome != self.FENCE_APPLIED]
+            if not pending:
+                break
+            async with client.pipeline(transaction=False) as pipe:
+                for i in pending:
+                    await pipe.set(f"agent_trust_owner:{entries[i][0]}", token, px=self._OWNER_TTL_MS)
+                await pipe.execute()
+            async with client.pipeline(transaction=False) as pipe:
+                for i in pending:
+                    spiffe_id, frozen, cap = entries[i]
+                    keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}",
+                            f"agent_trust_override:{spiffe_id}"]
+                    await pipe.eval(self._FENCED_WARM_LUA, 3, *keys, token, "1" if frozen else "0",
+                                    "" if cap is None else str(float(cap)))
+                for i, result in zip(pending, await pipe.execute()):
+                    outcomes[i] = int(result)
+        return outcomes
