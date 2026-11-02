@@ -187,9 +187,15 @@ export function Login() {
   };
 
   /** Success → brief branded success state → into the app shell. */
+  // The redirect after a successful sign-in is a timer, so it must not outlive the component: a timer
+  // left running after unmount navigated a page that no longer rendered this screen, and in the test
+  // environment it fired after teardown ("window is not defined") and failed an otherwise green run.
+  const redirectTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(redirectTimer.current), []);
   const finish = (p: Phase) => {
     setPhase(p);
-    window.setTimeout(() => window.location.replace("/"), 900);
+    window.clearTimeout(redirectTimer.current);
+    redirectTimer.current = window.setTimeout(() => window.location.replace("/"), 900);
   };
 
   const signIn = async () => {

@@ -322,6 +322,22 @@ describe("default login view", () => {
     expect((call[1]!.headers as Record<string, string>).Authorization).toBe("Bearer aaa.bbb.ccc");
   });
 
+  it("the post-sign-in redirect timer is cleared on unmount (it must not fire after the screen is gone)", async () => {
+    mockFetch(200, { sub: "cli-admin", role: "admin" });
+    const set = vi.spyOn(window, "setTimeout");
+    const clear = vi.spyOn(window, "clearTimeout");
+    const { unmount } = render(<Login />);
+    fireEvent.click(screen.getByRole("button", { name: /use a token \/ cli/i }));
+    fireEvent.change(screen.getByLabelText(/access token/i), { target: { value: "aaa.bbb.ccc" } });
+    fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
+    await waitFor(() => expect(sessionStorage.getItem("nrvq_token")).toBe("aaa.bbb.ccc"));
+    const redirect = set.mock.calls.findIndex((c) => c[1] === 900);
+    expect(redirect).toBeGreaterThanOrEqual(0);
+    const id = set.mock.results[redirect].value;
+    unmount();
+    expect(clear.mock.calls.some((c) => c[0] === id)).toBe(true);
+  });
+
   it("rejects an invalid CLI token with an error banner", async () => {
     mockFetch(401, { detail: "Invalid token" });
     render(<Login />);
