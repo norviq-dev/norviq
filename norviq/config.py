@@ -289,6 +289,12 @@ class NorviqSettings(BaseSettings):
     # Upper bound on in-flight request-id bookkeeping per direction. A peer that opens requests and never
     # completes them would otherwise grow this map without limit; oldest entries are evicted.
     mcp_max_pending_requests: int = 4096
+    # How long the proxy waits for its OWN `tools/list` when a `tools/call` arrives and it has no
+    # scanned catalog for the server yet (a cold catalog: the proxy restarted and the client did not
+    # re-list). The answer is scanned and pinned on the ordinary Gate A path before the call is
+    # evaluated. On timeout or error the call is evaluated unscanned, as before, which the baseline
+    # escalates. Bounded because the client's call waits on it; 0 disables the self-list.
+    mcp_cold_list_timeout_s: float = 5.0
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     db_ssl_mode: str = Field(
         default="prefer",

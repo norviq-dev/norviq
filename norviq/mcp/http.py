@@ -57,6 +57,10 @@ _HOP_HEADERS = frozenset({
     "content-length", "transfer-encoding", "connection", "keep-alive",
     "host", "upgrade", "te", "trailer", "proxy-authorization", "proxy-authenticate",
 })
+# Cap on the answer to the proxy's own `tools/list` (cold catalog). The same bound the stdio driver
+# puts on one JSON-RPC line: far above a real catalogue, and it keeps a server from streaming without
+# end into memory while a client's call waits.
+_OWN_LIST_MAX_BYTES = 8 * 1024 * 1024
 
 
 class HttpProxy:
@@ -313,7 +317,10 @@ class HttpProxy:
         if msg is None:
             return JSONResponse(P.error_response(None, P.E_PARSE, "invalid JSON-RPC payload"), status_code=400)
 
-        mediation = await fw.on_client_message(msg)
+        mediation = await fw.on_client_message(msg, list_upstream=self._upstream_lister(request))
+        if mediation.catalog_scanned:
+            # The proxy listed a cold catalog itself; report it exactly as a forwarded tools/list.
+            self._report_catalog(fw, mediation)
         if mediation.reply is not None and mediation.forward is None:
             # Answered locally: the upstream is never contacted. This is the block path, and the
             # 200 is correct — the JSON-RPC envelope carries the refusal, not the HTTP status.
@@ -340,6 +347,50 @@ class HttpProxy:
         if _wants_stream(request):
             return await self._stream_through(fw, "POST", request, mediation.forward)
         return await self._post_once(fw, request, mediation.forward)
+
+    def _upstream_lister(self, request: Request):
+        """The firewall's way to send its own `tools/list` upstream for a cold catalog.
+
+        It carries the CLIENT's request headers (hop headers removed, as for any forward), because
+        that is what the upstream authenticates and correlates on: an `Authorization` the server
+        requires, the 2025-06-18 `Mcp-Session-Id` of a stateful server, the protocol-version header.
+        A list sent without them would be refused by any server that checks, and the call would stay
+        cold for no reason the operator could see.
+
+        Bounded in size here and in time by the firewall. The answer is either one JSON body or an SSE
+        stream, the server's choice per request as everywhere on this transport; on a stream the
+        response is the frame whose id matches, and the stream is closed as soon as it is found.
+        """
+        headers = {
+            **self._forward_headers(request.headers),
+            "content-type": "application/json",
+            "accept": f"application/json, {_SSE}",
+        }
+
+        async def _list(own: P.JsonRpcMessage) -> P.JsonRpcMessage | None:
+            async with self._client.stream("POST", self._upstream, headers=headers,
+                                           content=own.raw) as resp:
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"upstream answered HTTP {resp.status_code}")
+                streamed = _SSE in resp.headers.get("content-type", "")
+                buffer = b""
+                async for chunk in resp.aiter_bytes():
+                    buffer += chunk
+                    if len(buffer) > _OWN_LIST_MAX_BYTES:
+                        raise RuntimeError(f"tools/list answer exceeded {_OWN_LIST_MAX_BYTES} bytes")
+                    if not streamed:
+                        continue
+                    while b"\n\n" in buffer:
+                        frame, buffer = buffer.split(b"\n\n", 1)
+                        found = _own_response_in_frame(frame, own.id)
+                        if found is not None:
+                            return found
+                if streamed:
+                    return _own_response_in_frame(buffer, own.id)
+                found = P.decode(buffer)
+                return found if found is not None and found.id == own.id else None
+
+        return _list
 
     async def _handle_get(self, request: Request) -> Response:
         """Standalone SSE stream: server -> client, including server-initiated requests."""
@@ -527,6 +578,16 @@ class HttpProxy:
             with contextlib.suppress(Exception):
                 await self._engine.close()
         return 0
+
+
+def _own_response_in_frame(frame: bytes, own_id: Any) -> P.JsonRpcMessage | None:
+    """The response to the proxy's own request, if this SSE frame carries it; else None."""
+    for line in frame.split(b"\n"):
+        if line.startswith(b"data:"):
+            msg = P.decode(line[5:])
+            if msg is not None and msg.is_response and msg.id == own_id:
+                return msg
+    return None
 
 
 def _wants_stream(request: Request) -> bool:

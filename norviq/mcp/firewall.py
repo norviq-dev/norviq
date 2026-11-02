@@ -22,11 +22,13 @@ re-deriving a verdict per call.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from time import monotonic, perf_counter
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import structlog
 
@@ -109,6 +111,24 @@ _DENIAL_REPORT_WINDOW_S = 60.0
 # Both halves of the key are attacker-influenced — a client may call any tool name it likes — so the
 # ledger itself needs a bound, or it becomes the amplifier one level along.
 _DENIAL_REPORT_MAX_KEYS = 512
+
+# After the proxy's own `tools/list` for a cold catalog FAILS, how long before another call may try
+# again. Without it a server whose list errors or hangs turns every call into an upstream round trip
+# plus up to `mcp_cold_list_timeout_s` of waiting — the client pays the timeout per call and the
+# server is handed a request rate it can set by failing. With it a transient failure still recovers
+# within half a minute, and the calls in between are escalated exactly as before the self-list existed.
+_COLD_LIST_RETRY_S = 30.0
+# The JSON-RPC id of the proxy's own list. A string with a random part, so it cannot collide with an
+# id the client chose (clients number their requests) and a peer cannot predict it to answer it early.
+_COLD_LIST_ID_PREFIX = "norviq-cold-list-"
+# The 2026-07-28 per-request handshake keys copied from the triggering call onto the self-list, so a
+# stateless server sees the same revision and client capabilities on both requests.
+_COLD_LIST_META_KEYS = (P.META_PROTOCOL_VERSION, P.META_CLIENT_CAPABILITIES, P.META_CLIENT_INFO)
+
+# Sends the proxy's own `tools/list` request upstream and returns the server's response to it (the
+# message whose id matches), or None. Supplied per call by the transport driver, because only the
+# driver owns the upstream connection — and on HTTP, the headers the client's request carried.
+ListUpstream = Callable[[P.JsonRpcMessage], Awaitable[P.JsonRpcMessage | None]]
 
 
 def _fenced(text: str, *, scanned: bool) -> str:
@@ -285,6 +305,10 @@ class MediationResult:
     blocked: bool = False
     decision: PolicyDecision | None = None
     note: str = ""
+    # True when handling this message scanned a catalog the driver has not seen go past: the proxy's
+    # own `tools/list` for a cold catalog. The driver reports the catalog to the control plane on it,
+    # exactly as it does after forwarding a `tools/list` response.
+    catalog_scanned: bool = False
 
 
 class _PendingMap:
@@ -373,6 +397,14 @@ class McpFirewall:
         # (tool, rule) -> (monotonic of last report, refusals suppressed since). Rate-limits the
         # PEP-denial REPORT only; Gate A's decision never consults it.
         self._denial_reports: dict[tuple[str, str], tuple[float, int]] = {}
+        # Whether a `tools/list` response for this server has been through Gate A in this process.
+        # Not the same as "the catalog is non-empty": a blocked server or an empty server is listed and
+        # leaves no entries, and must not be re-listed on every call because of it.
+        self._catalog_listed = False
+        # The proxy's own list for a cold catalog: one task shared by every call that arrives while it
+        # runs (single flight), and when it last failed (see `_COLD_LIST_RETRY_S`).
+        self._cold_list: asyncio.Task | None = None
+        self._cold_list_failed_at: float | None = None
         self.stats: dict[str, int] = {}
 
     # ---------------------------------------------------------------- helpers
@@ -431,8 +463,15 @@ class McpFirewall:
         ]
 
     # ============================================================ CLIENT -> SERVER
-    async def on_client_message(self, msg: P.JsonRpcMessage) -> MediationResult:
-        """Mediate one message travelling from the MCP client to the upstream server."""
+    async def on_client_message(
+        self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None = None,
+    ) -> MediationResult:
+        """Mediate one message travelling from the MCP client to the upstream server.
+
+        `list_upstream` lets the firewall send its own `tools/list` when a `tools/call` finds the
+        catalog cold (see `_warm_cold_catalog`). Without it — a caller that cannot reach the upstream
+        — a cold call is evaluated unscanned, which is the behaviour before the self-list existed.
+        """
         # A batch is a JSON-RPC 2.0 array. MCP removed batching in the 2025-06-18 revision, but an
         # older client may still send one — and a proxy that forwards an array it did not inspect
         # would let a `tools/call` ride inside it ungoverned. Refusing is the only safe answer that
@@ -460,7 +499,10 @@ class McpFirewall:
             if result is not None:
                 return result
         if method == P.M_TOOLS_CALL:
-            return await self._gate_b_tools_call(msg)
+            scanned = await self._warm_cold_catalog(msg, list_upstream)
+            result = await self._gate_b_tools_call(msg)
+            result.catalog_scanned = scanned
+            return result
         if method == P.M_RESOURCES_READ and settings.mcp_govern_resources:
             return await self._gate_b_resources_read(msg)
 
@@ -1100,6 +1142,105 @@ class McpFirewall:
         )
 
     # ============================================================ GATE A
+    async def _warm_cold_catalog(self, call: P.JsonRpcMessage, list_upstream: ListUpstream | None) -> bool:
+        """List the server ourselves when a `tools/call` arrives before any `tools/list` was scanned.
+
+        The catalog is process memory, built only from `tools/list` responses. After a proxy restart
+        a client that does not re-list — a stateless HTTP client, or one reusing the catalog it read
+        before the restart — reached Gate B with no entry for anything it called, and the enforcing
+        baseline's `mcp_definition_never_scanned` held every such call for approval. Measured live on
+        kind: 45/45 calls escalated for an SDK client that calls without listing, 45/45 for one
+        reusing a pre-restart catalog, 0/45 for one that re-lists. mcp 1.30's `call_tool` refreshes
+        its tool list only after a NON-error result and an escalation is an error result, so such a
+        client never recovered on its own.
+
+        The fix scans before use rather than skipping the scan: the server's answer goes through
+        `_gate_a_tools_list`, the same function a client-initiated list goes through — scan, TOFU pin,
+        drift check, shadowing, strip/sanitise, server-level block — and only then is the call
+        evaluated, so a withheld, drifted or quarantined tool is refused by Gate A exactly as it would
+        have been after a client list. Nothing about the policy changes; a tool the server did not
+        list is still unscanned.
+
+        Returns True when this call caused (or shared) a successful scan, so the driver reports the
+        catalog to the control plane as it does after a client list. Never raises: a failure leaves
+        the catalog cold and the call is evaluated as before.
+        """
+        if self._catalog_listed or list_upstream is None:
+            return False
+        timeout = float(settings.mcp_cold_list_timeout_s or 0)
+        if timeout <= 0:
+            return False
+        task = self._cold_list
+        if task is None or task.done():
+            failed_at = self._cold_list_failed_at
+            if failed_at is not None and monotonic() - failed_at < _COLD_LIST_RETRY_S:
+                return False
+            # SINGLE FLIGHT. A restart is exactly when calls arrive in a burst, and N concurrent cold
+            # calls each sending their own list would hand the burst straight to the server. Every
+            # call that arrives while this runs awaits the same task.
+            task = asyncio.ensure_future(self._cold_list_once(call, list_upstream, timeout))
+            self._cold_list = task
+        # Shielded: one waiter being cancelled (an HTTP client hanging up) must not cancel the list
+        # every other waiter is relying on.
+        return await asyncio.shield(task)
+
+    async def _cold_list_once(self, call: P.JsonRpcMessage, list_upstream: ListUpstream,
+                              timeout: float) -> bool:
+        t0 = perf_counter()
+        request_id = f"{_COLD_LIST_ID_PREFIX}{uuid.uuid4().hex}"
+        params: dict[str, Any] = {}
+        call_meta = call.meta
+        meta = {k: call_meta[k] for k in _COLD_LIST_META_KEYS if k in call_meta}
+        if meta:
+            params["_meta"] = meta
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": P.M_TOOLS_LIST, "params": params}
+        request = P.JsonRpcMessage(payload, P.encode(payload).rstrip(b"\n"))
+
+        reason = ""
+        response: P.JsonRpcMessage | None = None
+        try:
+            response = await asyncio.wait_for(list_upstream(request), timeout)
+        except asyncio.TimeoutError:
+            reason = f"no answer within {timeout:g}s"
+        except Exception as exc:  # noqa: BLE001 — any failure keeps the call unscanned; never raise
+            reason = f"{type(exc).__name__}: {exc}"[:200]
+        if not reason:
+            if response is None or not response.is_response or response.id != request_id:
+                reason = "no response to the proxy's tools/list"
+            elif "error" in response.data:
+                err = response.data.get("error")
+                detail = err.get("message") if isinstance(err, dict) else err
+                reason = f"the server answered with an error: {str(detail)[:200]}"
+            elif not isinstance(response.result.get("tools"), list):
+                reason = "the response carried no tools list"
+        if not reason:
+            try:
+                await self._gate_a_tools_list(response)
+            except Exception as exc:  # noqa: BLE001 — same: fall back to the unscanned path, loudly
+                reason = f"scanning the listing failed: {type(exc).__name__}: {exc}"[:200]
+
+        if reason:
+            self._cold_list_failed_at = monotonic()
+            self._bump("cold_list_failed")
+            log.warning(
+                "nrvq.mcp.gate_a.cold_list_failed", server=self._server_id,
+                tool=str(call.params.get("name", ""))[:200], reason=reason,
+                retry_after_s=_COLD_LIST_RETRY_S, code="NRVQ-MCP-5080",
+                hint="calls are evaluated with no scanned definition (the baseline escalates them as "
+                     "mcp_definition_never_scanned) until the client lists or a later attempt succeeds",
+            )
+            return False
+        self._cold_list_failed_at = None
+        self._bump("cold_listed")
+        log.info(
+            "nrvq.mcp.gate_a.cold_listed", server=self._server_id, tools=len(self._catalog),
+            # Only the first page is read. A tool listed on a later page stays unscanned until the
+            # client lists, which is the behaviour before the self-list.
+            more_pages=bool(response.result.get("nextCursor")),
+            ms=round((perf_counter() - t0) * 1000.0, 1), code="NRVQ-MCP-5079",
+        )
+        return True
+
     def _on_catalog_changed(self, method: str) -> None:
         """React to `notifications/*_changed`.
 
@@ -1127,6 +1268,9 @@ class McpFirewall:
         tools = msg.result.get("tools")
         if not isinstance(tools, list):
             return MediationResult(forward=msg.framed)
+        # Set before the server-level decision below: a blocked server's listing has been through Gate
+        # A too, and a cold-catalog self-list must not repeat on every call because it left no entries.
+        self._catalog_listed = True
 
         # THE SERVER-LEVEL DECISION COMES FIRST, and it withholds WHOLESALE rather than per tool.
         #

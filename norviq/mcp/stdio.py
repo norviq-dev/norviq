@@ -132,6 +132,9 @@ class StdioProxy:
         self._out_lock = asyncio.Lock()
         self._pin_store = None      # set only for the control-plane backend
         self._server_store = None   # the MCP server registry; always set once the firewall is built
+        # The firewall's own `tools/list` requests awaiting their answer, by JSON-RPC id. Their
+        # responses are the PROXY's, so the server->client pump hands them here instead of to the client.
+        self._own_requests: dict[str, asyncio.Future] = {}
 
     # ------------------------------------------------------------------ setup
     async def _build_firewall(self) -> McpFirewall:
@@ -332,11 +335,35 @@ class StdioProxy:
                 # not classify would mean forwarding a possible tools/call ungoverned.
                 log.warning("nrvq.mcp.client.undecodable_dropped", bytes=len(line), code="NRVQ-MCP-5003")
                 continue
-            result = await firewall.on_client_message(msg)
+            result = await firewall.on_client_message(msg, list_upstream=self._list_upstream)
+            if result.catalog_scanned:
+                # The proxy listed a cold catalog itself; report it exactly as a forwarded tools/list.
+                self._report_catalog()
             if result.reply is not None:
                 await self._write_client(result.reply)
             if result.forward is not None:
                 await self._write_server(result.forward)
+
+    async def _list_upstream(self, request: P.JsonRpcMessage) -> P.JsonRpcMessage | None:
+        """Send the firewall's own request to the server and wait for the response with its id.
+
+        The client->server pump awaits this inline, which keeps the client's own ordering: its call is
+        forwarded after the list, never before. The firewall bounds the wait; cancelling it on timeout
+        lands in the `finally` below, so an unanswered id does not stay registered.
+        """
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._own_requests[request.id] = future
+        try:
+            await self._write_server(request.framed)
+            return await future
+        finally:
+            self._own_requests.pop(request.id, None)
+
+    def _report_catalog(self) -> None:
+        if self._pin_store is not None:
+            catalog = self._firewall.catalog_report_due()
+            if catalog is not None:
+                asyncio.create_task(self._pin_store.flush(catalog))
 
     async def _pump_server_to_client(self) -> None:
         firewall = self._firewall
@@ -349,6 +376,14 @@ class StdioProxy:
             msg = P.decode(line)
             if msg is None:
                 log.warning("nrvq.mcp.server.undecodable_dropped", bytes=len(line), code="NRVQ-MCP-5004")
+                continue
+            # The answer to the proxy's OWN request. Not forwarded: the client never asked for it, and
+            # an unsolicited response would confuse its id bookkeeping. The firewall scans it on the
+            # waiting side, through the same Gate A function a client's listing goes through.
+            own = self._own_requests.get(msg.id) if msg.is_response and isinstance(msg.id, str) else None
+            if own is not None:
+                if not own.done():
+                    own.set_result(msg)
                 continue
             result = await firewall.on_server_message(msg)
             if result.reply is not None:
@@ -363,10 +398,7 @@ class StdioProxy:
             # The DUE rule now lives on the firewall and is shared with the HTTP driver. It used to
             # be "a rewrite, or the first listing", which re-reported on every list of a persistently
             # poisoned server — the report rate was the server's to choose.
-            if self._pin_store is not None:
-                catalog = firewall.catalog_report_due()
-                if catalog is not None:
-                    asyncio.create_task(self._pin_store.flush(catalog))
+            self._report_catalog()
 
     async def _drain_server_stderr(self) -> None:
         """Relay the upstream server's stderr to ours.

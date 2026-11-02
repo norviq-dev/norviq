@@ -248,7 +248,12 @@ build's `apk upgrade`, and 22 in curl. A mirror behind `global.imageRegistry` ne
 from `alpine:3.21` to `alpine:3.24`: Alpine 3.21 left security support on 2026-11-01.
 
 **Fixed.** `global.imageRegistry` relocates the busybox init image. An agent that retries one refused
-call no longer loses trust on every attempt. Two security booleans no longer fall back to off when an
+call no longer loses trust on every attempt. An MCP client that calls tools without listing them
+after the proxy restarts (a stateless HTTP client, or one reusing its old tool list) no longer has
+every call held for approval by `mcp_definition_never_scanned`: the proxy lists the server itself
+and scans the answer through Gate A before deciding the call, so withheld, drifted and quarantined
+tools are still refused. If that list fails the call is escalated as before and `NRVQ-MCP-5080` says
+why; `NRVQ_MCP_COLD_LIST_TIMEOUT_S` (default 5s, `0` off) bounds it. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

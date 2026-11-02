@@ -129,6 +129,12 @@ def _make(decision: str = "allow"):
     return TestClient(app), upstream, evaluator, proxy
 
 
+def _only_the_proxys_own_list(received: list[dict]) -> bool:
+    """True when nothing but the proxy's own cold-catalog `tools/list` (if any) reached the upstream."""
+    return all(m.get("method") == "tools/list" and str(m.get("id", "")).startswith("norviq-cold-list-")
+               for m in received)
+
+
 def _rpc(method: str, params: dict | None = None, mid: int = 1) -> dict:
     return {"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}}
 
@@ -149,7 +155,9 @@ def test_blocked_call_never_reaches_the_upstream():
     body = r.json()
     assert body["result"]["isError"] is True
     assert body["result"]["_meta"]["norviq"]["gate"] == "B"
-    assert upstream.received == [], "a blocked call must not be forwarded"
+    # The proxy's OWN tools/list for the cold catalog is the only thing allowed upstream (it scans the
+    # definitions before the call is decided — see test_cold_catalog.py). The call itself never is.
+    assert _only_the_proxys_own_list(upstream.received), "a blocked call must not be forwarded"
 
 
 def test_block_is_answered_with_200_and_a_jsonrpc_error_envelope():
@@ -299,7 +307,7 @@ def test_a_caller_cannot_reset_its_own_gate_a_state_with_delete():
 def test_non_allow_decisions_all_withhold_the_call(decision):
     client, upstream, _, proxy = _make(decision)
     client.post("/mcp", json=_rpc("tools/call", {"name": "x", "arguments": {}}))
-    assert upstream.received == []
+    assert _only_the_proxys_own_list(upstream.received)
 
 
 def test_output_dlp_applies_on_the_http_response_path():

@@ -537,6 +537,45 @@ The control-plane store reads once at startup and then **re-reads on a timer**
 startup copy for its whole lifetime, so an operator who revoked approval would see the console update
 while the tool stayed listed and callable until the pod restarted (`pins.py:375-392`).
 
+### A call before any list: the cold catalog
+
+The pins survive a restart (table above); the proxy's **catalog** does not. It is process memory,
+built from `tools/list` responses, and it is what Gate A's per-call verdict and every `input.mcp`
+fact in §5 are read from. A client that does not list again after the proxy restarts — a stateless
+HTTP client, or one reusing the tool list it read before the restart — used to reach Gate B with no
+catalog entry, so every call carried `definition_seen: false` and the enforcing baseline's
+`mcp_definition_never_scanned` held it for approval. Measured on kind with the enforcing baseline:
+45 of 45 calls escalated for a client that calls without listing, 45 of 45 for one reusing a
+pre-restart list, 0 of 45 for one that lists. The mcp Python SDK (1.30) refreshes its tool list only
+after a successful call, and an escalation is an error result, so that client never recovered.
+
+From 0.2.6, when a `tools/call` arrives and no `tools/list` for that server has been through Gate A
+in this process, the proxy sends its own `tools/list` upstream first and puts the answer through
+the same Gate A path a client's listing takes: scan, TOFU pin, drift check, shadowing,
+strip/sanitise, the server-level block, and the report to `POST /api/v1/mcp/pins/observe`. Then it
+evaluates the call. So:
+
+- a tool that scans clean and matches its pin is evaluated with `definition_seen: true` and runs if
+  policy allows it;
+- a tool Gate A strips, a drifted definition, and a quarantined one are refused by Gate A, exactly as
+  after a client list; the call never reaches the server;
+- a tool the server did not list is still unscanned (`definition_seen: false`), and the baseline
+  still escalates it.
+
+Bounds. The proxy's list waits at most `NRVQ_MCP_COLD_LIST_TIMEOUT_S` (default `5`; `0` turns the
+self-list off and restores the old behaviour). Calls that arrive while it is in flight wait for that
+one list rather than sending their own. Only the first page of a paginated listing is read. On HTTP
+the list carries the client's request headers (minus hop headers), so a server that authenticates or
+keeps a 2025-06-18 session sees the same credentials as the call; the answer is capped at 8 MiB.
+On stdio the server's answer goes to the proxy and is never forwarded to the client.
+
+If the list fails (an error answer, a non-2xx status, no answer in time, or no tools list in it),
+the call is evaluated unscanned as before, and the proxy logs `NRVQ-MCP-5080`
+(`nrvq.mcp.gate_a.cold_list_failed`, WARNING, with the reason). It does not try again for 30 seconds,
+so a failing server cannot turn every call into an upstream round trip plus a timeout. A successful
+self-list logs `NRVQ-MCP-5079` (`nrvq.mcp.gate_a.cold_listed`, INFO). A client `tools/list` at any
+time warms the catalog the ordinary way.
+
 ### Two verdicts, and the one that enforces is local
 
 The verdict the proxy **acts on** is computed in-process by `PinRegistry.check` (`pins.py:221-260`),
@@ -667,7 +706,8 @@ as `/evaluate` does — a service token scoped to one tenant cannot write anothe
 Structured logs use the `NRVQ-MCP-5xxx` range: `5020` Gate-A call denial, `5021` Gate-B block, `5031`
 stripped, `5032` sanitised, `5035` output-DLP redaction, `5036` response injection flagged, `5041`
 first pin, `5042` drift, `5043` approved, `5044` revoked, `5046` control plane unreachable, `5066`
-schema violation, `5070` schema not fully enforceable. Latency is recorded as
+schema violation, `5070` schema not fully enforceable, `5079` cold catalog listed by the proxy,
+`5080` the proxy's cold-catalog list failed. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
 `response_guard` (`norviq/telemetry/metrics.py:156-168`). These codes are not yet in
 [Error Codes](../error-codes.md).
@@ -693,6 +733,7 @@ All read from the **proxy process's** environment, prefix `NRVQ_`:
 | `NRVQ_MCP_GOVERN_SAMPLING` | `true` | evaluate server-initiated `sampling/createMessage` |
 | `NRVQ_MCP_ALLOW_TOOL_HEADERS` | `false` | permit tool parameters to set outbound HTTP headers |
 | `NRVQ_MCP_MAX_PENDING_REQUESTS` | `4096` | per-direction cap on in-flight request-id bookkeeping |
+| `NRVQ_MCP_COLD_LIST_TIMEOUT_S` | `5` | how long the proxy waits for its own `tools/list` when a call arrives before any list was scanned (§6, cold catalog); `0` disables it |
 
 > **`file` with no path is not an error — it is a silent downgrade, now made loud.** `NRVQ_MCP_PIN_STORE=file` without `NRVQ_MCP_PIN_PATH` degrades to the in-process store: a restart re-TOFUs every definition and drift is not detected. `build_store` logs this as `nrvq.mcp.pins.store_degraded` (**`NRVQ-MCP-5078`**) on every transport. Until 0.2.6 only the HTTP proxy said so; the stdio proxy this guide's quickstart recommends degraded with no line at all.
 
