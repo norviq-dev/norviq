@@ -411,6 +411,9 @@ class McpFirewall:
         # runs (single flight), and when it last failed (see `_COLD_LIST_RETRY_S`).
         self._cold_list: asyncio.Task | None = None
         self._cold_list_failed_at: float | None = None
+        # Counts CLIENT-initiated tools/list responses that have been through Gate A. The proxy's own
+        # list compares it before and after its wait: see `_cold_list_once`.
+        self._client_list_generation = 0
         self.stats: dict[str, int] = {}
 
     # ---------------------------------------------------------------- helpers
@@ -587,7 +590,9 @@ class McpFirewall:
             if requested == P.M_TOOLS_LIST:
                 # The only awaited branch in this dispatch. It reports a blocked-server refusal to the
                 # control plane, and that report is a network call — see `_gate_a_tools_list`.
-                return await self._gate_a_tools_list(msg)
+                result = await self._gate_a_tools_list(msg)
+                self._client_list_generation += 1
+                return result
             if requested == P.M_PROMPTS_GET:
                 return self._gate_a_prompts_get(msg)
             # The three discovery siblings of tools/list. Same channel, different method name — the
@@ -1225,6 +1230,7 @@ class McpFirewall:
     async def _cold_list_once(self, call: P.JsonRpcMessage, list_upstream: ListUpstream,
                               timeout: float) -> bool:
         t0 = perf_counter()
+        generation = self._client_list_generation
         request_id = f"{_COLD_LIST_ID_PREFIX}{uuid.uuid4().hex}"
         params: dict[str, Any] = {}
         call_meta = call.meta
@@ -1251,6 +1257,16 @@ class McpFirewall:
                 reason = f"the server answered with an error: {str(detail)[:200]}"
             elif not isinstance(response.result.get("tools"), list):
                 reason = "the response carried no tools list"
+        if not reason and self._client_list_generation != generation:
+            # A CLIENT listing went through Gate A while this answer was in flight. Its verdicts are
+            # newer than this answer, and applying this one now would put Gate A out of order: a late
+            # answer carrying the pinned definition would overwrite the drift the client's newer
+            # listing had just found, and the waiting call would run a tool the client was shown as
+            # withheld. The catalog is warm from that listing, so the call is decided from it.
+            self._bump("cold_list_superseded")
+            log.info("nrvq.mcp.gate_a.cold_list_superseded", server=self._server_id,
+                     code="NRVQ-MCP-5083")
+            return True
         if not reason:
             try:
                 await self._gate_a_tools_list(response)

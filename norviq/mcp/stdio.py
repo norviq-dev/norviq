@@ -386,6 +386,12 @@ class StdioProxy:
             if own is not None and not own.done():
                 own.set_result(msg)
                 continue
+            if msg.is_request and self._own_requests and msg.method == P.M_PING:
+                # A keepalive. It asks nothing of the CLIENT, so the proxy answers it for the session
+                # rather than giving up its list over it — a server that pings before it lists would
+                # otherwise never get a self-list through. Not forwarded: the server has its answer.
+                await self._write_server(P.encode({"jsonrpc": "2.0", "id": msg.id, "result": {}}))
+                continue
             if msg.is_request and self._own_requests:
                 # A server->client request (roots/list, sampling, elicitation) while the proxy's own
                 # list is pending. The client's reply would queue behind the call the client->server

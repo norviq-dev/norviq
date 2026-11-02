@@ -378,12 +378,20 @@ class HttpProxy:
             headers[_MCP_METHOD_HEADER] = P.M_TOOLS_LIST
         headers["content-type"] = "application/json"
         headers["accept"] = f"application/json, {_SSE}"
+        # No compression. The size cap counts the bytes httpx hands back, which are DECODED: a gzip
+        # answer of a few hundred KiB expands to tens of MiB inside one chunk before any check can
+        # run. Asking for identity and refusing anything else keeps the cap a cap on the wire.
+        headers["accept-encoding"] = "identity"
 
         async def _list(own: P.JsonRpcMessage) -> P.JsonRpcMessage | None:
             async with self._client.stream("POST", self._upstream, headers=headers,
                                            content=own.raw) as resp:
                 if resp.status_code >= 400:
                     raise RuntimeError(f"upstream answered HTTP {resp.status_code}")
+                encoding = resp.headers.get("content-encoding", "identity").strip().lower()
+                if encoding not in ("", "identity"):
+                    raise RuntimeError(f"upstream answered with content-encoding {encoding[:32]!r}; "
+                                       "the proxy's own list accepts identity only")
                 streamed = _SSE in resp.headers.get("content-type", "")
                 buffer = b""
                 received = 0

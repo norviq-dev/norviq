@@ -47,6 +47,7 @@ M_SUBSCRIPTIONS_LISTEN = "subscriptions/listen"
 M_RESOURCES_TEMPLATES = "resources/templates/list"
 M_ELICITATION_CREATE = "elicitation/create"
 M_ROOTS_LIST = "roots/list"
+M_PING = "ping"
 
 RESULT_TYPE = "resultType"
 RESULT_COMPLETE = "complete"
