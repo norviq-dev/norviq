@@ -206,8 +206,24 @@ def _annotate(parent: Any, payload: dict, key: str = "norviq") -> dict:
     if not isinstance(meta, dict):
         meta = {}
         parent["_meta"] = meta
-    meta[key] = dict(payload)
+    meta[key] = _without_evidence(dict(payload))
     return meta[key]
+
+
+def _without_evidence(value: Any) -> Any:
+    """`value` with every finding's `evidence` removed, at any depth.
+
+    Applied to EVERY annotation, not per call site. `evidence` is an unmasked excerpt of the server's
+    original text, for the operator's log. Two sites stripped it (`_redact_evidence`); the others —
+    the tool-result content guard above all — wrote whole findings into the `_meta` the client
+    reads, so the excerpt reached the model after the content itself had been fenced and DLP-masked,
+    and a card number in an injection-shaped result came back unmasked through the annotation.
+    """
+    if isinstance(value, dict):
+        return {k: _without_evidence(v) for k, v in value.items() if k != "evidence"}
+    if isinstance(value, list):
+        return [_without_evidence(v) for v in value]
+    return value
 
 
 def _redact_evidence(findings: list[dict]) -> list[dict]:
