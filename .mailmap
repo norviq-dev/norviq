@@ -2,8 +2,8 @@
 # Canonical identity matches MAINTAINERS.md. Change the canonical line here if that changes.
 #
 # NOT mapped: the four commits authored as `Claude <noreply@anthropic.com>`. That is a provenance
-# question — an AI cannot certify origin under the DCO — and it is being decided explicitly, not
-# quietly folded into a human identity by a mailmap.
+# question — an AI cannot certify origin under the DCO — and it is disclosed in CONTRIBUTING.md
+# ("AI-assisted commits and provenance"), not quietly folded into a human identity by a mailmap.
 Santosh Kumar Puppala <opensource@norviq.dev> norviq-reviewer <puppalas97@gmail.com>
 Santosh Kumar Puppala <opensource@norviq.dev> Santoshkumarpuppala <puppalas97@gmail.com>
 Santosh Kumar Puppala <opensource@norviq.dev> norviq-reviewer <santhoshkumar7794@gmail.com>

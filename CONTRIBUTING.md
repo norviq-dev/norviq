@@ -198,6 +198,21 @@ it under the project licence. Sign off with `git commit -s`, which appends
 using the name and email you commit as. Every commit in a pull request needs it. This applies from
 the date this section landed; earlier history is not rewritten.
 
+## AI-assisted commits and provenance
+
+Four commits on `main` (and in every release from `v0.2.0` on) are authored as
+`Claude <noreply@anthropic.com>`, the default git identity of the AI coding tool they were written
+with: `e97892d`, `a61b37f`, `5ae820d` and `92e0e59` (all 2026-07-31, the MCP action firewall, its
+control-plane pins and console, their docs, and a kind-demo fix). The maintainer committed all
+four (he is the committer on each) and is responsible for them. History is not
+rewritten to change their author, because that would change every later SHA, including the
+published release tags; `.mailmap` deliberately leaves them unmapped so the record stays visible.
+
+From here on, a commit written with AI assistance has a human author: the maintainer (or
+contributor) who reviewed it is the author and adds the `Signed-off-by` described above. A tool is
+never recorded as an author or co-author, and cannot sign off, because it cannot make the DCO's
+certification.
+
 ## License
 
 By contributing, you agree that your contributions are licensed under the [Apache 2.0](LICENSE) license.
