@@ -50,15 +50,24 @@ class SpiffeResolutionError(RuntimeError):
 SPIFFE_ID_MAX_LEN = 512
 
 
+def _storable(spiffe_id: str) -> bool:
+    """Whether both stores can hold the id: Redis keys and Postgres text are strict UTF-8 (a lone surrogate
+    cannot be encoded, so neither store, nor a URL, can carry it), and Postgres text cannot hold NUL."""
+    # A str fails strict UTF-8 encoding only on a surrogate code point (U+D800-U+DFFF).
+    return "\x00" not in spiffe_id and not any("\ud800" <= c <= "\udfff" for c in spiffe_id)
+
+
 def is_controllable_spiffe_id(spiffe_id: object) -> bool:
-    """True when ``spiffe_id`` starts with "spiffe://", is not empty or only whitespace after it, and is at
-    most SPIFFE_ID_MAX_LEN characters. Any other character, whitespace and glob characters included, is
-    accepted: the id only names registry rows and Redis keys used with GET/SET/DEL/EVAL."""
+    """True when ``spiffe_id`` starts with "spiffe://", is not empty or only whitespace after it, is at most
+    SPIFFE_ID_MAX_LEN characters, and both stores can hold it (strict UTF-8, no NUL: an id that cannot be
+    stored can never be frozen, review round 8). Any other character, whitespace and glob characters
+    included, is accepted: the id only names registry rows and Redis keys used with GET/SET/DEL/EVAL."""
     return (
         isinstance(spiffe_id, str)
         and spiffe_id.startswith("spiffe://")
         and bool(spiffe_id[len("spiffe://"):].strip())
         and len(spiffe_id) <= SPIFFE_ID_MAX_LEN
+        and _storable(spiffe_id)
     )
 
 

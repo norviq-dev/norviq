@@ -444,8 +444,8 @@ then the registry holds the new, stricter state, the store may keep the previous
 
 | Change | Order | If something fails (exit non-zero on a `503`) |
 |---|---|---|
-| Tightening: freeze, a cap added or lowered, or re-sending the current state | store, then registry | Commit failed or unacknowledged: "Applied live, but it may NOT be persisted" — retry. Store did not confirm it: "Persisted but NOT confirmed live" (it may or may not have taken it) — retry. Store refused it because a newer change owns the agent (a freeze applied while this one waited, or a later change): "Persisted but NOT live: the store write was refused" — the store holds that newer change; check the agent and retry. Both: "Not confirmed: the change may be persisted ... may or may not be live" (or "... the store write was refused") — retry. |
-| Loosening: a freeze lifted, a cap raised or removed | registry, then store (retried once) | Commit failed or unacknowledged: "not confirmed"; the store was not touched. Store did not confirm after the commit: "Persisted, but the store did not confirm the update" — it may have taken it, or it holds whatever it held before this change. That is the previous, stricter state, unless an earlier change was itself answered "NOT confirmed live" (then possibly older and looser than the registry). Retry, or restart the API to re-apply the registry. A newer change owns the agent: before the commit, "Trust change not applied: refused, a newer change owns the agent"; after it, "Persisted, but NOT live: the store write was refused" — the store holds that newer change; check the agent and retry. |
+| Tightening: freeze, a cap added or lowered, or re-sending the current state | store, then registry | Commit failed or unacknowledged: "Applied live, but it may NOT be persisted" — retry. Store did not confirm it: "Persisted but NOT confirmed live" (it may or may not have taken it) — retry. Store refused it because a newer change owns the agent (a freeze applied while this one waited, or a later change): "Persisted but NOT live: the store write was refused" — check the agent (the store may hold that change, or, if its own write never landed, the state before it) and retry. Both: "Not confirmed: the change may be persisted ... may or may not be live" (or "... the store write was refused") — retry. |
+| Loosening: a freeze lifted, a cap raised or removed | registry, then store (retried once) | Commit failed or unacknowledged: "not confirmed"; the store was not touched. Store did not confirm after the commit: "Persisted, but the store did not confirm the update" — it may have taken it, or it holds whatever it held before this change. That is the previous, stricter state, unless an earlier change was itself answered "NOT confirmed live" (then possibly older and looser than the registry). Retry, or restart the API to re-apply the registry. A newer change owns the agent: before the commit, "Trust change not applied: refused, a newer change owns the agent"; after it, "Persisted, but NOT live: the store write was refused" — check the agent (the store may hold that change, or, if its own write never landed, the state before it) and retry. |
 
 Every store write is fenced on `agent_trust_owner:<id>`, claimed under the lock with a monotonic token: a
 write that outlives its lock (cut off by the 2 s store bound but already sent, or from a request whose
@@ -469,8 +469,10 @@ every other one, names the skipped ones (`NRVQ-API-7160`, `phase=retrying`) and 
 0.3 s lock wait for at most 2 s in all, then names any still unwritten (`phase=unwritten`) and fails the
 attempt so the next one retries just those. Connecting for an
 admin change gives up after 3 s, so a freeze with Postgres unreachable is applied live within seconds.
-The id must start with `spiffe://`, not be empty or only whitespace after it, and be at most 512
-characters (`422` otherwise). Known limitation: SPIFFE allows ids up to 2048 bytes, but 512 is the width
+Once the lock is held, each of the change's reads is bounded at 3 s and releasing the lock at 2 s (then the
+connection is invalidated), so a Postgres that stops answering mid-change still lets a freeze go live in
+about 7 s. The id must start with `spiffe://`, not be empty or only whitespace after it, be at most 512
+characters, and be storable: valid UTF-8 (no lone surrogates) without NUL (`422` otherwise). Known limitation: SPIFFE allows ids up to 2048 bytes, but 512 is the width
 of every column that holds an agent id, so a longer id is refused everywhere — keys, the admin routes, and
 the evaluator, which blocks it. That is one rule for the whole product
 (`norviq/engine/identity.py::is_controllable_spiffe_id`): `POST /api/v1/keys` refuses to bind a key to any
@@ -479,7 +481,8 @@ mode does not soften it), so every identity that gets a decision can be frozen. 
 from a Postgres sequence while the writer holds the agent's lock, and a claim only ever raises it, so a
 claim from a writer whose lock died — even one already on the wire — is refused once a later writer has
 claimed. A writer also checks its lock connection is alive before each claim. A freeze that steals the
-fence without the lock keeps the last lock holder's token and adds a steal count: the writer it took the
+fence without the lock keeps the last lock holder's token and adds a steal count (tokens are compared as
+digit strings; an owner value that is not digits counts as token 0): the writer it took the
 fence from is fenced off, and every later lock holder (a newer token) claims normally, however many
 freezes were stolen before it. Any other character, glob characters included, is accepted. The retention
 pruner never ages out a frozen or capped agent

@@ -403,9 +403,10 @@ describe("Enforce does not mean one thing", () => {
     expect(posture).toMatch(/baselineClusterPolicy\.enforcementMode=audit/);
     expect(posture).toMatch(/saving under an audit install starts acting on what is at Enforce/i);
     expect(posture).toMatch(/next to any other it keeps applying, and these rows cannot relax it/i);
-    // Not "refuses none": a trust freeze and the rate limit stay hard in Monitor (_posture_exempt_rules).
+    // Not "refuses none": a trust freeze, an invalid identity and the rate limit stay hard in Monitor
+    // (_posture_exempt_rules).
     expect(posture).toMatch(/Monitor in Target Settings records what these rows would stop instead of stopping it/i);
-    expect(posture).toMatch(/a frozen agent and the rate limit are still refused/i);
+    expect(posture).toMatch(/a frozen agent, an invalid agent identity and the rate limit are still refused/i);
     expect(posture).toMatch(/policyQuotaNamespaces/);
   });
 

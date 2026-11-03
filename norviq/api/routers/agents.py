@@ -645,6 +645,19 @@ _ADMIN_SESSION_SETTINGS = ("idle_session_timeout", "idle_in_transaction_session_
 # A connect that does not answer (a partitioned Postgres) used to wait for the driver's own timeout (60 s here)
 # before a freeze fell back to being applied live; the CLI had given up by then.
 _CONNECT_TIMEOUT_S = 3.0
+# The same for statements once the lock is held: a Postgres that stops answering mid-request (a partition after
+# the lock was granted) made the registry read wait for the driver's command timeout and the release's rollback
+# another ~60 s, so a freeze reached the live path after ~67 s (review round 8). The request's own reads are
+# bounded by _DB_STATEMENT_TIMEOUT_S, and releasing the lock by _RELEASE_TIMEOUT_S, after which the connection is
+# invalidated (the backend then ends, and Postgres drops the lock, once it notices: the admin session's idle
+# and keepalive settings).
+_DB_STATEMENT_TIMEOUT_S = 3.0
+_RELEASE_TIMEOUT_S = 2.0
+
+
+async def _db(awaitable):
+    """One statement on the admin connection, bounded by _DB_STATEMENT_TIMEOUT_S."""
+    return await asyncio.wait_for(awaitable, _DB_STATEMENT_TIMEOUT_S)
 
 
 def _admin_session_values() -> dict[str, str]:
@@ -701,23 +714,30 @@ async def _agent_lock_held(db, spiffe_id: str):
         elif state == "maybe":
             await _quietly(conn.invalidate())
         elif state == "configured":
-            try:
+            async def reset() -> None:
                 await conn.rollback()
                 await _reset_admin_session(conn)
                 await conn.commit()
+
+            try:
+                await asyncio.wait_for(reset(), _RELEASE_TIMEOUT_S)
             except BaseException:  # noqa: BLE001 - a connection whose settings could not be put back is not pooled
                 await _quietly(conn.invalidate())
         await _quietly(conn.close())
 
 
 async def _release_agent_lock(conn, spiffe_id: str) -> None:
-    released = False
-    try:
+    async def release() -> bool:
         await conn.rollback()  # a transaction the body left open (or failed) must not outlive the request
-        released = bool((await conn.execute(
+        unlocked = bool((await conn.execute(
             text("SELECT pg_advisory_unlock(hashtext(:k))"), _lock_key(spiffe_id))).scalar())
         await _reset_admin_session(conn)
         await conn.commit()
+        return unlocked
+
+    released = False
+    try:
+        released = await asyncio.wait_for(release(), _RELEASE_TIMEOUT_S)
     except BaseException as exc:  # noqa: BLE001 - handled below: the connection is in doubt (incl. cancellation)
         released = False
         log.warning("nrvq.api.agent.trust_lock_release_failed", spiffe_id=spiffe_id,
@@ -765,7 +785,7 @@ def _is_tightening(prior: tuple[bool, float | None], new: tuple[bool, float | No
 async def _fence_token(conn) -> int:
     """A monotonic fence token, taken while holding the agent's lock: a later lock holder always gets a larger
     one, so a writer whose lock died cannot claim over it (RedisCache._CLAIM_LUA)."""
-    return int((await conn.execute(text("SELECT nextval('agent_trust_fence_seq')"))).scalar())
+    return int((await _db(conn.execute(text("SELECT nextval('agent_trust_fence_seq')")))).scalar())
 
 
 async def _fenced_write(cache, spiffe_id, frozen, cap, display, attempts: int = 2, conn=None,
@@ -847,7 +867,7 @@ async def update_trust(
     try:
         async with _agent_lock(db, spiffe_id) as conn:
             try:
-                prior = await _registry_control(conn, spiffe_id) or (False, None)
+                prior = await _db(_registry_control(conn, spiffe_id)) or (False, None)
             except Exception as exc:
                 raise _AdminDbUnavailable(spiffe_id) from exc
             if _is_tightening(prior, (frozen, cap)):
@@ -865,12 +885,16 @@ async def update_trust(
                         actor=user.get("sub"), code="NRVQ-API-7149")
             reason = "another admin change to this agent is in progress"
         else:
+            cause = exc.__cause__
             log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id,
-                        error=str(exc.__cause__ or exc), live=live, pool=isinstance(exc, _PoolExhausted),
-                        actor=user.get("sub"), code="NRVQ-API-7033")
+                        error=f"{type(cause).__name__}: {cause}" if cause is not None else type(exc).__name__,
+                        stage=("pool" if isinstance(exc, _PoolExhausted) else "admin_slots"
+                               if isinstance(exc, _AdminBusy) else "registry"),
+                        live=live, pool=isinstance(exc, _PoolExhausted), actor=user.get("sub"),
+                        code="NRVQ-API-7033")
             reason = ("the API's database connection pool is exhausted" if isinstance(exc, _PoolExhausted)
                       else "too many admin trust changes are in progress in this API process"
-                      if isinstance(exc, _AdminBusy) else "the registry could not be reached")
+                      if isinstance(exc, _AdminBusy) else "the registry could not be reached or did not answer in time")
         if live:
             detail = (f"Freeze applied live but NOT persisted ({reason}). A change to this agent that was already "
                       "under way may replace it when it finishes, and a store flush or restart loses it. Check the "
@@ -904,8 +928,8 @@ async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) ->
         raise HTTPException(status_code=503, detail=(
             "Applied live, but it may NOT be persisted (the registry write failed or its result was lost). Retry."
             if live else "Not confirmed: the change may be persisted (the registry did not confirm it), and the "
-                         "store write was refused: a newer change owns the agent, and the store holds that change. "
-                         "Retry." if refused
+                         "store write was refused: a newer change owns the agent. Check the agent and retry."
+            if refused
             else "Not confirmed: the change may be persisted (the registry did not confirm it), and the "
                  "store did not confirm it either, so it may or may not be live. Retry.")) from exc
     if not live:
@@ -913,8 +937,8 @@ async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) ->
                     direction="tightening", durable=True, actor=user.get("sub"), code="NRVQ-API-7147")
         raise HTTPException(status_code=503, detail=(
             "Persisted but NOT live: the store write was refused, because a newer change owns the agent (a "
-            "freeze applied while this change waited, or a later change), and the store holds that change. "
-            "Check the agent; retry to apply this one." if refused
+            "freeze applied while this change waited, or a later change). Check the agent; retry to apply this "
+            "one." if refused
             else "Persisted but NOT confirmed live: the store did not confirm it (it may or may not have taken it). "
                  "It is applied by the next successful change to this agent or the next API start; retry now."))
 
@@ -928,6 +952,14 @@ async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> 
 
     try:
         token = await _fence_token(conn)
+    except Exception as exc:  # noqa: BLE001 - the database failed, not the store: nothing was applied
+        await _quietly(conn.rollback())
+        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
+                    direction="loosening", stage="fence_token", live=False, actor=user.get("sub"),
+                    code="NRVQ-API-7033")
+        raise HTTPException(status_code=503, detail=(
+            "Trust change not applied: the registry could not be reached or did not answer in time. Retry.")) from exc
+    try:
         claimed = await _store(cache.claim_admin_trust_owner(spiffe_id, token, _owner_ttl_ms()))
     except Exception as exc:  # noqa: BLE001 - without the fence the store write could not be made safely
         log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
@@ -957,6 +989,8 @@ async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> 
         error = ""
     except Exception as exc:  # noqa: BLE001 - retried below
         outcome, error = None, f"{type(exc).__name__}: {exc}"
+    if outcome == RedisCache.FENCE_LOST:
+        error = "fence: a newer admin write owns the agent"
     if outcome not in (RedisCache.FENCE_APPLIED, RedisCache.FENCE_LOST) and await _still_connected(conn):
         # The change is committed and we still hold the lock (its connection answers): one more attempt to bring
         # the store to exactly the state the registry now holds, under a fresh claim. Not after FENCE_LOST — a
@@ -968,8 +1002,8 @@ async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> 
                     direction="loosening", durable=True, actor=user.get("sub"), code="NRVQ-API-7147")
         raise HTTPException(status_code=503, detail=(
             "Persisted, but NOT live: the store write was refused, because a newer change owns the agent (a "
-            "freeze applied while this change ran, or a later change), and the store holds that change. Check "
-            "the agent and retry." if outcome == RedisCache.FENCE_LOST
+            "freeze applied while this change ran, or a later change). Check the agent and retry."
+            if outcome == RedisCache.FENCE_LOST
             else "Persisted, but the store did not confirm the update: it may have taken it, or it still holds "
                  "whatever it held before this change (if an earlier change was answered 'Persisted but NOT "
                  "confirmed live', that may be older than the registry). Retry, or restart the API to re-apply "
@@ -979,7 +1013,7 @@ async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> 
 async def _still_connected(conn) -> bool:
     """Whether the lock connection still answers, i.e. its session (and so its advisory lock) is alive."""
     try:
-        await conn.execute(text("SELECT 1"))  # inside whatever transaction is open; the caller ends it
+        await _db(conn.execute(text("SELECT 1")))  # inside whatever transaction is open; the caller ends it
         return True
     except Exception:  # noqa: BLE001 - any failure means the lock cannot be relied on
         return False
@@ -1262,10 +1296,10 @@ async def reset_agent_trust_history(
     try:
         async with _agent_lock(db, spiffe_id) as conn:
             stage = "read"
-            row = (await conn.execute(
+            row = (await _db(conn.execute(
                 text("SELECT trust_score, violation_count, frozen, trust_cap FROM agent_registry WHERE spiffe_id = :s"),
                 {"s": spiffe_id},
-            )).mappings().first()
+            ))).mappings().first()
             reg = None if row is None else SimpleNamespace(**row)
             trust = await _store(cache.get_trust(spiffe_id))
             stage = "multi"
@@ -1339,9 +1373,9 @@ async def deregister_agent(
     committing = False
     try:
         async with _agent_lock(db, spiffe_id) as conn:
-            row = (await conn.execute(
+            row = (await _db(conn.execute(
                 text("SELECT namespace, frozen, trust_cap FROM agent_registry WHERE spiffe_id = :s"), {"s": spiffe_id}
-            )).mappings().first()
+            ))).mappings().first()
             if row is None:
                 raise HTTPException(status_code=404, detail="Agent not found in registry")
             ns = row["namespace"]

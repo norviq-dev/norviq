@@ -14,7 +14,8 @@ spec:
   # trial THIS policy: it still evaluates and still reports, but its block/escalate is softened to audit
   # with the rule_id prefixed `policy_audit_would_block:`, so you see what it would have stopped.
   # "block" and "escalate" behave the same — only "audit" is special-cased.
-  # (A trust freeze, engine-health and rate-limit verdicts stay hard in every mode.)
+  # (A trust freeze, an invalid agent identity, engine-health and rate-limit verdicts stay hard in
+  # every mode.)
   enforcementMode: block
   preset: moderate
   # Canonical rule_ids enforced by the bundled comprehensive policy (informational).

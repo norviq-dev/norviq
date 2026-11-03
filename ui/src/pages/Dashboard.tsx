@@ -898,11 +898,11 @@ export function Dashboard() {
           // would-block number instead and links to the rows.)
           // A claim about the ENGINE, so it keys on `monitorConfirmed`, not on the settings-fallback
           // `monitorScope` (see the note on `monitorConfirmed`). And NOT "this namespace enforces none":
-          // `_POSTURE_EXEMPT_RULES` keeps trust-freeze / engine-fault / rate-limit blocks hard in Monitor,
+          // `_POSTURE_EXEMPT_RULES` keeps trust-freeze / invalid-identity / engine-fault / rate-limit blocks hard in Monitor,
           // and those land in this feed.
           sub={
             monitorConfirmed
-              ? "Last 10 enforced blocks — in Monitor, only non-policy ones (trust freeze, engine fault, rate limit)"
+              ? "Last 10 enforced blocks — in Monitor, only non-policy ones (trust freeze, invalid identity, engine fault, rate limit)"
               : "Last 10 blocked tool calls"
           }
           // Addressable so a test can scope to the FEED. Searching the page for /blocked/i instead

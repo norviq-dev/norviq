@@ -333,7 +333,7 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
           what is at Enforce — as long as the chart&apos;s baseline is the shipped strict preset (its
           default); next to any other it keeps applying, and these rows cannot relax it. A namespace set
           to <b>Monitor</b> in Target Settings records what these rows would stop instead of stopping it,
-          whatever they say; a frozen agent and the rate limit are still refused.
+          whatever they say; a frozen agent, an invalid agent identity and the rate limit are still refused.
         </div>
       </div>
 

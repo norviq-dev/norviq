@@ -682,19 +682,36 @@ return 1
     # stole since; it sets "<token>". A steal (no token) keeps L and bumps S, so the writer it took the fence from
     # is fenced off, while every later lock holder (a larger sequence token) still wins: steals never move the
     # owner ahead of the global sequence, so K steals cannot starve the writers after them (review round 7).
+    # Parsing is strict (review round 8): L and S are digit strings, anything else is token 0. Tokens are compared
+    # as digit strings (length, then text), never as Lua numbers, so no value loses precision or turns into
+    # "inf" or an exponent. S is incremented as a number; it counts steals within one owner TTL and stays tiny.
     _CLAIM_LUA = """
 local cur = redis.call('GET', KEYS[1])
+local function canon(d)
+  d = string.gsub(d, '^0+', '')
+  if d == '' then return '0' end
+  return d
+end
+local function older(a, b)
+  if #a ~= #b then return #a < #b end
+  return a < b
+end
 local token = ARGV[1]
-local last, stolen = 0, 0
+local last, stolen = '0', 0
 if cur then
   local l, s = string.match(cur, '^(%d+):(%d+)$')
-  if l then last, stolen = tonumber(l), tonumber(s) else last = tonumber(cur) or 0 end
+  if l and #s <= 9 then
+    last, stolen = canon(l), tonumber(s)
+  elseif string.match(cur, '^%d+$') then
+    last = canon(cur)
+  end
 end
 if token == '' then
-  token = tostring(last) .. ':' .. tostring(stolen + 1)
-else
-  local t = tonumber(token)
-  if t and (t < last or (t == last and stolen > 0)) then return false end
+  token = last .. ':' .. string.format('%d', stolen + 1)
+elseif string.match(token, '^%d+$') then
+  local t = canon(token)
+  if older(t, last) or (t == last and stolen > 0) then return false end
+  token = t
 end
 redis.call('SET', KEYS[1], token, 'PX', ARGV[2])
 return token
@@ -704,8 +721,9 @@ return token
         self, spiffe_id: str, token: int | str | None, ttl_ms: int | None = None
     ) -> str | None:
         """Make ``token`` the agent's admin writer if it is not older than the current one, and return it; None when
-        a newer writer owns the agent. ``token`` None steals: current owner + 1. ``ttl_ms`` (default 30 s) must
-        outlast the writer's whole operation, or its own write finds the key gone."""
+        a newer writer owns the agent. ``token`` None steals: it keeps the last lock holder's token and adds one
+        to the steal count ("<L>:<S+1>", see _CLAIM_LUA). ``ttl_ms`` (default 30 s) must outlast the writer's
+        whole operation, or its own write finds the key gone."""
         result = await self._client().eval(
             self._CLAIM_LUA, 1, f"agent_trust_owner:{spiffe_id}", "" if token is None else str(token),
             str(ttl_ms or self._OWNER_TTL_MS),

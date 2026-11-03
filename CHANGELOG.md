@@ -15,8 +15,8 @@ because they should be installed.
 **Upgrade impact — read before `helm upgrade`.**
 
 - **An agent identity must be one an admin can freeze.** The key API, the evaluator and the admin trust
-  routes now share one rule: the id starts with `spiffe://`, is not empty or only whitespace after it, and
-  is at most 512 characters (the width of the agent-id columns; SPIFFE itself allows 2048 bytes, so longer
+  routes now share one rule: the id starts with `spiffe://`, is not empty or only whitespace after it, is
+  valid UTF-8 without NUL (so both stores can hold it), and is at most 512 characters (the width of the agent-id columns; SPIFFE itself allows 2048 bytes, so longer
   ids are refused everywhere, consistently). `POST /api/v1/keys` refuses (`422`) a `spiffe_id` outside it. The evaluator blocks a call from such
   an identity with `invalid_spiffe_identity` (`NRVQ-ENG-2006`) in every posture: unlike other fail-closed
   blocks it is not softened in a monitor namespace, and no registry row is written for it. It used to check
@@ -37,7 +37,7 @@ because they should be installed.
     the next item for namespaces whose Baseline controls were saved);
   - one namespace: console Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with
     `{"enforcement_mode": "audit"}` (softens every block in that namespace, your own policies' too,
-    except a trust freeze and the rate limit);
+    except a trust freeze, an invalid agent identity and the rate limit);
   - one control: console Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls`.
 
   `config.enforcementMode` is not one of them; it never softened a policy's block.
@@ -206,7 +206,11 @@ because they should be installed.
   names the skipped ones (`NRVQ-API-7160`, ERROR) before retrying them for at most 2 s, and names any still
   unwritten. Freezes applied while the agent's lock was unavailable no longer make the next changes to
   that agent fail; a change the store refused because a newer one owns the agent says so ("refused: a
-  newer change owns the agent") instead of reporting that the store did not answer. `NRVQ-API-7031` names the actor.
+  newer change owns the agent") instead of reporting that the store did not answer. A Postgres that stops
+  answering in the middle of a change no longer holds that request for about a minute: its reads and the
+  lock release are bounded, so a freeze goes live in about 7 s. `NRVQ-API-7033` carries the failing stage
+  (`registry`, `pool`, `admin_slots`, `fence_token`) and the underlying error. `NRVQ-API-7031` names the
+  actor.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck
 reports 47 standard-library advisories, 29 of them reachable from the webhook. An older Go fetches

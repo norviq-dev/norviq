@@ -222,7 +222,8 @@ switched Off, which is not evaluated at all:
   posture, in every namespace whose Baseline controls nobody has saved).
 - **One namespace:** console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>`
   with `{"enforcement_mode": "audit"}`. This softens every block in that namespace, not only the
-  baseline's, except a trust freeze and the rate limit.
+  baseline's, except a trust freeze, an invalid agent identity (`invalid_spiffe_identity`) and the rate
+  limit.
 - **One control:** console → Baseline controls → **Monitor** or **Off** (`PUT /api/v1/baseline/controls`).
 
 [Concepts → Turning the shipped baseline off](docs/concepts.md#turning-the-shipped-baseline-off) has the

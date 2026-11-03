@@ -1087,7 +1087,14 @@ class _ConnProxy(_Proxy):
     async def execute(self, stmt, *a, **k):
         if self._hooks.get("unlock_fails") and "pg_advisory_unlock" in str(stmt):
             raise ConnectionError("connection lost during unlock")
+        if self._hooks.get("hang_after_lock") and self._hooks["commits"] >= 1:
+            await asyncio.Event().wait()  # Postgres stopped answering once the lock was granted
         return await self._real.execute(stmt, *a, **k)
+
+    async def rollback(self):
+        if self._hooks.get("hang_after_lock") and self._hooks["commits"] >= 1:
+            await asyncio.Event().wait()
+        return await self._real.rollback()
 
     async def commit(self):
         self._hooks["commits"] += 1
@@ -1829,12 +1836,16 @@ async def test_a_loosening_whose_store_write_is_refused_says_a_newer_change_owns
     assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
     app.state.cache = _LoseFence(cache)
     try:
-        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+        with structlog.testing.capture_logs() as logs:
+            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
     finally:
         app.state.cache = cache
     detail = resp.json()["detail"]
     assert resp.status_code == 503 and detail.startswith("Persisted, but NOT live: the store write was refused")
     assert "a newer change owns the agent" in detail and "did not confirm" not in detail
+    assert "store holds" not in detail  # round 8: not verified (the newer writer's own write may not have landed)
+    failed = [e for e in logs if e.get("code") == "NRVQ-API-7147"]
+    assert failed and failed[0]["error"].startswith("fence:"), failed  # round 8: it was logged with error=''
     assert await _live(cache, spiffe) == (True, None)
 
 
@@ -2098,6 +2109,32 @@ async def test_the_claim_script_orders_lock_holders_and_steals(env) -> None:
     assert await cache.claim_admin_trust_owner(spiffe, 1) == "1"
 
 
+@pytest.mark.parametrize("owner", ["inf", "nan", "1e400", "0x20", " 12", "-5", "10:", "abc", "7:x", "7:1:1"])
+async def test_the_claim_script_reads_a_malformed_owner_as_token_0(env, owner) -> None:
+    """Review round 8: Lua's tonumber read 'inf', '1e400' and '0x20' as numbers, so such an owner refused every
+    lock-holding claim until it expired. Only digits are a token; anything else is 0."""
+    _, _, cache, ids = env
+    spiffe = _agent(ids, "claimbad")
+    await cache._client().set(f"agent_trust_owner:{spiffe}", owner)
+    assert await cache.claim_admin_trust_owner(spiffe, 5) == "5"
+    await cache._client().set(f"agent_trust_owner:{spiffe}", owner)
+    assert await cache.claim_admin_trust_owner(spiffe, None) == "0:1"
+
+
+async def test_the_claim_script_compares_large_tokens_exactly(env) -> None:
+    """Review round 8: tokens past 2^53 lost precision as Lua numbers, and a steal wrote them as '1.2e+14'. They
+    are compared as digit strings now (sequence values never get near; this keeps the order exact anyway)."""
+    _, _, cache, ids = env
+    spiffe = _agent(ids, "claimbig")
+    big = "123456789012345678901"
+    assert await cache.claim_admin_trust_owner(spiffe, big) == big
+    assert await cache.claim_admin_trust_owner(spiffe, None) == big + ":1"
+    assert await cache.claim_admin_trust_owner(spiffe, big) is None              # fenced off by the steal
+    assert await cache.claim_admin_trust_owner(spiffe, "123456789012345678900") is None
+    assert await cache.claim_admin_trust_owner(spiffe, "123456789012345678902") == "123456789012345678902"
+    assert await cache.claim_admin_trust_owner(spiffe, "99999999999999999999") is None  # fewer digits: older
+
+
 async def test_writers_queued_on_one_agent_do_not_take_slots_from_other_agents(env, short_waits, monkeypatch) -> None:
     """Round 5: the per-agent gate is entered before a process slot, so a queue behind one agent waits without
     a slot (or a connection) and a write to another agent still gets through."""
@@ -2356,3 +2393,241 @@ async def test_the_warm_runs_on_a_connection_configured_like_the_admin_lock_conn
         for conn in held:
             await conn.rollback()
             await conn.close()
+
+
+async def test_a_postgres_that_stops_answering_after_the_lock_does_not_hold_a_freeze_for_a_minute(env) -> None:
+    """Review round 8 (pghang.py): a partition after the lock was granted made the registry read wait for the
+    driver's command timeout and the release's rollback ~60 s more, so the freeze went live after ~67 s. The
+    request's statements and the release are bounded now; the connection is invalidated, not pooled."""
+    import norviq.api.routers.agents as agents_mod
+
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "pghang")
+    # The documented bound (docs/cli.md: a freeze goes live in about 7 s), not one derived from the constants.
+    bound = 8.0
+    assert agents_mod._DB_STATEMENT_TIMEOUT_S + agents_mod._RELEASE_TIMEOUT_S <= 5.0
+    for score, expect in ((0, "Freeze applied live but NOT persisted"), (0.4, "Trust change not applied")):
+        _admin_db(app, hang_after_lock=True)
+        try:
+            started = time.monotonic()
+            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": score}, headers=_hdr())
+            elapsed = time.monotonic() - started
+        finally:
+            app.dependency_overrides.pop(get_admin_db, None)
+        assert resp.status_code == 503 and resp.json()["detail"].startswith(expect), resp.text
+        assert elapsed < bound, f"answered after {elapsed:.1f}s (bound {bound:.1f}s)"
+    assert await _live(cache, spiffe) == (True, None)
+    assert await _advisory_held(spiffe) == 0  # the invalidated connection took its lock with it
+
+
+async def test_a_loosening_whose_fence_token_fails_blames_the_registry_not_the_store(env, monkeypatch) -> None:
+    """Review round 8: the fence token (a Postgres nextval) and the store claim shared one try block, so a
+    database failure there was answered 'the store did not answer' and logged as 7147."""
+    import norviq.api.routers.agents as agents_mod
+
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "tokfail")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+
+    async def _no_token(conn):
+        raise ConnectionError("backend terminated")
+
+    monkeypatch.setattr(agents_mod, "_fence_token", _no_token)
+    with structlog.testing.capture_logs() as logs:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+    assert resp.status_code == 503 and resp.json()["detail"] == (
+        "Trust change not applied: the registry could not be reached or did not answer in time. Retry.")
+    codes = [(e.get("code"), e.get("stage")) for e in logs if e.get("code", "").startswith("NRVQ-API-71")
+             or e.get("code") == "NRVQ-API-7033"]
+    assert ("NRVQ-API-7033", "fence_token") in codes and not any(c == "NRVQ-API-7147" for c, _ in codes)
+    assert await _live(cache, spiffe) == (True, None) and await _durable(spiffe) == (True, None)
+
+
+async def test_the_7033_line_says_why_the_write_failed(env, monkeypatch) -> None:
+    """Review round 8: 7033 logged error=<spiffe id> for an admin-slot refusal and error='' for a timeout, so
+    'too many admin changes here' could not be told from 'registry unreachable'."""
+    import norviq.api.routers.agents as agents_mod
+
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "why7033")
+    sem = agents_mod._admin_slots()
+    monkeypatch.setattr(agents_mod, "_lock_timeout_ms", lambda: 200)
+    taken = 0
+    while not sem.locked():
+        await sem.acquire()
+        taken += 1
+    try:
+        with structlog.testing.capture_logs() as logs:
+            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr())
+    finally:
+        for _ in range(taken):
+            sem.release()
+    assert resp.status_code == 503
+    line = next(e for e in logs if e.get("code") == "NRVQ-API-7033")
+    assert line["stage"] == "admin_slots" and line["error"] == "_AdminBusy"
+
+
+class _OnRetrying:
+    """Wraps the router's logger: sets ``event`` when the warm logs 7160 phase=retrying (just before its retry)."""
+
+    def __init__(self, real) -> None:
+        self._real, self.event = real, asyncio.Event()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def error(self, msg, **kw):
+        if kw.get("code") == "NRVQ-API-7160" and kw.get("phase") == "retrying":
+            self.event.set()
+        return self._real.error(msg, **kw)
+
+
+async def _release_on(event: asyncio.Event, lock: "_HeldLock", delay: float) -> None:
+    await event.wait()
+    await asyncio.sleep(delay)
+    await lock.__aexit__(None, None, None)
+
+
+async def test_one_agent_still_held_does_not_stop_the_retry_of_the_others(env, monkeypatch) -> None:
+    """Round 8 reviewer mutation: a lock timeout on one skipped agent must move on to the next, which may be
+    free by then, not end the retry for all of them."""
+    import norviq.api.routers.agents as agents_mod
+
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-retry-{uuid.uuid4().hex[:8]}"
+    stuck, freed = f"{prefix}/a", f"{prefix}/b"  # retried in this order
+    ids.extend([stuck, freed])
+    await _seed_frozen_rows([stuck, freed])
+    monkeypatch.setattr(agents_mod, "_lock_timeout_ms", lambda: 300)
+    monkeypatch.setattr(agents_mod, "_WARM_RETRY_LOCK_MS", 1000)
+    hook = _OnRetrying(agents_mod.log)
+    monkeypatch.setattr(agents_mod, "log", hook)
+    held_stuck, held_freed = _HeldLock(stuck), _HeldLock(freed)
+    await held_stuck.__aenter__()
+    await held_freed.__aenter__()
+    releaser = asyncio.create_task(_release_on(hook.event, held_freed, 0.3))  # while the retry waits on `stuck`
+    try:
+        with pytest.raises(RuntimeError, match="1 frozen or capped"):
+            await warm_agent_overrides(cache, progress={"after": prefix})
+    finally:
+        await releaser
+        await held_stuck.__aexit__(None, None, None)
+    assert await cache._client().get(f"agent_frozen:{freed}") == "1"
+    assert await cache._client().get(f"agent_frozen:{stuck}") is None
+
+
+async def test_the_retry_budget_starts_when_the_retry_does(env, monkeypatch) -> None:
+    """Round 8 reviewer mutation: a budget counted from the start of the warm is spent by a long first pass, and
+    the retry then never runs."""
+    import norviq.api.routers.agents as agents_mod
+
+    _, _, cache, ids = env
+    spiffe = f"spiffe://zzzz-budget-{uuid.uuid4().hex[:8]}/a"
+    ids.append(spiffe)
+    await _seed_frozen_rows([spiffe])
+    monkeypatch.setattr(agents_mod, "_lock_timeout_ms", lambda: 1000)  # the first pass waits 1 s on the batch lock
+    monkeypatch.setattr(agents_mod, "_WARM_RETRY_BUDGET_S", 0.5)
+    hook = _OnRetrying(agents_mod.log)
+    monkeypatch.setattr(agents_mod, "log", hook)
+    held = _HeldLock(spiffe)
+    await held.__aenter__()
+    releaser = asyncio.create_task(_release_on(hook.event, held, 0))
+    try:
+        assert await warm_agent_overrides(cache, progress={"after": spiffe[:-2]}) >= 1
+    finally:
+        await releaser
+    assert await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+
+
+async def test_a_warm_connection_that_cannot_be_reset_is_not_pooled(env, monkeypatch) -> None:
+    """Round 8 reviewer mutation: if its settings cannot be put back, the warm's connection must be invalidated,
+    or the pool hands out a connection that still carries the admin idle timeouts."""
+    import norviq.api.routers.agents as agents_mod
+
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-noreset-{uuid.uuid4().hex[:8]}"
+    ids.append(f"{prefix}/a")
+    await _seed_frozen_rows([f"{prefix}/a"])
+    used: list = []
+    real_connect = agents_mod._EngineConnector.connect
+
+    invalidated: list = []
+
+    async def _recording_connect(self):
+        conn = await real_connect(self)
+        used.append(conn)
+        return conn
+
+    from sqlalchemy.ext.asyncio import AsyncConnection
+
+    real_invalidate = AsyncConnection.invalidate
+
+    async def _invalidate(self, *a, **k):
+        invalidated.append(self)
+        return await real_invalidate(self, *a, **k)
+
+    monkeypatch.setattr(AsyncConnection, "invalidate", _invalidate)
+
+    async def _reset_fails(conn):
+        raise ConnectionError("reset lost")
+
+    monkeypatch.setattr(agents_mod._EngineConnector, "connect", _recording_connect)
+    monkeypatch.setattr(agents_mod, "_reset_admin_session", _reset_fails)
+    assert await warm_agent_overrides(cache, progress={"after": prefix}) == 1
+    assert len(used) == 1 and invalidated == used, "a connection still carrying the admin settings was pooled"
+
+
+async def test_a_loosenings_retry_keeps_its_token_so_a_freeze_stolen_meanwhile_wins(env) -> None:
+    """Round 8 reviewer mutation: the retry after a store error must claim with the SAME token. A new one would
+    be newer than the steal and write the loosening over a freeze stolen in between."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "keeptok")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+
+    class _ErrorThenSteal(_Proxy):
+        calls = 0
+
+        async def apply_admin_trust_control_if_owner(self, spiffe_id, token, **k):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                stolen = await self._real.claim_admin_trust_owner(spiffe_id, None)  # a freeze steals the fence
+                assert await self._real.apply_admin_trust_control_if_owner(
+                    spiffe_id, stolen, frozen=True, cap=None) == 1  # ... and its write lands
+                raise ConnectionError("store reset")  # while this write's answer is lost
+            return await self._real.apply_admin_trust_control_if_owner(spiffe_id, token, **k)
+
+    app.state.cache = _ErrorThenSteal(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+    assert resp.status_code == 503 and "a newer change owns the agent" in resp.json()["detail"]
+    assert await _live(cache, spiffe) == (True, None)
+
+
+async def test_an_admin_connection_refused_the_lock_and_not_reset_is_not_pooled(env, short_waits, monkeypatch) -> None:
+    """Round 8 reviewer mutation: the lock was refused (contended), so nothing is held, but the connection still
+    carries the admin settings; if they cannot be put back it must be invalidated, not pooled."""
+    import norviq.api.routers.agents as agents_mod
+    from sqlalchemy.ext.asyncio import AsyncConnection
+
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "refusedreset")
+    await _seed_registered(spiffe)
+    invalidated: list = []
+    real_invalidate = AsyncConnection.invalidate
+
+    async def _invalidate(self, *a, **k):
+        invalidated.append(self)
+        return await real_invalidate(self, *a, **k)
+
+    async def _reset_fails(conn):
+        raise ConnectionError("reset lost")
+
+    async with _HeldLock(spiffe):
+        monkeypatch.setattr(AsyncConnection, "invalidate", _invalidate)
+        monkeypatch.setattr(agents_mod, "_reset_admin_session", _reset_fails)
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr())
+        monkeypatch.undo()
+    assert resp.status_code == 503 and "in progress" in resp.json()["detail"]
+    assert len(invalidated) == 1, "a connection still carrying the admin settings was pooled"

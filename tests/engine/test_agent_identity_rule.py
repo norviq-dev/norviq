@@ -28,6 +28,8 @@ REFUSED = [
     "not-spiffe",
     "",
     " spiffe://x",
+    "spiffe://norviq/ns/x/sa/\ud800",  # a lone surrogate: not UTF-8, so no store (and no URL) can hold it
+    "spiffe://norviq/ns/x/sa/a\x00b",  # NUL: Postgres text cannot hold it, so a freeze is never persisted
 ]
 ACCEPTED = [
     "spiffe://acme-agent",
@@ -36,6 +38,7 @@ ACCEPTED = [
     "spiffe://norviq/ns/a/sa/b*?[0]",
     "spiffe://" + "a" * 503,
     "spiffe://" + "\u00e9" * 503,
+    "spiffe://norviq/ns/a/sa/\U0001f600",  # a valid non-BMP character
 ]
 
 
@@ -69,6 +72,44 @@ async def test_an_uncontrollable_identity_is_blocked_with_the_existing_invalid_i
     )
     decision = await engine.evaluate(event)
     assert (decision.decision, decision.rule_id) == ("block", "invalid_spiffe_identity")
+
+
+class _MonitorCache(_CacheStub):
+    async def get_ns_settings(self, namespace: str):
+        return {"enforcement_mode": "audit"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spiffe_id", ["spiffe://norviq/ns/x/sa/\ud800", "spiffe://norviq/ns/x/sa/a\x00b", "spiffe://"])
+@pytest.mark.parametrize("cache", [_CacheStub, _MonitorCache])
+async def test_an_id_no_store_can_hold_is_blocked_in_every_posture(spiffe_id, cache) -> None:
+    """Review round 8: a lone surrogate passed the rule, then failed later (evaluator_fallback), which a monitor
+    namespace softened to allow; it can never be frozen, since neither store nor a URL can hold it. NUL passes
+    Redis but not Postgres, so its freeze could never be persisted. Both now block as invalid_spiffe_identity,
+    which posture does not soften."""
+    engine = OPAEvaluator(cache())  # type: ignore[arg-type]
+    engine.bind_loader(_LoaderStub({}))
+    event = ToolCallEvent(
+        tool_name="search_kb",
+        tool_params={},
+        agent_identity=AgentIdentity(spiffe_id=spiffe_id, namespace="mon", agent_class="test"),
+        session_id="identity-rule",
+    )
+    decision = await engine.evaluate(event)
+    assert (decision.decision, decision.rule_id) == ("block", "invalid_spiffe_identity")
+
+
+@pytest.mark.asyncio
+async def test_the_monitor_stub_does_soften_an_ordinary_block() -> None:
+    """Control for the test above: the stub's namespace really is in monitor posture, and an ordinary block
+    in it is softened to audit; invalid_spiffe_identity is kept only because it is exempt."""
+    from norviq.sdk.core.decisions import PolicyDecision
+
+    engine = OPAEvaluator(_MonitorCache())  # type: ignore[arg-type]
+    posture = await engine._resolve_posture("mon")
+    assert posture["monitor"] is True
+    block = PolicyDecision(decision="block", rule_id="evaluator_fallback", reason="", event_id="e")
+    assert engine._apply_posture(block, posture, "e").decision == "audit"
 
 
 def test_the_bound_is_the_column_width_in_characters() -> None:
