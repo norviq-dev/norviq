@@ -297,11 +297,15 @@ or a `javascript:` URL it rejects is annotated rather than withheld, and a markd
 follows it. A
 `system:`/`assistant:`/`developer:` line is treated as a role takeover only when its text starts with
 an instruction word (as listed in the MCP guide), so `system:masters`, `{{system.hostname}}` and most
-docstring parameter lists and few-shot templates are not withheld. Known limitations: text split
-exactly between two words across fields with no whitespace is not matched; a directive wrapped onto a
-second line within one sentence is not matched by the sentence-scoped rules; strings without
-whitespace are matched by the subset of rules above only; a docstring or few-shot line whose text
-starts with an instruction word is still graded as a role takeover. Gate A's scanning stays fast on
+docstring parameter lists and few-shot templates are not withheld. Known issues: some ordinary descriptions are still withheld — a forwarding tool described as sending
+all messages to a webhook, an upload tool described as uploading the file contents to a storage URL
+(both graded critical, so only rephrasing the description helps), a description naming a
+`javascript:` URL followed by code, a docstring or few-shot line whose role label is followed by an
+instruction word, and `<system>` as an XML tag-name example (graded high: rephrase, or raise
+`mcp_scan_strip_severity` and `mcp_scan_sanitize_severity` to `critical` for that deployment). Known
+detection limits: text split exactly between two words across fields with no whitespace, a
+directive wrapped onto a second line within one sentence, the reduced rule set for strings without
+whitespace, and paraphrase. The MCP guide lists both. Gate A's scanning stays fast on
 unusual input. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count

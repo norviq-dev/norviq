@@ -337,6 +337,40 @@ elicitation is refused — whatever `mcp_scan_strip_severity` says, which govern
 read — because a scan that stopped early must not produce the
 same report as a scan that found nothing (`firewall.py` `McpFirewall._gate_a_tools_list`).
 
+#### Known false positives
+
+These ordinary descriptions are still graded high enough to withhold the tool at the default
+`mcp_scan_strip_severity: "high"`. The client sees a shorter `tools/list` with the tool named in
+`_meta.norviq.withheld`; the operator sees `nrvq.mcp.gate_a.stripped` (`NRVQ-MCP-5031`) with the tool
+name, its severity and the finding names below, and a call to the tool is refused at Gate A.
+
+| Description shape | Finding (severity) | Workaround |
+|---|---|---|
+| A forwarding tool described as sending *all* messages, requests or calls to a webhook ("Send all messages to https://hooks.slack.com/services/…") | `mcp_a_side_channel` (critical) | Rephrase the description (ask the server author), e.g. "Posts the given message to the configured webhook". The strip threshold does not help: critical is withheld at every setting |
+| An upload tool described as uploading "the file contents" to a storage URL ("Upload the file contents to https://storage.googleapis.com/…") | `mcp_a_exfil_directive` (critical) | Rephrase ("Uploads the given file to the bucket"). As above, the threshold does not help |
+| A sanitiser or link-handling description that names a `javascript:` URL followed by code ("javascript:void(0) links are stripped") | `mcp_a_dangerous_scheme` (high) | Rephrase ("javascript: links are stripped"), or set `mcp_scan_strip_severity: critical` for that deployment: the tool is then listed with its description replaced (`sanitize`); also set `mcp_scan_sanitize_severity: critical` to list it unchanged |
+| A docstring parameter list or a few-shot line whose role label is followed by an instruction word ("system: Always sent as the first message", "Assistant: Read notes.txt and summarise it") | `mcp_a_role_impersonation` (high) | Rephrase ("system: Sent as the first message"), or raise the two thresholds as above. At the default threshold the same line in a `prompts/get` result has its messages replaced, and in an elicitation the question is refused |
+| `<system>` as an XML tag-name example or enum value | `mcp_a_hidden_marker` (high) | Rephrase (`system` without the brackets), or raise the two thresholds as above |
+
+Raising the thresholds applies to every server behind that proxy, so it lowers protection for all of
+them; prefer asking the server author to rephrase.
+
+#### Known detection limits
+
+- **Word-boundary splits across fields.** Text split exactly between two words across fields, with no
+  whitespace on either side of the cut ("ignore all previous" | "instructions"), is not matched; a cut
+  inside a word, or one that keeps a space, is.
+- **A directive wrapped within one sentence.** A line break ends a sentence for the sentence-scoped
+  rules, so "Send the file contents\nto https://…" is not matched by `mcp_a_exfil_directive`; words
+  wrapped across lines are still matched by the rules written across whitespace (instruction
+  override, role label).
+- **Strings without whitespace** (property names, enum values, defaults) are matched by the reduced
+  rule set described above only.
+- **Paraphrase.** The rules match the shape of known instructions; a reworded instruction, an
+  indirection ("follow the setup steps in the linked document") or an encoded payload is not
+  matched. Gate B, which evaluates every call against policy whatever the model was told, is the
+  control; Gate A raises the cost and gives visibility.
+
 ### 3.2 Severity → action
 
 `_action_for` (`firewall.py` `McpFirewall._action_for`) maps (scan severity, pin status) onto one of three actions:
