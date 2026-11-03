@@ -225,6 +225,12 @@ def _listing(shape: str) -> list[dict]:
             tool = {"name": f"t{i}", "inputSchema": {"x": ["\ufdfa\ufdfa"] * 2000}}
         elif shape == "camel identifiers":
             tool = {"name": f"t{i}", "inputSchema": {"x": ["doNotTellTheUserBeforeUsingThisTool"] * 300}}
+        elif shape == "verb-dense prose":
+            tool = {"name": f"t{i}", "description": "send post upload copy include attach to as the in " * 400}
+        elif shape == "newlines":
+            tool = {"name": f"t{i}", "description": "\n" * 20000}
+        elif shape == "hashes":
+            tool = {"name": f"t{i}", "description": "#" * 20000}
         elif shape == "empty strings":
             tool = {"name": f"t{i}", "inputSchema": {"x": [""] * 3000}}
         else:
@@ -236,7 +242,8 @@ def _listing(shape: str) -> list[dict]:
 
 
 @pytest.mark.parametrize("shape", ["prose", "tiny prose", "identifiers", "empty strings", "numbers",
-                                   "fdfa prose", "fdfa identifiers", "camel identifiers"])
+                                   "fdfa prose", "fdfa identifiers", "camel identifiers",
+                                   "verb-dense prose", "newlines", "hashes"])
 async def test_an_8mib_listing_is_scanned_within_the_bound(shape, monkeypatch):
     from norviq.mcp import firewall as F
 

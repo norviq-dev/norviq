@@ -283,7 +283,10 @@ for Gate A to read in full is withheld (`NRVQ-MCP-5092`–`5094`), as is a promp
 whatever the strip threshold. Gate A matches words joined by underscores, dots or camelCase, or
 wrapped over several lines, like ordinary prose, and charges its scan budget by the length text
 folds to. A description that only mentions a credential (such as the API key a tool takes) or the
-server's own logging is annotated rather than withheld. Two security booleans no longer fall back to off when an
+server's own logging is annotated rather than withheld. Gate A no longer withholds tools or prompts
+for role names in schemas (`system:masters`, a parameter called `system`), few-shot `User:`/`Assistant:`
+templates or template variables such as `{{system.hostname}}`, and its scanning stays fast on unusual
+input. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

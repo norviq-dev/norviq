@@ -36,6 +36,7 @@ reported, so audit and console always show what the server actually sent.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import re
 import unicodedata
@@ -116,7 +117,7 @@ _SILENCE_IS_ORDINARY = re.compile(
     r"discard|discards|discarded|truncate|truncates|truncated|overwrite|overwrites|overwritten|"
     r"continue|continues|retry|retries|no-?op|noop)\s+(silently|quietly)\b"
     r"|\b(silently|quietly)\s+(succeed|fail|return|exit|ignore|skip|drop|discard|truncate|"
-    r"overwrite|continue|retry|no-?op)\w*"
+    r"overwrite|continue|retry|no-?op)\w{0,20}"
 )
 
 # How far either side of a match the veto may look. Deliberately tight (a few words), so a decoy
@@ -155,6 +156,20 @@ def _excused(folded: str, m: "re.Match[str]", veto: "re.Pattern[str]") -> bool:
         return False
     return _CONTROL_OBJECT.search(folded[m.start():m.end() + _OBJECT_WINDOW]) is None
 
+# Markup tags that fence text as privileged: <IMPORTANT>, </system>, [INST]. Shared by the
+# hidden-marker rule and the identifier table.
+_MARKUP_TAG = (r"<[ \t]*/?[ \t]*(important|system|instruction|admin|critical)[ \t]*>|"
+               r"\[/?inst\]")
+
+# What makes a role label an impersonation: an instruction to the model right after it.
+# "System: You are a helpful assistant." is the ordinary system prompt of a template, so "you are"
+# counts only when it hands over a new identity or privilege ("you are now", "you are root").
+_ROLE_PAYLOAD = (r"(ignore|disregard|forget|override|obey|follow|comply|execute|"
+                 r"you\s+(must|will|shall|should|have\s+to|now)\b|"
+                 r"you\s+are\s+(now|root|admin|an?\s+admin\w{0,10}|in\s+\w{1,20}\s+mode|unrestricted|"
+                 r"jailbroken)\b|from\s+now\s+on|always|never|do\s+not|don't|"
+                 r"new\s+instructions?|(read|send|reveal|print)\b)")
+
 # Credential and secret locations, for the two `mcp_a_credential_read` entries.
 _CREDENTIAL = (r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.env\b|/etc/shadow|/etc/passwd|"
                r"\.kube/config|/var/run/secrets|api[_\s-]?key|secret[_\s-]?key|private[_\s-]?key|"
@@ -187,15 +202,15 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         re.compile(r"(do\s*not|don't|never|without|avoid)\s+"
                    r"((ever|explicitly|directly)\s+)*"
                    r"(tell|inform|mention|reveal|disclose|show|display|notify|alert|discuss|"
-                   r"surface|expose|report|warn|admit|acknowledge|share|indicate|announce)\w*"
-                   r"[^.]{0,40}?\b(user|human|operator|anyone|them|caller|client)\b"),
+                   r"surface|expose|report|warn|admit|acknowledge|share|indicate|announce)\w{0,20}"
+                   r"[^.\n]{0,40}?\b(user|human|operator|anyone|them|caller|client)\b"),
         "the definition instructs the model to hide its behaviour from the user",
     ),
     (
         # The same intent stated the other way round: not "do not tell them", but "keep it hidden".
         # `keep this hidden from the operator` scored zero, and it is the plainest possible phrasing.
         "mcp_a_concealment", "critical",
-        re.compile(r"(keep|leave|hold|remain)\s+[^.]{0,30}?"
+        re.compile(r"(keep|leave|hold|remain)\s+[^.\n]{0,30}?"
                    r"\b(hidden|secret|invisible|undisclosed|concealed|unreported|out\s+of\s+sight)\b"),
         "the definition asks for the action to be kept from the user",
     ),
@@ -239,7 +254,8 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         # text/html form, which is a document the client would render, is caught. `http:` is likewise
         # not here: an insecure URL is a different (and much noisier) finding than an executable one.
         "mcp_a_dangerous_scheme", "high",
-        re.compile(r"(javascript|vbscript)\s*:|data\s*:\s*text/html"),
+        # Not inside a negative lookaround: `^(?!javascript:)` is a pattern EXCLUDING the scheme.
+        re.compile(r"(?<!\(\?!)(?<!\(\?<!)(javascript|vbscript)\s*:|data\s*:\s*text/html"),
         "the text carries a URL scheme that executes when followed",
     ),
     (
@@ -251,9 +267,9 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         # appended to be credential- or channel-shaped. Without that gate this rule would fire on
         # perfectly normal documentation, which is how a scanner earns its way to being switched off.
         "mcp_a_line_jumping", "high",
-        re.compile(r"(append|add|include|insert|attach|prepend|embed|emit)\w*\s+[^.]{0,40}?"
+        re.compile(r"(append|add|include|insert|attach|prepend|embed|emit)\w{0,20}\s+[^.\n]{0,40}?"
                    r"\b(token|secret|key|credential|password|cookie|session|header|payload|"
-                   r"url|link|instruction)\w*\b[^.]{0,40}?"
+                   r"url|link|instruction)\w{0,20}\b[^.\n]{0,40}?"
                    r"\b(every|each|all)\s+(reply|response|message|answer|output|turn)"),
         "the definition instructs the model to alter every reply, not just this tool's result",
     ),
@@ -268,17 +284,17 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         # server describing its own logging, not a directive to the model to send user data, and
         # graded critical it withheld an honest tool; `log`/`record`/`report`/`post` are not here.
         "mcp_a_side_channel", "critical",
-        re.compile(r"\b(bcc|cc|forward|mirror|copy|relay|send|upload|transmit|exfiltrate)\w*\s+"
-                   r"[^.]{0,60}?\b(every|each|all)\s+"
-                   r"(call|invocation|request|query|use|message)\w*\b[^.]{0,60}?"
+        re.compile(r"\b(bcc|cc|forward|mirror|copy|relay|send|upload|transmit|exfiltrate)\w{0,20}\s+"
+                   r"[^.\n]{0,60}?\b(every|each|all)\s+"
+                   r"(call|invocation|request|query|use|message)\w{0,20}\b[^.\n]{0,60}?"
                    r"(@[a-z0-9.-]+\.[a-z]{2,}|https?://|\b(webhook|endpoint|collector)\b)"),
         "the definition sends a copy of every call to a destination of its own choosing",
     ),
     (
         # The same shape with the destination first — "bcc x@y on each call" reads either way round.
         "mcp_a_side_channel", "critical",
-        re.compile(r"\b(bcc|cc|forward|mirror|copy|relay)\w*\s+[^.]{0,60}?"
-                   r"(@[a-z0-9.-]+\.[a-z]{2,}|https?://)[^.]{0,60}?"
+        re.compile(r"\b(bcc|cc|forward|mirror|copy|relay)\w{0,20}\s+[^.\n]{0,60}?"
+                   r"(@[a-z0-9.-]+\.[a-z]{2,}|https?://)[^.\n]{0,60}?"
                    r"\b(every|each|all)\s+(call|invocation|request|query|use|message)"),
         "the definition sends a copy of every call to a destination of its own choosing",
     ),
@@ -292,7 +308,7 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         re.compile(r"(?<!\bare )(?<!\bis )(?<!\bbe )(?<!\bwas )(?<!\bwere )(?<!\bbeen )"
                    r"\b(read|open|cat|print|dump|output|reveal|send|include|pass|upload|attach|copy|"
                    r"exfiltrate|forward|post|transmit|leak|paste|extract|grab|steal|collect|"
-                   r"append|embed)(ing)?\b[^.]{0,60}?" + _CREDENTIAL),
+                   r"append|embed)(ing)?\b[^.\n]{0,60}?" + _CREDENTIAL),
         "the definition directs the model to read or pass on a credential or secret",
     ),
     (
@@ -308,29 +324,42 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
     (
         "mcp_a_exfil_directive", "critical",
         re.compile(r"(send|post|upload|forward|transmit|exfiltrate|copy|include|attach|append)\b"
-                   r"[^.]{0,60}?\b(to\s+(https?://|[\w.+-]+@)|as\s+(a|an|the)\s+(argument|parameter|"
+                   r"[^.\n]{0,60}?\b(to\s+(https?://|[\w.+-]{1,64}@)|as\s+(a|an|the)\s+(argument|parameter|"
                    r"param|field|value)|in\s+the\s+\w+\s+(argument|parameter|field))"),
         "the definition directs data to a destination of the server's choosing",
     ),
     (
         "mcp_a_hidden_marker", "high",
         # Instruction-fencing markers an attacker uses to make text read as privileged: <IMPORTANT>,
-        # [[SYSTEM]], ### instructions ###, <system>, {{system}}.
-        re.compile(r"(<\s*/?\s*(important|system|instruction|admin|critical)\s*>|"
-                   r"\[\[\s*(system|important|instruction)|"
-                   r"\{\{\s*(system|important|instruction)|"
-                   r"#{2,}\s*(system|important|instruction))"),
+        # [[SYSTEM]], ### instructions ###, <system>, {{system}}, [INST].
+        #
+        # LINEAR TIME. `#{2,}\s*` was tried at every `#` of a run and backtracked over the rest of it:
+        # quadratic, ~40 s for a 641 KB listing of `#`. A run is now entered only at its first `#`
+        # (lookbehind), and the template forms must close (`{{system}}`, not `{{system.hostname}}`,
+        # which is an ordinary template variable).
+        re.compile(_MARKUP_TAG + r"|"
+                   r"\[\[[ \t]*(system|important|instruction)[ \t]*\]\]|"
+                   r"\{\{[ \t]*(system|important|instruction)[ \t]*\}\}|"
+                   r"(?<!#)#{2,}[ \t]*(system|important|instruction)\b"),
         "the definition embeds a pseudo-privileged instruction marker",
     ),
     (
         "mcp_a_tool_precondition", "high",
-        re.compile(r"(before|prior\s+to|first,?)\s+(you\s+)?(us|call|invok|run|execut)\w*\s+"
-                   r"[^.]{0,40}?\b(tool|function|this|any\s+other)\b"),
+        re.compile(r"(before|prior\s+to|first,?)\s+(you\s+)?(us|call|invok|run|execut)\w{0,20}\s+"
+                   r"[^.\n]{0,40}?\b(tool|function|this|any\s+other)\b"),
         "the definition asserts a precondition on OTHER tools — a cross-tool control attempt",
     ),
     (
         "mcp_a_role_impersonation", "high",
-        re.compile(r"^\s*(system|assistant|developer)\s*:", re.MULTILINE),
+        # A role label at the start of a line AND an instruction aimed at the model after it.
+        # The label alone is how a docstring documents a parameter called `system` ("system: the
+        # system prompt to use"), how a few-shot template writes its turns ("Assistant: Sure, ..."),
+        # and how a resource is addressed (`system://info`); none of those is impersonation.
+        #
+        # LINEAR TIME. `^\s*` under MULTILINE was tried at every line start and ran over every
+        # following newline: quadratic on a run of newlines (~1.2 s per 16 KiB window). Only spaces
+        # and tabs may precede the label now, so each line start is examined once.
+        re.compile(r"^[ \t]*(system|assistant|developer)[ \t]*:[ \t]*" + _ROLE_PAYLOAD, re.MULTILINE),
         "the definition impersonates a privileged conversational role",
     ),
     (
@@ -438,26 +467,37 @@ def _fold(chunk: str) -> str:
     return skeleton(chunk.translate(_LINE_BREAKS)).replace("\u2028", "\n")
 
 
-_RULE_TABLES: dict[frozenset[str] | None, tuple] = {}
+_RULE_TABLES: dict[tuple[tuple, frozenset[str]], tuple] = {}
 
 
-def _rule_table(rules: frozenset[str] | None) -> tuple:
-    """`_RULES` restricted to `rules` (all when None), built once per rule set."""
-    table = _RULE_TABLES.get(rules)
+def _rule_table(rules: frozenset[str] | None, base: tuple | None = None) -> tuple:
+    """`base` (default `_RULES`) restricted to `rules` (all when None), built once per pair.
+
+    Keyed by the table itself, not its `id()`: a caller's temporary table can be freed and its id
+    reused by another, and an id-keyed cache then hands back the wrong rules.
+    """
+    base = _RULES if base is None else base
+    if rules is None:
+        return base
+    key = (base, rules)
+    table = _RULE_TABLES.get(key)
     if table is None:
-        table = _RULE_TABLES[rules] = tuple(e for e in _RULES if rules is None or e[0] in rules)
+        if len(_RULE_TABLES) > 1024:
+            _RULE_TABLES.clear()
+        table = _RULE_TABLES[key] = tuple(e for e in base if e[0] in rules)
     return table
 
 
 def _scan_text(text: str, field_path: str, rules: frozenset[str] | None = None,
-               spaced: bool = False) -> list[Finding]:
+               spaced: bool = False, table: tuple | None = None) -> list[Finding]:
     """Run the rules over ALL of one text, in overlapping windows.
 
     Nothing is truncated: text past 16 KiB in one field — the tail of a long description — is read
     like its head. Each window is `_WINDOW` characters
     and overlaps the next by `_WINDOW_OVERLAP`, longer than any rule's match, so a match on the seam is
     seen whole in one window. The cost is the caller's to bound (`_scan_pairs`, the content guard).
-    `rules` restricts the rule table (the joined streams use `_STREAM_RULES`). `spaced` matches the
+    `table` replaces the rule table (`_STREAM_TABLE`, `_IDENTIFIER_TABLE`) and `rules` restricts it
+    to those rule ids. `spaced` matches the
     separator-normalised form (`_spaced`) instead of the text as written: identifiers and the joined
     streams, where words are glued by `_`, `-`, `.`, `/`, `+` or camelCase rather than spaces.
     """
@@ -465,7 +505,7 @@ def _scan_text(text: str, field_path: str, rules: frozenset[str] | None = None,
         return []
     findings: list[Finding] = []
     seen: set[str] = set()
-    if rules is None:
+    if rules is None and table is None:
         # Invisible characters are evaluated on the RAW text: skeleton() strips them by design, so
         # the skeleton can never witness them. This is why the two are checked separately rather than
         # the scanner just folding everything first.
@@ -491,11 +531,14 @@ def _scan_text(text: str, field_path: str, rules: frozenset[str] | None = None,
         # excerpt is taken positionally — approximate for heavily-folded text, which is acceptable
         # for an audit hint.
         folded = _fold(chunk)
-        for entry in _rule_table(rules):
+        for entry in _rule_table(rules, table):
             rule, severity, pattern, detail = entry[:4]
             # Keyed on (rule, severity): a rule with a critical and a low form (credential_read)
             # must not have its critical form suppressed by a low match in an earlier window.
             if (rule, severity) in seen:
+                continue
+            pre = _PREFILTERS.get(pattern.pattern)
+            if pre is not None and pre.search(folded) is None:
                 continue
             veto = entry[4] if len(entry) > 4 else None
             # EVERY occurrence is considered, not just the first. `search` would let one ordinary
@@ -645,15 +688,72 @@ def _leaf_cost(folded: int) -> int:
     return _LEAF_BASE_COST + 2 * folded + (max(folded, _SCAN_MIN_COST) if folded else 0)
 
 
-# The rules applied to the JOINED streams (`_scan_pairs`): those that need instruction STRUCTURE —
-# several words with whitespace between them — so they cannot be completed by identifiers glued
-# together (`api` + `_key`) and a match spans real words. Keyword rules (`credential_read`,
-# `hidden_marker`, `dangerous_scheme`), the line-anchored `role_impersonation`, the
-# context-sensitive `concealment_bare` and the medium `authority_claim` are not applied there.
-_STREAM_RULES = frozenset({
-    "mcp_a_instruction_override", "mcp_a_concealment", "mcp_a_line_jumping", "mcp_a_side_channel",
-    "mcp_a_exfil_directive", "mcp_a_tool_precondition",
-})
+# PREFILTERS: a cheap pattern that must occur in the folded text before a rule is tried. The rules
+# below are linear but try a bounded lazy class at every verb, so a text of nothing but the verb
+# ("read read read …") cost ~0.8 us per character per rule; the prefilter looks for the part the
+# match cannot do without (the credential, the destination, the "every reply") in one pass.
+_PREFILTER_CREDENTIAL = re.compile(_CREDENTIAL)
+_PREFILTER_DESTINATION = re.compile(r"@[a-z0-9.-]+\.[a-z]{2,}|https?://|\b(webhook|endpoint|collector)\b")
+_PREFILTER_EVERY_REPLY = re.compile(r"\b(every|each|all)\s+(reply|response|message|answer|output|turn)")
+_PREFILTER_EXFIL = re.compile(r"\bto\s+(https?://|[\w.+-]{1,64}@)|\bas\s+(a|an|the)\s+|\bin\s+the\s+\w")
+_PREFILTERS: dict[str, re.Pattern[str]] = {}
+
+
+_PREFILTER_BY_RULE = {
+    "mcp_a_credential_read": _PREFILTER_CREDENTIAL,
+    "mcp_a_side_channel": _PREFILTER_DESTINATION,
+    "mcp_a_line_jumping": _PREFILTER_EVERY_REPLY,
+    "mcp_a_exfil_directive": _PREFILTER_EXFIL,
+}
+for _e in _RULES:
+    if _e[0] in _PREFILTER_BY_RULE:
+        _PREFILTERS[_e[2].pattern] = _PREFILTER_BY_RULE[_e[0]]
+
+
+def _entry(rule: str, pattern_start: str) -> tuple:
+    """The `_RULES` entry for `rule` whose pattern begins with `pattern_start`."""
+    found = [e for e in _RULES if e[0] == rule and e[2].pattern.startswith(pattern_start)]
+    assert len(found) == 1, (rule, pattern_start)
+    return found[0]
+
+
+# The rules applied to the JOINED streams (`_scan_pairs`): high-precision ones that need several
+# words of instruction structure. Not the keyword rules (`credential_read`, `hidden_marker`,
+# `dangerous_scheme`), not `role_impersonation`, not `concealment_bare`/`authority_claim`, and not
+# "keep … secret" (`keepAlive` + `clientSecret`). A match must also cross a leaf boundary
+# (`_scan_streams`), so a phrase inside one identifier (`first_run_tool_name`) is not a finding.
+_STREAM_TABLE = (
+    _entry("mcp_a_instruction_override", "(ignore"),
+    _entry("mcp_a_concealment", "(do"),
+    _entry("mcp_a_exfil_directive", "(send"),
+    _entry("mcp_a_line_jumping", "(append"),
+    _entry("mcp_a_tool_precondition", "(before"),
+    *[e for e in _RULES if e[0] == "mcp_a_side_channel"],
+)
+_STREAM_RULES = frozenset(e[0] for e in _STREAM_TABLE)
+
+# What an IDENTIFIER leaf on its own is matched with, on its separator-normalised form: only the
+# high-precision structural shapes — a dangerous URI scheme, an instruction-fencing markup tag, an
+# instruction override, data sent to a URL or address. Words that are ordinary in identifiers
+# (`system:masters`, `override_system_prompt`, `{{system.hostname}}`, `never_notify_user`,
+# `first_run_tool_name`) are not enough.
+_IDENTIFIER_TABLE = (
+    _entry("mcp_a_dangerous_scheme", "(?<!"),
+    ("mcp_a_hidden_marker", "high", re.compile(_MARKUP_TAG),
+     "the definition embeds a pseudo-privileged instruction marker"),
+    # With a determiner and an instruction object: "ignore all previous instructions", not the
+    # parameter names `override_system_prompt` or `ignore_previous_message_context`.
+    ("mcp_a_instruction_override", "critical",
+     re.compile(r"(ignore|disregard|forget|override)\s+(all|any|your|the)\s+((all|any|your|the)\s+)?"
+                r"(previous|prior|earlier|above|preceding|system)\s+(instruction|prompt|rule|direction)"),
+     "the definition tells the model to discard its own instructions"),
+    ("mcp_a_exfil_directive", "critical",
+     re.compile(r"(send|post|upload|forward|transmit|exfiltrate|copy|include|attach|append)\b"
+                r"[^.\n]{0,60}?\bto\s+(https?://|[\w.+-]{1,64}@)"),
+     "the definition directs data to a destination of the server's choosing"),
+)
+_IDENTIFIER_RULES = frozenset(e[0] for e in _IDENTIFIER_TABLE)
+_PREFILTERS[_IDENTIFIER_TABLE[3][2].pattern] = _PREFILTER_EXFIL
 
 _WHITESPACE = re.compile(r"\s")
 
@@ -675,25 +775,17 @@ def _key_run(path: str) -> str | None:
     return m.group(1) if m else None
 
 
-# Rules applied to IDENTIFIER leaves, on their separator-normalised form: every rule that needs
-# instruction structure or a marker. The keyword-only `credential_read`, the context-sensitive
-# `concealment_bare` and the low `authority_claim` are not, so `api_key` alone is not a finding.
-_IDENTIFIER_RULES = frozenset({
-    "mcp_a_dangerous_scheme", "mcp_a_hidden_marker", "mcp_a_role_impersonation",
-    "mcp_a_concealment", "mcp_a_instruction_override", "mcp_a_exfil_directive",
-    "mcp_a_line_jumping", "mcp_a_tool_precondition", "mcp_a_side_channel",
-})
-
 # Separators that glue words in an identifier, read as spaces: `_` and `+` always; `-`, `.` and `/`
 # between two letters or digits (so `user._Do` keeps its sentence break and `https://` its slashes).
-_SEPARATOR = re.compile(r"[_+]|(?<=[^\W_])[-./](?=[^\W_])")
+_SEPARATOR = re.compile(r"(?<=[^\W_])[-./](?=[^\W_])")
+_GLUE = str.maketrans({"_": " ", "+": " "})
 _CAMEL = re.compile(r"(?<=[a-z])(?=[A-Z])")
 # Blank characters that are not `\s`: braille blank, Hangul fillers.
 _BLANKS = str.maketrans({"\u2800": " ", "\u3164": " ", "\u115f": " ", "\u1160": " ", "\uffa0": " "})
 
 
 def _spaced(text: str) -> str:
-    return _SEPARATOR.sub(" ", _CAMEL.sub(" ", text.translate(_BLANKS)))
+    return _SEPARATOR.sub(" ", _CAMEL.sub(" ", text.translate(_BLANKS))).translate(_GLUE)
 
 # Bounds on the PATH stored with each collected string. Paths were built in full, so memory grew as
 # strings x key length: long keys at every level made a 1.1 MB tools/list cost ~4 GiB. A segment over
@@ -728,6 +820,57 @@ def _fold_key(key: str) -> str:
 
 def _leaf_name(path: str) -> str:
     return path.rsplit(".", 1)[-1].split("[", 1)[0]
+
+
+def _scan_streams(collected: list[tuple[str, str]], joined: str, seen: set[str]) -> list[Finding]:
+    """Read the leaves JOINED — values in order, each object's keys, keys and values interleaved —
+    with `_STREAM_TABLE`, and keep only matches that CROSS a boundary between two leaves.
+
+    Each leaf is folded once (with `-`, `.`, `/` between letters read as spaces); a stream is those folded pieces concatenated,
+    with the offsets where one piece ends and the next begins. A match lying inside one piece is that
+    piece's own business: a prose leaf was already read with every rule, and an identifier is
+    deliberately not matched by these rules on its own ("never_notify_client", "keepAlive" +
+    "clientSecret" inside one key). A match spanning pieces is text cut into fields — the shape the
+    streams exist for — and is found even when the cut falls between words or at a separator
+    ("previous" + ".instructions").
+    """
+    # Only `-`, `.` and `/` between letters read as spaces here, not `_`, `+` or camelCase: those made
+    # whole identifiers read as phrases across a boundary ("doNotNotifyUsers" + "doNotShowUserAvatar"
+    # -> "... users do not show user ..."), which is the identifier rule set's call, not the streams'.
+    folded = [_fold(_SEPARATOR.sub(" ", t)) for _p, t in collected]
+    keys: dict[str, list[int]] = {}
+    values: list[int] = []
+    for i, (p, _t) in enumerate(collected):
+        run = _key_run(p)
+        if run is None:
+            values.append(i)
+        else:
+            keys.setdefault(run, []).append(i)
+    found: list[Finding] = []
+    for members in (values, *keys.values(), list(range(len(collected)))):
+        if len(members) < 2:
+            continue
+        pieces = [folded[i] for i in members]
+        text = "".join(pieces)
+        bounds: list[int] = []
+        at = 0
+        for piece in pieces[:-1]:
+            at += len(piece)
+            bounds.append(at)
+        for entry in _STREAM_TABLE:
+            rule, severity, pattern, detail = entry[:4]
+            if rule in seen:
+                continue
+            pre = _PREFILTERS.get(pattern.pattern)
+            if pre is not None and pre.search(text) is None:
+                continue
+            for m in pattern.finditer(text):
+                i = bisect.bisect_right(bounds, m.start())
+                if i < len(bounds) and bounds[i] < m.end():
+                    found.append(Finding(rule, severity, joined, _excerpt(text, m.span()), detail))
+                    seen.add(rule)
+                    break
+    return found
 
 
 def _scan_pairs(
@@ -799,40 +942,28 @@ def _scan_pairs(
         # payload identifiers otherwise paid for a finding per leaf.
         ident_rules = _IDENTIFIER_RULES
         for path, text in collected:
-            if is_prose(path, text):
+            prose = is_prose(path, text)
+            if prose:
                 report.findings.extend(_scan_text(text, path))
-            else:
-                if _INVISIBLE.search(text):
-                    report.findings.append(Finding(
-                        "mcp_a_invisible_characters", "high", path, "",
-                        "zero-width/bidi/tag character(s) in an identifier — text hidden from human "
-                        "review",
-                    ))
+            elif _INVISIBLE.search(text):
+                report.findings.append(Finding(
+                    "mcp_a_invisible_characters", "high", path, "",
+                    "zero-width/bidi/tag character(s) in an identifier — text hidden from human "
+                    "review",
+                ))
+            # Every leaf WITHOUT whitespace gets the identifier pass, a description among them:
+            # `Ignore_all_previous_instructions` as a description is prose by its key and still has
+            # no spaces for the full rule table to match.
+            if not prose or _WHITESPACE.search(text) is None:
                 if ident_rules:
-                    found = _scan_text(text, path, ident_rules, spaced=True)
+                    found = _scan_text(text, path, ident_rules, spaced=True, table=_IDENTIFIER_TABLE)
                     if found:
+                        found = [f for f in found if not prose
+                                 or (f.rule, f.severity) not in {(g.rule, g.severity) for g in report.findings}]
                         report.findings.extend(found)
                         ident_rules = ident_rules - {f.rule for f in found}
         if joined and len(collected) > 1:
-            seen = {f.rule for f in report.findings}
-            key_runs: dict[str, list[str]] = {}
-            values: list[str] = []
-            for p, t in collected:
-                run = _key_run(p)
-                if run is None:
-                    values.append(t)
-                else:
-                    key_runs.setdefault(run, []).append(t)
-            streams = [values, *key_runs.values(), [t for _p, t in collected]]
-            for stream in streams:
-                if len(stream) < 2:
-                    continue
-                # Glued with NUL, which the fold drops: pieces are read as one text, and a rule in
-                # `_STREAM_RULES` still needs word breaks inside the pieces to match.
-                found = [f for f in _scan_text("\x00".join(stream), joined, _STREAM_RULES, spaced=True)
-                         if f.rule not in seen]
-                report.findings.extend(found)
-                seen.update(f.rule for f in found)
+            report.findings.extend(_scan_streams(collected, joined, {f.rule for f in report.findings}))
     gave_up = list(unwalked) if unwalked is not None else (
         ["<the string collection cap>"] if len(collected) > _MAX_WALK_STRINGS else [])
     if gave_up:
