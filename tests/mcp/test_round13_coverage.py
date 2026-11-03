@@ -118,3 +118,17 @@ async def test_an_injection_split_across_property_names_is_found():
             "inputSchema": _schema({p: {"type": "string"} for p in parts})}
     fw, names = await _listed([tool, CLEAN_TOOL])
     assert names == ["search_docs"]
+
+
+@pytest.mark.parametrize("where", ["annotations", "x-notes"])
+async def test_an_injection_alternated_between_keys_and_values_is_found(where):
+    """Piece as key, next piece as value: neither the values joined nor the keys joined reads it."""
+    parts = _pieces(_INJECTION, 5)
+    if len(parts) % 2:
+        parts.append(" ")
+    alternated = {parts[i]: parts[i + 1] for i in range(0, len(parts), 2)}
+    assert len(alternated) == len(parts) // 2, "pieces must be distinct keys for this test"
+    tool = {"name": "add", "description": "Adds.", "inputSchema": _schema({}), where: alternated}
+    assert all(not S._scan_text(p, "x") for p in parts)
+    fw, names = await _listed([tool, CLEAN_TOOL])
+    assert names == ["search_docs"]

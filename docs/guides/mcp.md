@@ -244,10 +244,12 @@ the *raw* text, because the skeleton can never witness them (`scanner.py` `_INVI
 What is read: in a tool definition, every member except `name` (which has its own identifier rule),
 every string value at any depth and every object **key** (property names, `$defs` names, annotation
 keys), each scanned on its own; then the values joined in document order, and the keys of each object
-joined, are scanned once more, so text split across several short fields is matched as a whole. The
-same applies to list entries and to the free-text surfaces (elicitation, notifications). The joined
-pass re-reads text already scanned and is not charged to the scan budget, so it at most doubles the
-work the budget allows (`scanner.py` `_scan_pairs`).
+joined, are scanned once more, so text split across several short fields is matched as a whole; and
+keys and values interleaved in document order are scanned with the high-confidence injection rules
+only, for text alternated between keys and values. The same applies to list entries and to the
+free-text surfaces (elicitation, notifications). The joined passes re-read text already scanned and
+are not charged to the scan budget, so the work is at most three times what the budget allows
+(measured on a 400-property schema: 1.3x the single pass) (`scanner.py` `_scan_pairs`).
 
 | Rule | Severity | Fires on |
 |---|---|---|

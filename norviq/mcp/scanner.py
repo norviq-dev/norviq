@@ -527,6 +527,14 @@ def _walk_strings(node: Any, path: str, out: list[tuple[str, str]], depth: int =
 # 600-value enum joined is long, and that says nothing about any field in it.
 _SIZE_RULES = frozenset({"mcp_a_oversized_description", "mcp_a_oversized_field"})
 
+# Rules applied to keys and values read interleaved (see `_scan_pairs`): the critical/high rules whose
+# match is an injection on its face, with no veto and no reading of surrounding words.
+_INTERLEAVED_RULES = frozenset({
+    "mcp_a_instruction_override", "mcp_a_concealment", "mcp_a_dangerous_scheme", "mcp_a_line_jumping",
+    "mcp_a_side_channel", "mcp_a_credential_read", "mcp_a_exfil_directive", "mcp_a_hidden_marker",
+    "mcp_a_tool_precondition", "mcp_a_role_impersonation",
+})
+
 # A collected KEY is recorded at its child's path with this suffix, so a finding says it was the key.
 _KEY_MARK = "{key}"
 
@@ -618,8 +626,9 @@ def _scan_pairs(
         # split into pieces none of which matches alone — 30-character fragments under `x-note-0..N`,
         # or as the values of an `enum`. The leaves are scanned again joined in document order, one
         # per line, and a rule that only matches across them is reported against `joined` (the
-        # definition). Not charged to the shared budget: it re-reads text already paid for, so it at
-        # most doubles the work the budget allows, and it never starves a later entry of a listing.
+        # definition). Not charged to the shared budget: it re-reads text already paid for — the
+        # values/keys passes once more and the interleaved pass once more, so the work is at most
+        # three times what the budget allows — and it never starves a later entry of a listing.
         #
         # Two streams, values and keys, each joined on its own: interleaving a key with its value
         # ("description" then "Fails silently ...") puts words in front of a sentence that it never
@@ -639,6 +648,15 @@ def _scan_pairs(
                          if f.rule not in seen and f.rule not in _SIZE_RULES]
                 report.findings.extend(found)
                 seen.update(f.rule for f in found)
+        # A THIRD pass over keys and values interleaved in document order (each key just before its
+        # value), for a payload alternated between them: piece as key, next piece as value. Only the
+        # rules in `_INTERLEAVED_RULES` count here — the ones a key standing next to ordinary prose
+        # cannot complete. The context-sensitive ones (`mcp_a_concealment_bare`, which fired on
+        # "description" + "Fails silently ...") and the medium authority rule are left out.
+        if len(scanned) > 1:
+            found = [f for f in _scan_text("\n".join(t for _p, t in scanned), joined)
+                     if f.rule not in seen and f.rule in _INTERLEAVED_RULES]
+            report.findings.extend(found)
     if starved or truncated:
         report.budget_exhausted = True
         report.findings.append(Finding(
