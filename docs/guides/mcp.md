@@ -202,7 +202,7 @@ both transports, and a JSON object that names a key twice, or two keys that diff
 compatibility form, counts as undecodable, since parsers disagree on which value wins and some match
 keys case-insensitively. A client message whose key differs from a protocol field only that way is
 refused (`NRVQ-MCP-5089`). `NaN`, `Infinity` and numbers that overflow a double are not JSON and make
-a message undecodable. In the other direction, a
+a message undecodable, as does nesting deeper than 128 levels. In the other direction, a
 server message whose envelope has such a key (`Id`, `Method`, `Params`, ...) is dropped, and a
 server object the proxy reads by member name (a list entry, a result, a content block, a prompt or
 sampling message, a notification's params) with a key that differs from such a member only by case or

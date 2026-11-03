@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import weakref
 from time import monotonic
 
@@ -18,6 +19,10 @@ from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 
 log = structlog.get_logger()
+
+
+class _UnencodableRequest(Exception):
+    """The evaluate request could not be serialised in this process (see `PolicyEngineClient._post`)."""
 
 
 class PolicyEngineClient:
@@ -87,11 +92,24 @@ class PolicyEngineClient:
     async def _post(self, event: ToolCallEvent) -> dict:
         """POST event payload with retry and exponential backoff."""
         client = await self._get_client()
+        # Encoded HERE, before any network call, so that failing to build the request is told apart
+        # from the engine failing to answer it. A tool_params tree nested ~255 levels deep makes
+        # pydantic's serialiser raise "Circular reference detected (depth exceeded)"; raised inside
+        # `client.post` it fell to `_handle_unknown_error` and the OUTAGE fallback, so with
+        # sdk_fallback_mode=allow a call nobody could evaluate was allowed. The caller chooses the
+        # params, so that was a bypass on demand. A request this process cannot encode is not an
+        # outage: `evaluate` blocks it whatever the fallback mode.
+        try:
+            body = json.dumps(event.model_dump(mode="json"), separators=(",", ":"),
+                              ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise _UnencodableRequest(str(exc)) from exc
         for attempt in range(self._max_retries + 1):
             try:
                 # The central API mounts the evaluate router at /api/v1 (norviq/api/main.py) — same
                 # endpoint + auth contract the thin-proxy sidecar's RemoteEvaluator uses.
-                response = await client.post("/api/v1/evaluate", json=event.model_dump(mode="json"))
+                response = await client.post("/api/v1/evaluate", content=body,
+                                             headers={"content-type": "application/json"})
                 response.raise_for_status()
                 self._record_success()
                 return response.json()
@@ -187,6 +205,16 @@ class PolicyEngineClient:
             decision = PolicyDecision(**(await self._post(event)))
             self._log_success(event.event_id, decision.decision)
             return decision
+        except _UnencodableRequest as exc:
+            log.error("nrvq.sdk.evaluate.unencodable", event_id=event.event_id, error=str(exc)[:200],
+                      code="NRVQ-SDK-1016")
+            return PolicyDecision(
+                decision="block",
+                rule_id="engine_request_unencodable",
+                reason=("The evaluate request could not be encoded locally (for example, arguments "
+                        "nested too deeply); this is not an engine outage, and fail-open does not apply."),
+                event_id=event.event_id,
+            )
         except NorviqTimeoutError as exc:
             return self._handle_timeout(event, exc)
         except httpx.HTTPStatusError as exc:

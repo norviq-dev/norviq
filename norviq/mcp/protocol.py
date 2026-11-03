@@ -285,9 +285,33 @@ def decode(line: bytes) -> JsonRpcMessage | None:
         hook = _finite_float if _MAYBE_HUGE.search(stripped) else None
         data = json.loads(stripped, object_pairs_hook=_unique_keys, parse_float=hook,
                           parse_constant=_no_constant)
+        # Counting brackets is C-speed and bounds the depth from above; only a message with more than
+        # MAX_DEPTH of them is walked.
+        if stripped.count(b"[") + stripped.count(b"{") > MAX_DEPTH and _deeper_than(data, MAX_DEPTH):
+            return None
         return JsonRpcMessage(data, stripped)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
+
+
+# Deepest object/array nesting a message may have. Downstream code walks these trees (scanners,
+# maskers, policy evaluation), and the SDK's request serialiser fails at ~255 levels; that failure
+# used to reach the outage fallback. MCP messages are shallow — a tool schema or a structured result
+# rarely nests past a few dozen levels — so 128 leaves room and refuses only the pathological.
+MAX_DEPTH = 128
+
+
+def _deeper_than(data: Any, limit: int) -> bool:
+    stack: list[tuple[Any, int]] = [(data, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > limit:
+            return True
+        if isinstance(node, dict):
+            stack.extend((v, depth + 1) for v in node.values() if isinstance(v, (dict, list)))
+        elif isinstance(node, list):
+            stack.extend((v, depth + 1) for v in node if isinstance(v, (dict, list)))
+    return False
 
 
 _MAYBE_HUGE = re.compile(rb"[eE][+-]?[0-9]{3}|[0-9]{300}")
