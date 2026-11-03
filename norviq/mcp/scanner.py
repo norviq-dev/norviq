@@ -186,10 +186,24 @@ _ROLE_PAYLOAD = (r"(ignore|disregard|forget|override|obey|follow|comply|execute|
                  r"jailbroken)\b|from\s+now\s+on|always|never|do\s+not|don't|"
                  r"new\s+instructions?|(read|send|reveal|print)\b)")
 
+# Exfiltration: a transfer verb, the object being sent, a destination.
+_EXFIL_VERB = r"(send|post|upload|forward|transmit|exfiltrate|copy|include|attach|append|pass)"
+_EXFIL_DESTINATION = (r"\b(to\s+(https?://|[\w.+-]{1,64}@)|as\s+(a|an|the)\s+(argument|parameter|"
+                      r"param|field|value)|in\s+the\s+\w+\s+(argument|parameter|field))")
+# What makes it exfiltration: the object is the model's or the user's data, not the tool's own payload.
+_EXFIL_OBJECT = (r"\b(conversation|chat|history|transcript|context|everything|memory|system\s+prompt|"
+                 r"instructions|(previous|prior|earlier|above|preceding|past)\s+\w{1,20}|"
+                 r"all\s+(the\s+)?(data|files|messages|content|context|conversation|output)|"
+                 r"(the\s+)?user'?s?\s+\w{1,20}|(file\s+)?contents|environment|env|"
+                 r"credentials?|secrets?|passwords?|ssh|id_rsa|id_ed25519|"
+                 r"(tool|other\s+tools?'?)\s+(results?|outputs?|responses?)|results?\s+of|outputs?\s+of)\b")
+
 # Credential and secret locations, for the two `mcp_a_credential_read` entries.
 _CREDENTIAL = (r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.env\b|/etc/shadow|/etc/passwd|"
                r"\.kube/config|/var/run/secrets|api[_\s-]?key|secret[_\s-]?key|private[_\s-]?key|"
                r"\.npmrc|\.pypirc|\.git-credentials|access[_\s-]?token)")
+# Credentials are the user's data too.
+_EXFIL_OBJECT = "(" + _EXFIL_OBJECT + "|" + _CREDENTIAL + ")"
 
 _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
     (
@@ -347,11 +361,18 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         "the definition names a credential or secret location",
     ),
     (
+        # CRITICAL when what is sent is the MODEL'S OR USER'S data (`_EXFIL_OBJECT`): the
+        # conversation, earlier messages, the user's files or credentials, tool results. A webhook
+        # or notification tool that sends ITS OWN payload to its own destination ("Send a JSON
+        # payload to https://hooks.slack.com/...") is what it is for, and is the low entry below.
         "mcp_a_exfil_directive", "critical",
-        re.compile(r"(send|post|upload|forward|transmit|exfiltrate|copy|include|attach|append)\b"
-                   r"[^.\n]{0,60}?\b(to\s+(https?://|[\w.+-]{1,64}@)|as\s+(a|an|the)\s+(argument|parameter|"
-                   r"param|field|value)|in\s+the\s+\w+\s+(argument|parameter|field))"),
-        "the definition directs data to a destination of the server's choosing",
+        re.compile(_EXFIL_VERB + r"\b[^.\n]{0,40}?" + _EXFIL_OBJECT + r"[^.\n]{0,60}?" + _EXFIL_DESTINATION),
+        "the definition directs the model's or user's data to a destination of the server's choosing",
+    ),
+    (
+        "mcp_a_exfil_directive", "low",
+        re.compile(_EXFIL_VERB + r"\b[^.\n]{0,60}?" + _EXFIL_DESTINATION),
+        "the definition sends something to a destination it names",
     ),
     (
         "mcp_a_hidden_marker", "high",
@@ -765,10 +786,12 @@ def _entry(rule: str, pattern_start: str) -> tuple:
 # `dangerous_scheme`), not `role_impersonation`, not `concealment_bare`/`authority_claim`, and not
 # "keep … secret" (`keepAlive` + `clientSecret`). A match must also cross a leaf boundary
 # (`_scan_streams`), so a phrase inside one identifier (`first_run_tool_name`) is not a finding.
+_EXFIL_CRITICAL = next(e for e in _RULES if e[0] == "mcp_a_exfil_directive" and e[1] == "critical")
+
 _STREAM_TABLE = (
     _entry("mcp_a_instruction_override", "(ignore"),
     _entry("mcp_a_concealment", "(do"),
-    _entry("mcp_a_exfil_directive", "(send"),
+    _EXFIL_CRITICAL,
     _entry("mcp_a_line_jumping", "(append"),
     _entry("mcp_a_tool_precondition", "(before"),
     *[e for e in _RULES if e[0] == "mcp_a_side_channel"],
@@ -784,18 +807,24 @@ _IDENTIFIER_TABLE = (
     _entry("mcp_a_dangerous_scheme", "(javascript|vbscript)[ \\t]*:(?="),
     ("mcp_a_hidden_marker", "high", re.compile(_MARKUP_TAG),
      "the definition embeds a pseudo-privileged instruction marker"),
-    # With a determiner and an instruction object: "ignore all previous instructions", not the
-    # parameter names `override_system_prompt` or `ignore_previous_message_context`.
+    # A FULL directive: the imperative at the start, a determiner, an earlier-instructions object
+    # ("ignore all previous instructions"). A name for the concept is configuration, not an
+    # instruction: `override_system_prompt`, `ignore_the_system_prompt`, `overrideTheSystemPrompt`,
+    # `ignore_previous_message_context`. A KEY must also go on past the object (see `_scan_pairs`).
     ("mcp_a_instruction_override", "critical",
-     re.compile(r"(ignore|disregard|forget|override)\s+(all|any|your|the)\s+((all|any|your|the)\s+)?"
-                r"(previous|prior|earlier|above|preceding|system)\s+(instruction|prompt|rule|direction)"),
+     re.compile(r"^[\W_]{0,3}(ignore|disregard|forget|override)\s+(all|any|your|the)\s+((all|any|your|the)\s+)?"
+                r"(previous|prior|earlier|above|preceding)\s+(instruction|prompt|rule|direction)\w{0,3}"),
      "the definition tells the model to discard its own instructions"),
+    # The model's or user's data sent to a URL or address: `send_the_conversation_history_to_https://…`,
+    # not the mode names `copy_to_https://bucket` or `send_to_ops@example.com`.
     ("mcp_a_exfil_directive", "critical",
-     re.compile(r"(send|post|upload|forward|transmit|exfiltrate|copy|include|attach|append)\b"
-                r"[^.\n]{0,60}?\bto\s+(https?://|[\w.+-]{1,64}@)"),
-     "the definition directs data to a destination of the server's choosing"),
+     re.compile(_EXFIL_VERB + r"\b[^.\n]{0,40}?" + _EXFIL_OBJECT
+                + r"[^.\n]{0,60}?\bto\s+(https?://|[\w.+-]{1,64}@)"),
+     "the definition directs the model's or user's data to a destination of the server's choosing"),
 )
 _IDENTIFIER_RULES = frozenset(e[0] for e in _IDENTIFIER_TABLE)
+# A KEY gets the override only when it goes on past the object — a sentence, not a setting's name.
+_KEY_OVERRIDE = re.compile(_IDENTIFIER_TABLE[2][2].pattern + r"\s+\w{1,20}\s+\w")
 _PREFILTERS[_IDENTIFIER_TABLE[3][2].pattern] = _PREFILTER_EXFIL
 
 _WHITESPACE = re.compile(r"\s")
@@ -999,7 +1028,13 @@ def _scan_pairs(
             # no spaces for the full rule table to match.
             if not prose or _WHITESPACE.search(text) is None:
                 if ident_rules:
-                    found = _scan_text(text, path, ident_rules, spaced=True, table=_IDENTIFIER_TABLE)
+                    is_key = _key_run(path) is not None
+                    rules = ident_rules - {"mcp_a_instruction_override"} if is_key else ident_rules
+                    found = _scan_text(text, path, rules, spaced=True, table=_IDENTIFIER_TABLE)
+                    if (is_key and "mcp_a_instruction_override" in ident_rules
+                            and _KEY_OVERRIDE.search(_fold(_spaced(text)))):
+                        found.append(Finding("mcp_a_instruction_override", "critical", path, text[:120],
+                                             "the definition tells the model to discard its own instructions"))
                     if found:
                         found = [f for f in found if not prose
                                  or (f.rule, f.severity) not in {(g.rule, g.severity) for g in report.findings}]
