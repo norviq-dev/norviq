@@ -283,14 +283,18 @@ threshold. Strings without whitespace (property names, enum values, defaults) ar
 dangerous URI scheme followed by code, an instruction-fencing tag such as `<IMPORTANT>`, an
 instruction override written as a full directive such as "ignore all previous instructions" (a
 property name that only names the setting, such as `ignore_the_system_prompt`, is not one), and the
-model's or user's data sent to a URL or address,
+model's or user's sensitive data (the conversation, earlier messages, the system prompt, the user's
+files, keys or messages, file contents, environment variables, tool results) sent to a URL or e-mail
+address,
 with underscores, dots and camelCase read as word breaks; credential names such as `api_key` or
 `.env.example` on their own no longer flag a tool. Text split across fields is matched when the match
 spans fields. A line break separates words but ends a sentence. A description that only mentions a
-credential (such as the API key a tool takes), the server's own logging, a tool sending its own
-payload to its own destination (a webhook or notification URL), a bare Llama `[INST]` token
+credential (such as the API key a tool takes), the server's own logging, a tool sending anything
+else to its destination (a webhook, notification or upload URL), documentation of how to pass an
+argument (a page token, an id, the user's locale), a bare Llama `[INST]` token
 or a `javascript:` URL it rejects is annotated rather than withheld, and a markdown heading such as
-`## Important` is not a marker unless a takeover follows it. A
+`## Important` is not a marker unless a takeover directive such as "ignore all previous instructions"
+follows it. A
 `system:`/`assistant:`/`developer:` line is treated as a role takeover only when its text starts with
 an instruction word (as listed in the MCP guide), so `system:masters`, `{{system.hostname}}` and most
 docstring parameter lists and few-shot templates are not withheld. Known limitations: text split

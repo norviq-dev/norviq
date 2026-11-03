@@ -165,9 +165,13 @@ _MARKUP_TAG = r"<[ \t]*/?[ \t]*(important|system|instruction|admin|critical)[ \t
 # heading ("## System requirements", "## Important") are ordinary in LLM tooling; only what follows
 # says whether it fences an injection. Narrower than `_ROLE_PAYLOAD`: a prompt template legitimately
 # instructs the model ("[INST] Summarise the following ..."), so only taking over its instructions,
-# revealing them, or a new identity counts.
-_HIJACK_PAYLOAD = (r"\b(ignore|disregard|forget|override|reveal|from\s+now\s+on|you\s+are\s+now|"
-                   r"new\s+instructions?|do\s+not\s+tell)\b")
+# revealing them counts — as a DIRECTIVE, not a word: "Ignore case when matching", "Forget-me-not
+# mode", "Override the default region", "Do not tell jokes", "You are now a summariser" are
+# documentation or ordinary prompting.
+_HIJACK_PAYLOAD = (r"\b((ignore|disregard|forget|override)\s+(all\s+|any\s+|the\s+|your\s+){0,2}"
+                   r"((previous|prior|earlier|above|preceding|system)\s+)?(instructions?|rules?|prompts?)\b|"
+                   r"reveal\s+(the\s+|your\s+)?(system\s+prompt|secrets?|hidden\s+\w{1,20}|instructions?)\b|"
+                   r"from\s+now\s+on\b)")
 
 # A regex negative lookaround open before a scheme: `^(?!javascript:)`, `^(?!.*javascript:)`,
 # `(?!\s*javascript:|vbscript:)` is a pattern EXCLUDING the scheme.
@@ -187,16 +191,20 @@ _ROLE_PAYLOAD = (r"(ignore|disregard|forget|override|obey|follow|comply|execute|
                  r"new\s+instructions?|(read|send|reveal|print)\b)")
 
 # Exfiltration: a transfer verb, the object being sent, a destination.
-_EXFIL_VERB = r"(send|post|upload|forward|transmit|exfiltrate|copy|include|attach|append|pass)"
-_EXFIL_DESTINATION = (r"\b(to\s+(https?://|[\w.+-]{1,64}@)|as\s+(a|an|the)\s+(argument|parameter|"
-                      r"param|field|value)|in\s+the\s+\w+\s+(argument|parameter|field))")
-# What makes it exfiltration: the object is the model's or the user's data, not the tool's own payload.
-_EXFIL_OBJECT = (r"\b(conversation|chat|history|transcript|context|everything|memory|system\s+prompt|"
-                 r"instructions|(previous|prior|earlier|above|preceding|past)\s+\w{1,20}|"
-                 r"all\s+(the\s+)?(data|files|messages|content|context|conversation|output)|"
-                 r"(the\s+)?user'?s?\s+\w{1,20}|(file\s+)?contents|environment|env|"
-                 r"credentials?|secrets?|passwords?|ssh|id_rsa|id_ed25519|"
-                 r"(tool|other\s+tools?'?)\s+(results?|outputs?|responses?)|results?\s+of|outputs?\s+of)\b")
+# Not "pass": passing a page token, an id or the user's locale "as a parameter" is how a tool is
+# called, and passing a credential is `credential_read`'s directive.
+_EXFIL_VERB = r"(send|post|upload|forward|transmit|exfiltrate|copy|include|attach|append)"
+# A URL or an e-mail address. "In the <x> parameter" / "as the <x> argument" is how arguments are
+# documented; a credential put there is `credential_read`'s.
+_EXFIL_DESTINATION = r"\bto\s+(https?://|[\w.+-]{1,64}@)"
+# What makes it exfiltration: the object is clearly the model's or the user's sensitive data — named
+# nouns, not "the user <anything>", "context" or "environment" (a context id, an environment name).
+_EXFIL_OBJECT = (r"\b((the\s+|this\s+|our\s+|your\s+)?(conversation|chat)(?![\s_-]*(ids?|identifiers?|names?|titles?)\b)|"
+                 r"(previous|prior|earlier|above|preceding)\s+(messages?|instructions?|conversation|turns?|prompts?)|"
+                 r"system\s+prompt|"
+                 r"(the\s+)?user'?s\s+(files?|keys?|credentials?|secrets?|passwords?|tokens?|messages?|data)|"
+                 r"file\s+contents|environment\s+variables?|env\s+vars?|credentials|"
+                 r"(tool|other\s+tools?'?)\s+(results?|outputs?))\b")
 
 # Credential and secret locations, for the two `mcp_a_credential_read` entries.
 _CREDENTIAL = (r"(\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.env\b|/etc/shadow|/etc/passwd|"
@@ -390,7 +398,7 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
                    r"\[\[[ \t]*(system|important|instruction)[ \t]*\]\]|"
                    r"\{\{[ \t]*(system|important|instruction)[ \t]*\}\}|"
                    r"\[inst\][^\n\[]{0,40}?" + _HIJACK_PAYLOAD + r"|"
-                   r"(?<!#)#{2,}[ \t]*(system|important|instruction)s?\b[^\n]{0,40}\n?[ \t]*"
+                   r"(?<!#)#{2,}[ \t]*(system|important|instruction)\b[^\n]{0,40}\n?[ \t]*"
                    + _HIJACK_PAYLOAD),
         "the definition embeds a pseudo-privileged instruction marker",
     ),
@@ -759,7 +767,7 @@ def _leaf_cost(folded: int) -> int:
 _PREFILTER_CREDENTIAL = re.compile(_CREDENTIAL)
 _PREFILTER_DESTINATION = re.compile(r"@[a-z0-9.-]+\.[a-z]{2,}|https?://|\b(webhook|endpoint|collector)\b")
 _PREFILTER_EVERY_REPLY = re.compile(r"\b(every|each|all)\s+(reply|response|message|answer|output|turn)")
-_PREFILTER_EXFIL = re.compile(r"\bto\s+(https?://|[\w.+-]{1,64}@)|\bas\s+(a|an|the)\s+|\bin\s+the\s+\w")
+_PREFILTER_EXFIL = re.compile(r"\bto\s+(https?://|[\w.+-]{1,64}@)")
 _PREFILTERS: dict[str, re.Pattern[str]] = {}
 
 
