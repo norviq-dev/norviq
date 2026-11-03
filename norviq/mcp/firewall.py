@@ -46,6 +46,7 @@ from norviq.mcp.pins import (
 )
 from norviq.mcp.servers import ServerRegistry
 from norviq.mcp.scanner import (
+    _MAX_WALK_NODES,
     Finding,
     ScanReport,
     name_skeleton,
@@ -70,22 +71,29 @@ _SEVERITY_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 # definition and still leaves the diff readable when a hostile server pads one.
 _CANONICAL_MAX = 8192
 
-# Total characters scanned across ALL entries of one DISCOVERY RESPONSE — `tools/list` and each of
+# Total scan cost across ALL entries of one DISCOVERY RESPONSE — `tools/list` and each of
 # its three siblings. The server chooses both the size of an entry and the NUMBER of entries, so a
 # per-entry cap bounds nothing; this is the same reasoning as `scanner._MAX_TOTAL_SCAN_CHARS`,
 # applied one level up.
 #
-# SIZED FROM A MEASUREMENT, not from a round number. The rule table costs ~0.19 ms per 1000
-# characters on the reference host, so 512 KiB is ~100 ms: an order of magnitude under the 2 s
-# fail-closed evaluator budget, once per discovery. It was 64 KiB, which is below a real catalogue —
-# 500 files x 200 characters of uri/name/description is 100 KiB — and entries past the bound are
-# WITHHELD, so an under-sized bound is an outage, not a saving.
+# SIZED FROM A MEASUREMENT, not from a round number. The budget is in the scanner's COST units
+# (`scanner._leaf_cost`: characters read in each pass plus a per-leaf minimum), measured at ~0.2 us of
+# work per unit at worst on the reference host. 768 Ki units per discovery response is ~130 ms
+# measured inside `scan_tool_definition` for an 8 MiB listing of any shape (prose, tiny prose,
+# identifiers, empty strings, numbers): an order of magnitude under the 2 s fail-closed evaluator
+# budget. A definition gets at most 256 Ki of it, so one entry cannot take a whole listing's budget,
+# and anything that does not fit is WITHHELD, never sanitised or passed. An under-sized bound is an
+# outage, not a saving: 500 files x 200 characters of uri/name/description is 100 KiB.
 #
-# What it bought: `tools/list` was giving each tool its own 64 KiB, so 500 tools of 16 KiB each cost
-# 1703 ms measured end-to-end (1534 ms of it inside `scan_tool_definition`) — the same denial of
-# service the notification channel was just fixed for, on the ORIGINAL Gate A surface, reachable
-# again on every `notifications/tools/list_changed` the server chooses to send.
-_LIST_SCAN_BUDGET = 524288
+# Why a listing-wide budget at all: with a per-entry budget only, 500 tools of 16 KiB each cost
+# 1703 ms measured end-to-end (1534 ms of it inside `scan_tool_definition`), reachable again on every
+# `notifications/tools/list_changed` the server chooses to send.
+_LIST_SCAN_BUDGET = 786432
+_DEFINITION_SCAN_BUDGET = 262144
+# Nodes walked per discovery response, across all its entries (each walk is also capped at
+# `scanner._MAX_WALK_NODES`). Non-string nodes cost no scan budget, so this is what bounds walking a
+# listing of number arrays: ~0.35 us per node, 65536 nodes ~25 ms.
+_LIST_WALK_NODES = 65536
 
 # Bound on a bare-string list entry before it is scanned. Same rationale, one shape smaller. This is
 # a cap on ONE entry; the shared budget above is what stops five hundred of them.
@@ -1882,6 +1890,7 @@ class McpFirewall:
         # — its unscanned prose does not reach the model, the tool stays callable, and the operator
         # gets the log line. Fail closed, loudly, in that order.
         budget = _LIST_SCAN_BUDGET
+        walk_nodes = _LIST_WALK_NODES
         for tool in tools:
             if not isinstance(tool, dict):
                 changed = True           # drop anything that is not a tool object
@@ -1891,7 +1900,9 @@ class McpFirewall:
                 changed = True
                 continue
 
-            report = scan_tool_definition(tool, budget)
+            nodes = [min(_MAX_WALK_NODES, walk_nodes)]
+            report = scan_tool_definition(tool, min(_DEFINITION_SCAN_BUDGET, budget), nodes)
+            walk_nodes = max(0, walk_nodes - (min(_MAX_WALK_NODES, walk_nodes) - max(0, nodes[0])))
             budget = max(0, budget - report.scanned_chars)
             alias = _server_alias(tool)
             if alias:
@@ -2082,6 +2093,7 @@ class McpFirewall:
         # ONE budget for the whole response, spent in list order. A per-item budget is not a bound at
         # all when the server also chooses how many items there are.
         budget = _LIST_SCAN_BUDGET
+        walk_nodes = _LIST_WALK_NODES
         for index, item in enumerate(items):
             if not isinstance(item, dict):
                 # A string entry is still SCANNED, so the operator gets the rule that fired; but it
@@ -2111,7 +2123,10 @@ class McpFirewall:
             # `name` is an IDENTIFIER on `prompts/list` — `prompts/get` takes `{"name": ...}` — and a
             # display string on the other two, which are addressed by uri/uriTemplate. That is the
             # whole of the charset rule's tool-specific justification, and it transfers.
-            report = scan_catalog_item(item, key, budget, name_is_identifier=(key == "prompts"))
+            nodes = [min(_MAX_WALK_NODES, walk_nodes)]
+            report = scan_catalog_item(item, key, min(_DEFINITION_SCAN_BUDGET, budget),
+                                       name_is_identifier=(key == "prompts"), nodes=nodes)
+            walk_nodes = max(0, walk_nodes - (min(_MAX_WALK_NODES, walk_nodes) - max(0, nodes[0])))
             budget = max(0, budget - report.scanned_chars)
             alias = _server_alias(item)
             if alias:
@@ -2247,6 +2262,11 @@ class McpFirewall:
         report = scan_object_text(params, "params")
         if report.clean:
             return MediationResult(forward=msg.framed)
+        if report.budget_exhausted:
+            # Too large to read in full: withheld, never forwarded unread with an annotation.
+            self._bump("notification_withheld_unscanned")
+            log.warning("nrvq.mcp.notification_withheld", method=msg.method, code="NRVQ-MCP-5092")
+            return MediationResult(blocked=True, note="notification_withheld")
         self._bump("notification_text_flagged")
         log.warning("nrvq.mcp.notification_flagged", method=msg.method, severity=report.severity,
                     findings=[f.rule for f in report.findings], code="NRVQ-MCP-5069")
@@ -2382,6 +2402,15 @@ class McpFirewall:
         if report.clean:
             self._bump("discover_clean")
             return MediationResult(forward=msg.framed)
+        if report.budget_exhausted:
+            # Too large to read in full: withheld. The handshake's instructions go in front of the
+            # model, so an unread one is not forwarded with an annotation.
+            self._bump("discover_withheld_unscanned")
+            log.warning("nrvq.mcp.discover.withheld", surface=surface, code="NRVQ-MCP-5093")
+            return MediationResult(forward=P.encode(P.error_response(
+                msg.id, P.E_POLICY_DENIED,
+                f"Norviq MCP firewall withheld this {surface} result: it is larger than the scan "
+                "budget allows, so it could not be read in full.")), note="discover_withheld")
         findings = [f.as_dict() for f in report.findings]
         self._bump("discover_flagged")
         log.warning("nrvq.mcp.discover.flagged", surface=surface,
@@ -2455,11 +2484,17 @@ class McpFirewall:
         if not requests:
             return MediationResult(forward=msg.framed)
         findings: list[dict] = []
-        for entry in requests:
-            report: ScanReport = scan_untrusted_content(json.dumps(entry, sort_keys=True)[:16384],
-                                                        "result.inputRequests")
-            if not report.clean:
-                findings.extend(f.as_dict() for f in report.findings)
+        # Every string of every demand, in full under the scan budget. This scanned the first 16384
+        # characters of each demand's JSON and nothing after it.
+        report: ScanReport = scan_object_text({"inputRequests": requests}, "result")
+        if report.budget_exhausted:
+            self._bump("input_required_withheld")
+            log.warning("nrvq.mcp.input_required.withheld", code="NRVQ-MCP-5094")
+            return MediationResult(forward=P.encode(P.tool_error_result(
+                msg.id, "Norviq MCP firewall withheld this demand for input: it is larger than the "
+                "scan budget allows, so it could not be read in full.", {"gate": "answer"})),
+                note="input_required_withheld")
+        findings.extend(f.as_dict() for f in report.findings)
         if not findings:
             self._bump("input_required_clean")
             return MediationResult(forward=msg.framed)
@@ -2516,9 +2551,13 @@ class McpFirewall:
                 over_budget += 1
                 text = _fenced(text, scanned=False)
             else:
+                remaining = budget
                 budget -= len(text)
                 if scan_on:
-                    report: ScanReport = scan_untrusted_content(text, path)
+                    # The remaining budget is passed in: the scanner no longer truncates a field at
+                    # 16 KiB, so one block larger than what is left is scanned up to the budget and
+                    # reported (`mcp_a_scan_budget_exhausted`, high), which fences it.
+                    report: ScanReport = scan_untrusted_content(text, path, remaining)
                     if not report.clean:
                         findings.extend(f.as_dict() for f in report.findings)
                         # NOT dropped. This is DATA the agent asked for, and silently returning nothing

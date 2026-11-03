@@ -243,13 +243,22 @@ the *raw* text, because the skeleton can never witness them (`scanner.py` `_INVI
 
 What is read: in a tool definition, every member except `name` (which has its own identifier rule),
 every string value at any depth and every object **key** (property names, `$defs` names, annotation
-keys), each scanned on its own; then the values joined in document order, and the keys of each object
-joined, are scanned once more, so text split across several short fields is matched as a whole; and
-keys and values interleaved in document order are scanned with the high-confidence injection rules
-only, for text alternated between keys and values. The same applies to list entries and to the
-free-text surfaces (elicitation, notifications). The joined passes re-read text already scanned and
-are not charged to the scan budget, so the work is at most three times what the budget allows
-(measured on a 400-property schema: 1.3x the single pass) (`scanner.py` `_scan_pairs`).
+keys), in full — nothing is truncated (`scanner.py` `_scan_pairs`):
+
+- A **prose** string — one containing whitespace, or the value of `description`, `title` or
+  `$comment` — is scanned with every rule, in overlapping 16 KiB windows (512 characters of overlap),
+  so the tail of a long description is read like its head.
+- **Every** string, prose or not, is also read in three joined streams: the values in document order,
+  the keys of each object, and keys and values interleaved. The streams are scanned in full, in the
+  same windows, with the high-confidence injection rules only (instruction override, concealment,
+  line jumping, side channel, exfiltration directive, tool precondition), so text cut into pieces
+  across values, keys or alternately keys and values is read whole.
+- An identifier on its own — a property name, an enum value or a default such as `api_key`,
+  `.env.example` or `Europe/London` — is checked for invisible characters but not matched by the
+  keyword rules; matching those is what made ordinary schemas look like credential theft.
+
+On the free-text surfaces (elicitation, notifications, handshake instructions, demands for input)
+every value is prose by position. List entries are read the same way as tool definitions.
 
 | Rule | Severity | Fires on |
 |---|---|---|
@@ -266,8 +275,7 @@ are not charged to the scan budget, so the work is at most three times what the 
 | `mcp_a_name_not_plain` | high | a tool name outside `[A-Za-z0-9_.-]` |
 | `mcp_a_name_shadowing` | critical | a name that folds onto an already-registered tool |
 | `mcp_a_unclassifiable_item` | high | a listing entry that is not an object |
-| `mcp_a_oversized_field` | medium | a field past 16 KiB (truncated for analysis) |
-| `mcp_a_scan_budget_exhausted` | medium | text the scanner meant to read went unread |
+| `mcp_a_scan_budget_exhausted` | high | the text was larger than the scan budget, so none of it was read; withheld |
 | `mcp_a_scan_truncated` | medium (high on a tool definition, which is then withheld) | the structure walk hit a bound |
 | `mcp_a_oversized_description` | low | a description past 2 KiB |
 
@@ -277,15 +285,25 @@ catalogue entry's prose it is usually the subject ("How to configure your API ke
 severity on `uri`/`uriTemplate`/`name`, where it is the address *of* a secret rather than prose about
 one (`scanner.py` `_demote_catalog_prose`).
 
-Every bound is **reported, never silent**. One `tools/list` response gets a shared 512 KiB scan budget
-(`firewall.py` `_LIST_SCAN_BUDGET`), one message 64 KiB (`scanner.py` `_MAX_TOTAL_SCAN_CHARS`), one field 16 KiB, and the structure walk
-stops at 4096 strings / 4096 members per node / 32 levels deep / 65536 nodes per walk (one walk per
-tool definition, list entry or message), well above real schemas (a 600-value
-enum, a dozen nested objects). Exhausting any of them raises a finding and sets `budget_exhausted`,
-and a tool definition, or a `resources/`/`prompts/list` entry, that the budget or a walk bound could
-not finish is **withheld rather than sanitised** — on the cold-catalog self-list as on a client's
-listing — because a walk that stopped early must not produce the same report as a walk that found
-nothing (`firewall.py` `McpFirewall._gate_a_tools_list`).
+Every bound is **reported, never silent**, and the scan budgets are charged **before** scanning, so
+a definition is scanned in full or not at all. Budgets are in cost units (`scanner.py` `_leaf_cost`):
+each string costs 8, plus twice its length for the joined streams, plus its length again — at least
+48 — if it is prose, so a listing of many tiny strings pays for the rule passes it causes, not only
+for its characters. One discovery response (`tools/list` and its three siblings) gets a shared
+768 Ki units and one definition or entry at most 256 Ki of it (`firewall.py` `_LIST_SCAN_BUDGET`,
+`_DEFINITION_SCAN_BUDGET`); one free-text message gets 196 Ki units, which reads 64 KiB of prose
+(`scanner.py` `_MAX_TOTAL_SCAN_CHARS`). The structure walk stops at 4096 strings / 4096 members per
+node / 32 levels deep / 65536 nodes per walk and per discovery response, well above real schemas (a
+600-value enum, a dozen nested objects). Measured on the reference host, an 8 MiB `tools/list` of
+any shape (long prose, tiny prose strings, identifiers, empty strings, numbers) spends 30–130 ms in
+the scanner.
+
+Anything the budget or a walk bound did not let the scanner read in full is **withheld, never
+sanitised or passed**: a tool definition or a `resources/`/`prompts/list` entry is removed from the
+listing (on the cold-catalog self-list as on a client's listing), a notification is dropped
+(`NRVQ-MCP-5092`), a handshake result is answered with an error (`NRVQ-MCP-5093`) and a demand for
+input becomes a tool error (`NRVQ-MCP-5094`) — because a scan that stopped early must not produce the
+same report as a scan that found nothing (`firewall.py` `McpFirewall._gate_a_tools_list`).
 
 ### 3.2 Severity → action
 
@@ -782,9 +800,11 @@ schema violation, `5070` schema not fully enforceable, `5079` cold catalog liste
 response dropped because it matches no well-formed answer to a client request, `5085` an upstream
 message over the HTTP size limit, `5087` a session id withheld from the client, `5088` an over-long SSE event id dropped, `5089` a client message refused for an ambiguous key,
 `5090` a refusal not posted back because too many were in flight, `5091` a server message with an
-alias key withheld. Latency is recorded as
+alias key withheld, `5092` a notification too large to read in full dropped, `5093` a handshake result
+too large to read in full answered with an error, `5094` a demand for input too large to read in full
+withheld. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
-`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` and `5087`–`5091` are
+`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` and `5087`–`5094` are
 listed in [Error Codes](../error-codes.md) so far.
 
 ---

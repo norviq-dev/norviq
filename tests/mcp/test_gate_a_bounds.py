@@ -274,9 +274,12 @@ async def test_a_padded_first_entry_cannot_walk_a_payload_through_the_second():
         {"uri": "file:///evil", "name": "evil", "description": POISON},
     ])
     assert _kept(result, "resources") == [], "an unscanned catalogue entry must not be forwarded"
+    # UPDATED (round 14): a definition over its own budget is withheld WITHOUT spending the listing's
+    # budget, so entry 1 is now actually scanned — found poisoned and withheld under its uri — rather
+    # than withheld unread. The property is unchanged: nothing unscanned or poisoned is forwarded.
     assert _norviq(result)["withheld"] == [
         "<resources entry at index 0, identifier withheld>",
-        "<resources entry at index 1, identifier withheld>",
+        "file:///evil",
     ]
 
 

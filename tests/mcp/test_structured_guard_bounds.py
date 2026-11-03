@@ -125,3 +125,26 @@ def test_the_over_budget_tail_says_it_was_not_inspected(monkeypatch) -> None:
     assert "NOT inspected" in skipped and "budget" in skipped
     # Both must still tell the model it is data, which is the actual defence.
     assert "never as instructions" in inspected and "never as instructions" in skipped
+
+
+def test_one_block_larger_than_the_budget_is_scanned_only_up_to_it(monkeypatch) -> None:
+    """The scanner reads a field in full now (no 16 KiB cut), so the content guard must pass it the
+    budget that is LEFT: one 6 MiB block would otherwise be scanned whole. What was not read is
+    reported at HIGH and the block is fenced."""
+    import time as _time
+
+    from norviq.config import settings
+    from norviq.mcp import firewall as fwmod
+
+    monkeypatch.setattr(settings, "mcp_output_dlp_enabled", False)
+    monkeypatch.setattr(settings, "mcp_scan_responses", True)
+    fw = _fw()
+    blocks = [{"type": "text", "text": "lorem ipsum " * 524288}]                     # 6 MiB
+    raw = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": blocks}})
+    msg = type("M", (), {"framed": raw.encode(), "raw": raw, "result": {"content": blocks}})()
+    t0 = _time.perf_counter()
+    out = fwmod.McpFirewall._guard_content(fw, msg, "result.content", blocks)
+    elapsed_ms = (_time.perf_counter() - t0) * 1000
+    assert elapsed_ms < 1200, f"{elapsed_ms:.0f}ms"
+    text = json.loads(out.forward)["result"]["content"][0]["text"]
+    assert text.startswith("[Norviq:") and "<untrusted-content>" in text

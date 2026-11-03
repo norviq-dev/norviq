@@ -336,27 +336,26 @@ _INVISIBLE = re.compile(
 # not on thorough authors.
 _LONG_DESCRIPTION = 2048
 
-# Bound on how much of a field is scanned. An unbounded regex sweep over a server-controlled string
-# is a denial-of-service primitive against the proxy itself; a definition that needs more than this
-# to express itself is already suspicious, and the truncation is itself reported.
-_MAX_SCAN_CHARS = 16384
 
 # Bound on how much of ONE MESSAGE is scanned, across every string in it.
 #
 # THE PER-FIELD BOUND ABOVE IS NOT ENOUGH, and believing it was is what made this a denial-of-service
-# primitive rather than a defence. `_walk_strings` caps the number of strings COLLECTED (512) and the
-# depth (12) — it does not cap the work, because each of those 512 strings is separately allowed
-# `_MAX_SCAN_CHARS`. One `notifications/message` that fits inside stdio's own 8 MiB line limit
+# primitive rather than a defence. `_walk_strings` caps the number of strings COLLECTED and the
+# depth — it does not cap the work, because each of those strings was separately allowed 16 KiB. One `notifications/message` that fits inside stdio's own 8 MiB line limit
 # therefore buys ~8.4 MB of skeleton-folding plus nine regex sweeps: measured at 1240 ms on the
 # reference host, against an engine whose evaluator_timeout is 2000 ms and, on the HTTP transport,
 # one asyncio loop shared with every other caller. Notifications are UNSOLICITED, so no request
 # correlation is needed and the rate is the server's to choose.
 #
-# 64 KiB is ~130x the largest legitimate message any of these surfaces carries and costs ~10 ms.
-# Exhausting it is REPORTED (`mcp_a_scan_budget_exhausted`), never silent: a message big enough to
-# hit this is itself a signal, and a scan that quietly stopped early would be the "I could not derive
-# this fact wearing the costume of the fact is compliant" shape this file exists to avoid.
-_MAX_TOTAL_SCAN_CHARS = 65536
+# The budget is in COST units (`_leaf_cost`): a prose character is read three times (its own scan and
+# two joined streams), so 196 Ki units read the same 64 KiB of prose the old character budget did,
+# plus 4 Ki for the envelope around it —
+# ~130x the largest legitimate message any of these surfaces carries — at ~40 ms worst case on the
+# reference host. Exhausting it is REPORTED (`mcp_a_scan_budget_exhausted`, HIGH) and the message is
+# WITHHELD by its caller, never passed unread: a scan that quietly stopped early would be the "I
+# could not derive this fact wearing the costume of the fact is compliant" shape this file exists to
+# avoid.
+_MAX_TOTAL_SCAN_CHARS = 200704
 
 # How many strings one walk will collect before it gives up. It bounds the number of FINDINGS, not the
 # work — `_MAX_TOTAL_SCAN_CHARS` bounds the work. Since a tool definition the walk could not finish
@@ -400,50 +399,59 @@ def _excerpt(text: str, span: tuple[int, int], width: int = 60) -> str:
     return " ".join(text[start:end].split())[:200]
 
 
-def _scan_text(text: str, field_path: str) -> list[Finding]:
-    """Run every rule over one field's text."""
+def _scan_text(text: str, field_path: str, rules: frozenset[str] | None = None) -> list[Finding]:
+    """Run the rules over ALL of one text, in overlapping windows.
+
+    Nothing is truncated: text past 16 KiB in one field — the tail of a long description — is read
+    like its head. Each window is `_WINDOW` characters
+    and overlaps the next by `_WINDOW_OVERLAP`, longer than any rule's match, so a match on the seam is
+    seen whole in one window. The cost is the caller's to bound (`_scan_pairs`, the content guard).
+    `rules` restricts the rule table (the joined streams use `_STREAM_RULES`).
+    """
     if not text:
         return []
     findings: list[Finding] = []
-    if len(text) > _MAX_SCAN_CHARS:
-        findings.append(Finding(
-            "mcp_a_oversized_field", "medium", field_path, f"<{len(text)} chars>",
-            "field exceeds the scan bound and was truncated for analysis",
-        ))
-        text = text[:_MAX_SCAN_CHARS]
-
-    # Invisible characters are evaluated on the RAW text: skeleton() strips them by design, so the
-    # skeleton can never witness them. This is why the two are checked separately rather than the
-    # scanner just folding everything first.
-    invisible = _INVISIBLE.findall(text)
-    if invisible:
-        findings.append(Finding(
-            "mcp_a_invisible_characters", "high", field_path,
-            " ".join(f"U+{ord(c):04X}" for c in invisible[:8]),
-            f"{len(invisible)} zero-width/bidi/tag character(s) — text hidden from human review",
-        ))
-
-    if len(text) > _LONG_DESCRIPTION:
-        findings.append(Finding(
-            "mcp_a_oversized_description", "low", field_path, f"<{len(text)} chars>",
-            "description is far longer than documentation requires",
-        ))
-
-    # Everything else matches the folded skeleton, so homoglyph and mark-stacking evasion collapses
-    # before the rules run. Offsets are into the skeleton, not the original, so the excerpt is taken
-    # positionally — approximate for heavily-folded text, which is acceptable for an audit hint.
-    folded = skeleton(text)
-    for entry in _RULES:
-        rule, severity, pattern, detail = entry[:4]
-        veto = entry[4] if len(entry) > 4 else None
-        # EVERY occurrence is considered, not just the first. `search` would let one ordinary
-        # "silently ignored" earlier in the field veto the rule before it ever reached a later
-        # "silently exfiltrate" — a one-line bypass for any server that wanted it. Still one
-        # finding per rule; the loop stops at the first occurrence the veto does not excuse.
-        for m in pattern.finditer(folded):
-            if veto is not None and _excused(folded, m, veto):
+    seen: set[str] = set()
+    if rules is None:
+        # Invisible characters are evaluated on the RAW text: skeleton() strips them by design, so
+        # the skeleton can never witness them. This is why the two are checked separately rather than
+        # the scanner just folding everything first.
+        invisible = _INVISIBLE.findall(text)
+        if invisible:
+            findings.append(Finding(
+                "mcp_a_invisible_characters", "high", field_path,
+                " ".join(f"U+{ord(c):04X}" for c in invisible[:8]),
+                f"{len(invisible)} zero-width/bidi/tag character(s) — text hidden from human review",
+            ))
+        if len(text) > _LONG_DESCRIPTION:
+            findings.append(Finding(
+                "mcp_a_oversized_description", "low", field_path, f"<{len(text)} chars>",
+                "description is far longer than documentation requires",
+            ))
+    step = _WINDOW - _WINDOW_OVERLAP
+    for start in range(0, len(text), step):
+        chunk = text[start:start + _WINDOW]
+        # Everything else matches the folded skeleton, so homoglyph and mark-stacking evasion
+        # collapses before the rules run. Offsets are into the skeleton, not the original, so the
+        # excerpt is taken positionally — approximate for heavily-folded text, which is acceptable
+        # for an audit hint.
+        folded = skeleton(chunk)
+        for entry in _RULES:
+            rule, severity, pattern, detail = entry[:4]
+            if rule in seen or (rules is not None and rule not in rules):
                 continue
-            findings.append(Finding(rule, severity, field_path, _excerpt(text, m.span()), detail))
+            veto = entry[4] if len(entry) > 4 else None
+            # EVERY occurrence is considered, not just the first. `search` would let one ordinary
+            # "silently ignored" earlier in the field veto the rule before it ever reached a later
+            # "silently exfiltrate" — a one-line bypass for any server that wanted it. Still one
+            # finding per rule; the loop stops at the first occurrence the veto does not excuse.
+            for m in pattern.finditer(folded):
+                if veto is not None and _excused(folded, m, veto):
+                    continue
+                findings.append(Finding(rule, severity, field_path, _excerpt(chunk, m.span()), detail))
+                seen.add(rule)
+                break
+        if start + _WINDOW >= len(text):
             break
     return findings
 
@@ -523,17 +531,40 @@ def _walk_strings(node: Any, path: str, out: list[tuple[str, str]], depth: int =
             break
 
 
-# Rules about the size of ONE field. The joined text is not a field, so they do not apply to it: a
-# 600-value enum joined is long, and that says nothing about any field in it.
-_SIZE_RULES = frozenset({"mcp_a_oversized_description", "mcp_a_oversized_field"})
+# Value keys whose text is prose whatever its shape. `default`, `const`, `examples` and `pattern` are
+# not here although `_SCHEMA_TEXT_KEYS` lists them: their values are as often identifiers (a file name
+# `.env.example`, a key name `api_key`) as prose, and with whitespace in them they are prose anyway.
+_PROSE_KEYS = frozenset({"description", "title", "$comment"})
 
-# Rules applied to keys and values read interleaved (see `_scan_pairs`): the critical/high rules whose
-# match is an injection on its face, with no veto and no reading of surrounding words.
-_INTERLEAVED_RULES = frozenset({
-    "mcp_a_instruction_override", "mcp_a_concealment", "mcp_a_dangerous_scheme", "mcp_a_line_jumping",
-    "mcp_a_side_channel", "mcp_a_credential_read", "mcp_a_exfil_directive", "mcp_a_hidden_marker",
-    "mcp_a_tool_precondition", "mcp_a_role_impersonation",
+# Windows for `_scan_text`: every character of a text is read. The overlap is longer than any rule's
+# match, so a match across a window seam is whole in one window.
+_WINDOW = 16384
+_WINDOW_OVERLAP = 512
+
+# What a collected string costs against a scan budget. Charging characters alone let a definition of
+# thousands of empty or one-letter leaves buy a scan call each for nothing. Measured on the reference
+# host: the full rule table reads ~0.23 us/char, the stream rules ~0.16 us/char, and one prose scan
+# call costs ~4.7 us of overhead whatever its length; walking and joining a leaf ~1-2 us. So a prose
+# leaf is charged at least `_PROSE_MIN_COST` for its own scan, every leaf `_LEAF_BASE_COST` plus twice
+# its length for the two streams it is read in — about 0.2 us of work per unit of budget at worst.
+_PROSE_MIN_COST = 48
+_LEAF_BASE_COST = 8
+
+
+def _leaf_cost(text: str, prose: bool) -> int:
+    return _LEAF_BASE_COST + 2 * len(text) + (max(len(text), _PROSE_MIN_COST) if prose else 0)
+
+# The rules applied to the JOINED streams (`_scan_pairs`): those that need instruction STRUCTURE —
+# several words with whitespace between them — so they cannot be completed by identifiers glued
+# together (`api` + `_key`) and a match spans real words. Keyword rules (`credential_read`,
+# `hidden_marker`, `dangerous_scheme`), the line-anchored `role_impersonation`, the
+# context-sensitive `concealment_bare` and the medium `authority_claim` are not applied there.
+_STREAM_RULES = frozenset({
+    "mcp_a_instruction_override", "mcp_a_concealment", "mcp_a_line_jumping", "mcp_a_side_channel",
+    "mcp_a_exfil_directive", "mcp_a_tool_precondition",
 })
+
+_WHITESPACE = re.compile(r"\s")
 
 # A collected KEY is recorded at its child's path with this suffix, so a finding says it was the key.
 _KEY_MARK = "{key}"
@@ -569,105 +600,86 @@ def _fold_key(key: str) -> str:
     return unicodedata.normalize("NFKC", key).casefold()
 
 
+def _leaf_name(path: str) -> str:
+    return path.rsplit(".", 1)[-1].split("[", 1)[0]
+
+
 def _scan_pairs(
     pairs: Iterable[tuple[str, str]],
     report: ScanReport,
     budget: int,
-    predicate: Any = None,
+    prose_keys: frozenset[str] = frozenset(),
     unwalked: list[str] | None = None,
-    truncation_severity: str = "medium",
+    truncation_severity: str = "high",
     joined: str = "",
 ) -> None:
-    """Scan collected (path, value) pairs into `report` under a shared CHARACTER budget.
+    """Scan collected (path, text) leaves — keys and values — into `report`, in full or not at all.
 
-    The budget is on characters actually handed to `_scan_text`, which is where the cost is — folding
-    to a skeleton and running the rule table. Counting strings instead (what `_walk_strings` does)
-    bounds the number of FINDINGS and nothing else.
+    ONE DESIGN, two kinds of read:
 
-    When the budget runs out the remaining strings are NOT scanned and that is recorded as a finding,
-    so the report says "I stopped looking" rather than "I looked and found nothing".
+    * Each PROSE leaf — one containing whitespace, or a value under a prose key (the schema text
+      keys, plus the caller's `prose_keys`) — is scanned in full with every rule (`_scan_text`).
+    * Every leaf, prose or identifier, is read in the JOINED streams, in full, with `_STREAM_RULES`
+      only: the values in document order, each object's keys, and keys and values interleaved. A
+      payload cut into pieces across values, keys, or alternately keys and values is read whole
+      there. An identifier on its own (`api_key`, `.env.example`, an enum value) is never matched
+      by a keyword rule: that is what made ordinary schemas read as credential theft.
+    * Every identifier leaf is still checked for invisible characters.
 
-    TWO ADMISSIONS, NOT ONE, because they mean different things and one action does not fit both:
+    BUDGET, CHARGED BEFORE SCANNING: each leaf costs `_leaf_cost` — a base, twice its length (it is
+    read in two streams), and its length again (at least `_PROSE_MIN_COST`) if it is prose. If the definition does not fit `budget`
+    nothing is scanned and it is reported with `mcp_a_scan_budget_exhausted` at HIGH and
+    `budget_exhausted` — the callers WITHHOLD it. A budget never produces a partial scan, and nothing
+    is truncated silently.
 
-    * `mcp_a_scan_budget_exhausted` (medium) — text this scanner had DECIDED to read went unread.
-      That is a hole exactly where a payload would be.
-    * `mcp_a_scan_truncated` (severity chosen by the caller) — the walk did not reach every node.
-      For a surface where every string is scanned, that is the same hole. For a tool DEFINITION it
-      usually is not: the caller's predicate throws away short non-prose leaves anyway, so a tool
-      with a 600-value `enum` trips the walk bound without a single scannable character being
-      missed, and grading that medium would sanitise an ordinary tool's description for owning a
-      long enum. It is reported either way; only the ACTION differs.
-
-    Both set `budget_exhausted`, because both mean this report cannot be used as evidence the input
-    is clean.
+    `mcp_a_scan_truncated` (the walk bounds, recorded in `unwalked`) is HIGH too, by default.
     """
     collected = list(pairs)
-    scanned: list[tuple[str, str]] = []
-    remaining = max(0, budget)
-    starved = 0
-    truncated = 0
-    for path, value in collected:
-        if predicate is not None and not predicate(path, value):
-            continue
-        if remaining <= 0:
-            starved += 1
-            continue
-        if len(value) > remaining:
-            truncated += 1
-            text = value[:remaining]
-        else:
-            text = value
-        remaining -= len(text)
-        report.scanned_chars += len(text)
-        report.findings.extend(_scan_text(text, path))
-        scanned.append((path, text))
-    if joined and scanned and not (starved or truncated):
-        # THE WHOLE, AS WELL AS THE PARTS. Every leaf is scanned on its own above, but a payload can be
-        # split into pieces none of which matches alone — 30-character fragments under `x-note-0..N`,
-        # or as the values of an `enum`. The leaves are scanned again joined in document order, one
-        # per line, and a rule that only matches across them is reported against `joined` (the
-        # definition). Not charged to the shared budget: it re-reads text already paid for — the
-        # values/keys passes once more and the interleaved pass once more, so the work is at most
-        # three times what the budget allows — and it never starves a later entry of a listing.
-        #
-        # Two streams, values and keys, each joined on its own: interleaving a key with its value
-        # ("description" then "Fails silently ...") puts words in front of a sentence that it never
-        # has, and that alone tripped a contextual rule on ordinary prose. A payload split across
-        # values, or across keys, is matched; one alternated between keys and values is not.
-        #
-        # Keys are joined per parent object (the members of one `properties` read as one run), since
-        # in document order a schema's keys interleave with each child's own `type`/`description`.
-        seen = {f.rule for f in report.findings}
-        key_runs: dict[str, list[str]] = {}
-        for p, t in scanned:
-            if p.endswith(_KEY_MARK):
-                key_runs.setdefault(p[:-len(_KEY_MARK)].rsplit(".", 1)[0], []).append(t)
-        for stream in ([t for p, t in scanned if not p.endswith(_KEY_MARK)], *key_runs.values()):
-            if len(stream) > 1:
-                found = [f for f in _scan_text("\n".join(stream), joined)
-                         if f.rule not in seen and f.rule not in _SIZE_RULES]
-                report.findings.extend(found)
-                seen.update(f.rule for f in found)
-        # A THIRD pass over keys and values interleaved in document order (each key just before its
-        # value), for a payload alternated between them: piece as key, next piece as value. Only the
-        # rules in `_INTERLEAVED_RULES` count here — the ones a key standing next to ordinary prose
-        # cannot complete. The context-sensitive ones (`mcp_a_concealment_bare`, which fired on
-        # "description" + "Fails silently ...") and the medium authority rule are left out.
-        if len(scanned) > 1:
-            found = [f for f in _scan_text("\n".join(t for _p, t in scanned), joined)
-                     if f.rule not in seen and f.rule in _INTERLEAVED_RULES]
-            report.findings.extend(found)
-    if starved or truncated:
+    texts = prose_keys | _PROSE_KEYS
+
+    def is_prose(path: str, text: str) -> bool:
+        if _WHITESPACE.search(text):
+            return True
+        return not path.endswith(_KEY_MARK) and _fold_key(_leaf_name(path)) in texts
+
+    prose = [is_prose(p, t) for p, t in collected]
+    cost = sum(_leaf_cost(t, pr) for (_p, t), pr in zip(collected, prose))
+    if cost > max(0, budget):
         report.budget_exhausted = True
         report.findings.append(Finding(
-            "mcp_a_scan_budget_exhausted", "medium", "<message>",
-            f"<{starved} field(s) unscanned, {truncated} truncated>",
-            f"the {budget}-character scan budget for this message ran out; text this scanner had "
-            f"decided to read went unread, and the message is NOT certified clean",
+            "mcp_a_scan_budget_exhausted", "high", "<message>",
+            f"<cost {cost} over budget {max(0, budget)}>",
+            "this definition is larger than the scan budget allows; it was not scanned and is "
+            "WITHHELD rather than passed or sanitised",
         ))
-    # `_walk_strings` records every bound it hit in `unwalked`. When the caller did not ask for that
-    # record, fall back to the pre-existing heuristic: a collection at the string cap is proof the
-    # walk gave up somewhere. That cap was already here and was already silent.
+    else:
+        report.scanned_chars = cost
+        for (path, text), pr in zip(collected, prose):
+            if pr:
+                report.findings.extend(_scan_text(text, path))
+            elif _INVISIBLE.search(text):
+                report.findings.append(Finding(
+                    "mcp_a_invisible_characters", "high", path, "",
+                    "zero-width/bidi/tag character(s) in an identifier — text hidden from human review",
+                ))
+        if joined and len(collected) > 1:
+            seen = {f.rule for f in report.findings}
+            key_runs: dict[str, list[str]] = {}
+            for p, t in collected:
+                if p.endswith(_KEY_MARK):
+                    key_runs.setdefault(p[:-len(_KEY_MARK)].rsplit(".", 1)[0], []).append(t)
+            streams = [[t for p, t in collected if not p.endswith(_KEY_MARK)],
+                       *key_runs.values(),
+                       [t for _p, t in collected]]
+            for stream in streams:
+                if len(stream) < 2:
+                    continue
+                # Joined with newlines, which the skeleton drops: pieces are read as one text, and a
+                # rule in `_STREAM_RULES` still needs real whitespace inside the pieces to match.
+                found = [f for f in _scan_text("\n".join(stream), joined, _STREAM_RULES)
+                         if f.rule not in seen]
+                report.findings.extend(found)
+                seen.update(f.rule for f in found)
     gave_up = list(unwalked) if unwalked is not None else (
         ["<the string collection cap>"] if len(collected) > _MAX_WALK_STRINGS else [])
     if gave_up:
@@ -676,12 +688,13 @@ def _scan_pairs(
             "mcp_a_scan_truncated", truncation_severity, "<message>",
             f"<at least {len(gave_up)} node(s) not walked; first: {gave_up[0]}>",
             f"the structure exceeded the walk bounds ({_MAX_WALK_STRINGS} strings, "
-            f"{_MAX_WALK_MEMBERS} members per node, {_MAX_WALK_DEPTH} levels deep), so part of it was never "
-            f"examined; what was not walked is not what was found clean",
+            f"{_MAX_WALK_MEMBERS} members per node, {_MAX_WALK_DEPTH} levels deep, {_MAX_WALK_NODES} "
+            f"nodes), so part of it was never examined; what was not walked is not what was found clean",
         ))
 
 
-def scan_tool_definition(tool: dict, budget: int = _MAX_TOTAL_SCAN_CHARS) -> ScanReport:
+def scan_tool_definition(tool: dict, budget: int = _MAX_TOTAL_SCAN_CHARS,
+                         nodes: list[int] | None = None) -> ScanReport:
     """Scan one MCP tool definition (name, title, description, inputSchema, annotations)."""
     report = ScanReport()
     name = str(tool.get("name", ""))
@@ -716,8 +729,7 @@ def scan_tool_definition(tool: dict, budget: int = _MAX_TOTAL_SCAN_CHARS) -> Sca
     # a prose key or past 80 characters: keys were never read, an unknown top-level member was never
     # read, and an injection cut into short leaves (or written as enum values) passed piece by piece.
     # `name` is left to the identifier rule above.
-    _walk_strings({k: v for k, v in tool.items() if k != "name"}, "", strings, 0, unwalked)
-    wanted = None
+    _walk_strings({k: v for k, v in tool.items() if k != "name"}, "", strings, 0, unwalked, nodes)
 
     # HIGH for the walk bound. This was `low`, on the argument that the nodes a bound cuts off in a
     # tool schema are enum values the `wanted` predicate discards anyway. That was false: a bound
@@ -725,8 +737,7 @@ def scan_tool_definition(tool: dict, budget: int = _MAX_TOTAL_SCAN_CHARS) -> Sca
     # the 512th member — and a low finding left the action at `pass`, so the definition went to the
     # model byte for byte with that prose unread. The bounds were raised so real schemas (large
     # enums included) do not reach them; one that does is withheld (see `_gate_a_tools_list`).
-    _scan_pairs(strings, report, budget, wanted, unwalked, truncation_severity="high",
-                joined="<definition>")
+    _scan_pairs(strings, report, budget, unwalked=unwalked, joined="<definition>")
     return report
 
 
@@ -734,36 +745,48 @@ def scan_object_text(obj: dict, base_path: str = "params",
                      budget: int = _MAX_TOTAL_SCAN_CHARS) -> ScanReport:
     """Scan EVERY string in an object whose whole purpose is free text.
 
-    `scan_tool_definition` is deliberately selective — it walks `inputSchema`/`outputSchema`/
-    `annotations` and scans other values only past 80 characters, because a tool definition is mostly
-    structure and scanning an enum of "read"/"write" is pure noise.
+    In a tool definition only prose leaves (whitespace, or a schema text key) get every rule, because
+    a definition is mostly structure and an enum of "read"/"write" is not prose. That selectivity is
+    wrong for the surfaces this serves: an `elicitation/create` carries its payload in
+    `params.message`, a `notifications/message` in `params.data` — the payload IS the structure. So
+    every value here is prose by position (`_ANY_KEY`), and keys still go through the joined streams.
 
-    That selectivity is wrong for the surfaces this serves. An `elicitation/create` carries its
-    payload in `params.message`; a `notifications/message` carries it in `params.data`. Neither key is
-    a schema text key and neither lives under a schema root, so the definition scanner walked past
-    both — the payload is not hiding in the structure here, the payload IS the structure.
-
-    Bounded by `_walk_strings` (`_MAX_WALK_DEPTH` levels, `_MAX_WALK_STRINGS` strings) AND by `budget` CHARACTERS. Only the second of
-    those is a real bound: the string count caps how many findings can be raised, while the work is
-    512 x `_MAX_SCAN_CHARS` of folding and regex, which one in-limit unsolicited notification was
-    enough to spend. See `_MAX_TOTAL_SCAN_CHARS`.
+    Bounded by the walk bounds and by `budget` cost units (`_scan_pairs`); a message that does not
+    fit is reported `budget_exhausted` and its caller withholds it. See `_MAX_TOTAL_SCAN_CHARS`.
     """
     report = ScanReport()
     strings: list[tuple[str, str]] = []
     unwalked: list[str] = []
     _walk_strings(obj or {}, base_path, strings, 0, unwalked)
-    _scan_pairs(strings, report, budget, None, unwalked, joined=f"{base_path}<joined>")
+    # A free-text surface: every value is prose by position, whatever its shape.
+    _scan_pairs([(p, t) for p, t in strings], report, budget, prose_keys=_ANY_KEY, unwalked=unwalked,
+                joined=f"{base_path}<joined>")
     return report
 
 
 # Leaf keys on a CATALOGUE entry (resource, resource template, prompt) whose value is prose ABOUT the
 # entry rather than an address, an identifier, or a payload. See `scan_catalog_item`.
 _CATALOG_PROSE_KEYS = frozenset({"description", "title"})
+_CATALOG_ADDRESS_KEYS = frozenset({"uri", "uritemplate", "name", "mimetype"})
+
+
+class _AnyKey(frozenset):
+    """A `prose_keys` that contains every key: on a free-text surface every value is prose."""
+
+    def __contains__(self, _key: object) -> bool:
+        return True
+
+    def __or__(self, _other):  # type: ignore[override]
+        return self
+
+
+_ANY_KEY = _AnyKey()
 
 
 def scan_catalog_item(item: dict, base_path: str = "item",
                       budget: int = _MAX_TOTAL_SCAN_CHARS,
-                      name_is_identifier: bool = False) -> ScanReport:
+                      name_is_identifier: bool = False,
+                      nodes: list[int] | None = None) -> ScanReport:
     """Scan one entry of `resources/list`, `resources/templates/list` or `prompts/list`.
 
     NOT `scan_tool_definition`, which these surfaces used to borrow, for two reasons that pull in
@@ -810,8 +833,11 @@ def scan_catalog_item(item: dict, base_path: str = "item",
         ))
     strings: list[tuple[str, str]] = []
     unwalked: list[str] = []
-    _walk_strings(item or {}, base_path, strings, 0, unwalked)
-    _scan_pairs(strings, report, budget, None, unwalked, joined=f"{base_path}<joined>")
+    _walk_strings(item or {}, base_path, strings, 0, unwalked, nodes)
+    # `uri`/`uriTemplate`/`name` are read with every rule: on a catalogue entry they are the ADDRESS
+    # of what the entry points at, and a resource at `file:///home/u/.ssh/id_rsa` must still match.
+    _scan_pairs(strings, report, budget, prose_keys=_CATALOG_ADDRESS_KEYS, unwalked=unwalked,
+                joined=f"{base_path}<joined>")
     report.findings = [_demote_catalog_prose(f) for f in report.findings]
     return report
 
@@ -860,7 +886,8 @@ def scan_prompt_messages(messages: Iterable[dict], budget: int = _MAX_TOTAL_SCAN
             # shared across every message here, which is the bound that actually costs a hostile
             # server anything — see `_MAX_TOTAL_SCAN_CHARS`.
             _walk_strings(block, f"messages[{i}].content[{j}]", strings, 0, unwalked)
-    _scan_pairs(strings, report, budget, None, unwalked)
+    _scan_pairs(strings, report, budget, prose_keys=_ANY_KEY, unwalked=unwalked,
+                joined="messages<joined>")
     return report
 
 
@@ -875,14 +902,14 @@ def scan_untrusted_content(text: str, field_path: str = "content",
     pretend the read failed.
 
     `budget` lets a caller that scans MANY of these in one message share one bound across them, the
-    same way `_scan_pairs` does. Without it each call is bounded only by `_MAX_SCAN_CHARS`, which
-    bounds one string and says nothing about a server that sends five hundred.
+    same way `_scan_pairs` does. Text past the budget is not scanned and the report says so at HIGH;
+    without a budget the whole text is scanned, so every firewall caller passes one.
     """
     report = ScanReport()
     if budget is not None and len(text) > max(0, budget):
         report.budget_exhausted = True
         report.findings.append(Finding(
-            "mcp_a_scan_budget_exhausted", "medium", field_path, f"<{len(text)} chars>",
+            "mcp_a_scan_budget_exhausted", "high", field_path, f"<{len(text)} chars>",
             "the shared scan budget for this message ran out; this field was not fully analysed "
             "and is NOT certified clean",
         ))
