@@ -481,7 +481,7 @@ def _require_agent_id(spiffe_id: str) -> None:
     from norviq.engine.identity import is_controllable_spiffe_id
 
     if not is_controllable_spiffe_id(spiffe_id):
-        raise HTTPException(status_code=422, detail="Not a valid agent id (spiffe://..., at most 512 characters)")
+        raise HTTPException(status_code=422, detail="Not a valid agent id (spiffe://..., at most 512 characters, valid UTF-8 without NUL)")
 
 
 # The bound on every store (Redis) call made while an agent's lock is held. A store that hangs rather than
@@ -516,6 +516,10 @@ class _LockContended(Exception):
 
 class _AdminDbUnavailable(Exception):
     """No connection, no lock (other than contention) or no read: the registry cannot be used."""
+
+    def __init__(self, spiffe_id: str, stage: str = "registry") -> None:
+        super().__init__(spiffe_id)
+        self.stage = stage
 
 
 class _PoolExhausted(_AdminDbUnavailable):
@@ -647,17 +651,57 @@ _ADMIN_SESSION_SETTINGS = ("idle_session_timeout", "idle_in_transaction_session_
 _CONNECT_TIMEOUT_S = 3.0
 # The same for statements once the lock is held: a Postgres that stops answering mid-request (a partition after
 # the lock was granted) made the registry read wait for the driver's command timeout and the release's rollback
-# another ~60 s, so a freeze reached the live path after ~67 s (review round 8). The request's own reads are
-# bounded by _DB_STATEMENT_TIMEOUT_S, and releasing the lock by _RELEASE_TIMEOUT_S, after which the connection is
+# another ~60 s, so a freeze reached the live path after ~67 s (review round 8). The request's own statements
+# are bounded by _db_statement_timeout_s(), and releasing the lock by _RELEASE_TIMEOUT_S, after which the connection is
 # invalidated (the backend then ends, and Postgres drops the lock, once it notices: the admin session's idle
 # and keepalive settings).
-_DB_STATEMENT_TIMEOUT_S = 3.0
+_DB_STATEMENT_MIN_S = 3.0
 _RELEASE_TIMEOUT_S = 2.0
 
 
+def _db_statement_timeout_s() -> float:
+    """The bound on one admin statement: the driver's own command timeout (db_command_timeout, 5 s by default),
+    never under 3 s. Tied to the setting so an operator who raised it for a slow database is not told the
+    registry is unreachable, and a read waiting a few seconds on a table lock still completes (review round 8)."""
+    return max(_DB_STATEMENT_MIN_S, float(settings.db_command_timeout))
+
+
+def _consume(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()  # retrieved, so an abandoned statement's error is not reported as unhandled
+
+
 async def _db(awaitable):
-    """One statement on the admin connection, bounded by _DB_STATEMENT_TIMEOUT_S."""
-    return await asyncio.wait_for(awaitable, _DB_STATEMENT_TIMEOUT_S)
+    """One statement on the admin connection, bounded by _db_statement_timeout_s(). On timeout the statement is
+    cancelled but NOT waited for: cancelling a query on a partitioned connection itself waited ~2 s (the
+    driver's cancel request goes nowhere). The connection is then abandoned — the release finds it busy and
+    invalidates it."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=_db_statement_timeout_s())
+    except BaseException:
+        task.cancel()
+        task.add_done_callback(_consume)
+        raise
+    if task in done:
+        return task.result()
+    task.cancel()
+    task.add_done_callback(_consume)
+    raise AdminStatementTimeout(f"admin statement did not answer within {_db_statement_timeout_s():g}s")
+
+
+class AdminStatementTimeout(TimeoutError):
+    """An admin statement cut off by _db: its connection still has it in flight and is given up on."""
+
+
+def _abandoned(exc: BaseException | None) -> bool:
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, AdminStatementTimeout):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 def _admin_session_values() -> dict[str, str]:
@@ -691,7 +735,7 @@ async def _agent_lock_held(db, spiffe_id: str):
     except Exception as exc:
         raise _AdminDbUnavailable(spiffe_id) from exc
     # none -> configured (session settings changed) -> maybe (lock statement sent) -> held (granted, committed)
-    state = "none"
+    state, abandoned = "none", False
     try:
         try:
             state = "configured"
@@ -707,9 +751,21 @@ async def _agent_lock_held(db, spiffe_id: str):
                 await _quietly(conn.rollback())
                 raise _LockContended(spiffe_id) from exc
             raise _AdminDbUnavailable(spiffe_id) from exc
-        yield conn
+        try:
+            yield conn
+        except BaseException as exc:
+            abandoned = _abandoned(exc)
+            raise
     finally:
-        if state == "held":
+        if state == "held" and abandoned:
+            # A statement is still in flight on it: a rollback would wait behind it. Give the connection up at
+            # once; Postgres drops the lock with the backend (after the admin idle/keepalive bounds).
+            # Invalidating closes it gracefully first (the driver waits up to 2 s for a partitioned peer), so it
+            # is done in the background: the answer (a freeze applied live) must not wait for it.
+            log.warning("nrvq.api.agent.trust_lock_release_failed", spiffe_id=spiffe_id,
+                        error="statement abandoned: the connection is invalidated", code="NRVQ-API-7150")
+            _in_background(_discard(conn))  # closes it too; no `return` here, which would swallow the error
+        elif state == "held":
             await _release_agent_lock(conn, spiffe_id)
         elif state == "maybe":
             await _quietly(conn.invalidate())
@@ -723,7 +779,22 @@ async def _agent_lock_held(db, spiffe_id: str):
                 await asyncio.wait_for(reset(), _RELEASE_TIMEOUT_S)
             except BaseException:  # noqa: BLE001 - a connection whose settings could not be put back is not pooled
                 await _quietly(conn.invalidate())
-        await _quietly(conn.close())
+        if not (state == "held" and abandoned):
+            await _quietly(conn.close())
+
+
+_background: set[asyncio.Task] = set()
+
+
+def _in_background(coro) -> None:
+    task = asyncio.ensure_future(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def _discard(conn) -> None:
+    await _quietly(conn.invalidate())
+    await _quietly(conn.close())
 
 
 async def _release_agent_lock(conn, spiffe_id: str) -> None:
@@ -889,7 +960,7 @@ async def update_trust(
             log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id,
                         error=f"{type(cause).__name__}: {cause}" if cause is not None else type(exc).__name__,
                         stage=("pool" if isinstance(exc, _PoolExhausted) else "admin_slots"
-                               if isinstance(exc, _AdminBusy) else "registry"),
+                               if isinstance(exc, _AdminBusy) else exc.stage),
                         live=live, pool=isinstance(exc, _PoolExhausted), actor=user.get("sub"),
                         code="NRVQ-API-7033")
             reason = ("the API's database connection pool is exhausted" if isinstance(exc, _PoolExhausted)
@@ -909,22 +980,33 @@ async def update_trust(
 
 async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) -> None:
     """Store first, then registry. Every failure leaves the store stricter than or equal to Postgres, except a
-    store that did not take the write — then Postgres holds the stricter state and the 503 says 'NOT live'."""
+    store that did not take the write — then Postgres holds the stricter state and the 503 says 'NOT live'.
+
+    A database that fails part-way never leaves a FREEZE un-applied (review round 8: Postgres stopping after the
+    registry read failed the fence token, nothing was written, and the answer said 'may or may not be live'):
+    without a fence token nothing has been written anywhere, so the change is treated like an unreachable
+    registry (update_trust: a freeze steals the fence and is applied live); and a freeze whose store write did
+    not land and whose registry write failed is applied live by stealing the fence before answering."""
+    from norviq.engine.cache import RedisCache
+
     try:
         token = await _fence_token(conn)
-    except Exception as exc:  # noqa: BLE001 - no token, no claim: reported as not live below
-        token, outcome, store_error = None, None, f"{type(exc).__name__}: {exc}"
-    if token is not None:
-        outcome, store_error = await _fenced_write(cache, spiffe_id, frozen, cap, display, conn=conn, token=token)
-    live = outcome == 1
-    refused = outcome == 0  # RedisCache.FENCE_LOST: the store answered, and a newer change owns the agent
+    except Exception as exc:  # noqa: BLE001 - nothing written yet: the same as a registry that cannot be read
+        raise _AdminDbUnavailable(spiffe_id, stage="fence_token") from exc
+    outcome, store_error = await _fenced_write(cache, spiffe_id, frozen, cap, display, conn=conn, token=token)
+    live = outcome == RedisCache.FENCE_APPLIED
+    refused = outcome == RedisCache.FENCE_LOST  # the store answered, and a newer change owns the agent
     try:
-        await _persist_trust_control(conn, spiffe_id, frozen, cap, score)
-        await conn.commit()
+        await _db(_persist_trust_control(conn, spiffe_id, frozen, cap, score))
+        await _db(conn.commit())
     except Exception as exc:  # noqa: BLE001 - a failed commit or a lost acknowledgement: unknown which
-        await _quietly(conn.rollback())
+        if frozen and not live:
+            # The kill switch must not end un-applied: steal the fence, as a freeze without the lock does.
+            stolen, _ = await _fenced_write(cache, spiffe_id, True, None, display)
+            live = stolen == RedisCache.FENCE_APPLIED
         log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
-                    direction="tightening", live=live, actor=user.get("sub"), code="NRVQ-API-7033")
+                    direction="tightening", stage="persist", live=live, actor=user.get("sub"),
+                    code="NRVQ-API-7033")
         raise HTTPException(status_code=503, detail=(
             "Applied live, but it may NOT be persisted (the registry write failed or its result was lost). Retry."
             if live else "Not confirmed: the change may be persisted (the registry did not confirm it), and the "
@@ -974,12 +1056,11 @@ async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> 
             "Trust change not applied: refused, a newer change owns the agent (a freeze applied while this change "
             "waited, or a later change). Check the agent and retry."))
     try:
-        await _persist_trust_control(conn, spiffe_id, frozen, cap, score)
-        await conn.commit()
-    except Exception as exc:  # noqa: BLE001 - the store is untouched by this change
-        await _quietly(conn.rollback())
+        await _db(_persist_trust_control(conn, spiffe_id, frozen, cap, score))
+        await _db(conn.commit())
+    except Exception as exc:  # noqa: BLE001 - the store is untouched by this change (the release rolls back)
         log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
-                    direction="loosening", live=False, actor=user.get("sub"), code="NRVQ-API-7033")
+                    direction="loosening", stage="persist", live=False, actor=user.get("sub"), code="NRVQ-API-7033")
         raise HTTPException(status_code=503, detail=(
             "Trust change not confirmed: the registry did not confirm it, and the store was not touched — it holds "
             "whatever it held before this change. Retry.")) from exc
@@ -1306,8 +1387,11 @@ async def reset_agent_trust_history(
             history, has_history, has_profile = await _store(_reset_multi(cache, history_key, profile_key))
     except Exception as exc:  # noqa: BLE001 - nothing is reported as cleared unless the MULTI answered
         contended = isinstance(exc, _LockContended)
+        # The cause only for this module's own wrappers; a TimeoutError's cause is the CancelledError of the
+        # statement it cut off, which would read as a cancelled request (review round 8).
+        shown = exc.__cause__ if isinstance(exc, (_LockContended, _AdminDbUnavailable)) and exc.__cause__ else exc
         log.warning("nrvq.api.agent.trust_reset_failed", spiffe_id=spiffe_id,
-                    error=f"{type(exc.__cause__ or exc).__name__}: {exc.__cause__ or exc}",
+                    error=f"{type(shown).__name__}: {shown}",
                     contended=contended, stage=stage, actor=user.get("sub"), code="NRVQ-API-7146")
         if contended:
             detail = "Another admin change to this agent is in progress; nothing was cleared. Retry."
@@ -1404,7 +1488,7 @@ async def deregister_agent(
                             f"(PUT /api/v1/agents/{{id}}/trust with score 1.0), then delete."),
                 )
             committing = True
-            await conn.commit()
+            await _db(conn.commit())
     except HTTPException:
         raise
     except _LockContended:

@@ -588,9 +588,9 @@ describe("Overview block feeds are Monitor-aware", () => {
     const topEmpty = screen.getByTestId("top-blocked-monitor-empty");
     for (const el of [recentEmpty, topEmpty]) {
       // REWRITTEN (was: /structurally empty, not a measured zero/ and "nothing is blocked live"). Those
-      // sentences over-claimed: `_apply_posture` leaves `_POSTURE_EXEMPT_RULES` — trust_frozen,
-      // policy_load_pending, evaluator_error, evaluator_invalid_payload, rate_limit_exceeded — HARD in
-      // Monitor, and those land in this very feed as `decision="block"`. The panel now scopes the claim to
+      // sentences over-claimed: `_apply_posture` leaves `_posture_exempt_rules()` — trust_frozen,
+      // invalid_spiffe_identity and, by default, rate_limit_exceeded — HARD in Monitor (engine faults are
+      // softened), and those land in this very feed as `decision="block"`. The panel now scopes the claim to
       // POLICY blocks and names what still enforces, so the assertions follow it.
       expect(el).toHaveTextContent(/no policy block can appear here/i);
       expect(el).toHaveTextContent(/monitor_would_block:/);

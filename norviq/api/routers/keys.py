@@ -125,8 +125,8 @@ async def create_key(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                "spiffe_id must start with spiffe://, not be empty after it, and be at most "
-                f"{SPIFFE_ID_MAX_LEN} characters"
+                "spiffe_id must start with spiffe://, not be empty after it, be at most "
+                f"{SPIFFE_ID_MAX_LEN} characters, and be valid UTF-8 without NUL characters"
             ),
         )
     if body.role == "service" and not body.agent_class.strip():

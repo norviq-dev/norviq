@@ -469,9 +469,15 @@ every other one, names the skipped ones (`NRVQ-API-7160`, `phase=retrying`) and 
 0.3 s lock wait for at most 2 s in all, then names any still unwritten (`phase=unwritten`) and fails the
 attempt so the next one retries just those. Connecting for an
 admin change gives up after 3 s, so a freeze with Postgres unreachable is applied live within seconds.
-Once the lock is held, each of the change's reads is bounded at 3 s and releasing the lock at 2 s (then the
-connection is invalidated), so a Postgres that stops answering mid-change still lets a freeze go live in
-about 7 s. The id must start with `spiffe://`, not be empty or only whitespace after it, be at most 512
+Once the lock is held, each of the change's statements is bounded at `db_command_timeout` (5 s by
+default, never under 3 s). A statement cut off there is not waited for: its connection is given up
+(invalidated, `NRVQ-API-7150`) at once. An ordinary release is bounded at 2 s. So a Postgres that stops
+answering mid-change still lets a freeze go live in about `db_command_timeout` (5 s) — whether it stops
+before the registry read, after it, or at the commit: a freeze that cannot be persisted steals the fence
+and is applied live ("Freeze applied live but NOT persisted", or "Applied live, but it may NOT be
+persisted"). The invalidated connection's backend keeps the agent's lock until Postgres ends it (the
+admin idle and keepalive settings, about 30-35 s), so a retry within that window after a `NRVQ-API-7150`
+is answered "another admin change ... is in progress" (a freeze retry is still applied live). The id must start with `spiffe://`, not be empty or only whitespace after it, be at most 512
 characters, and be storable: valid UTF-8 (no lone surrogates) without NUL (`422` otherwise). Known limitation: SPIFFE allows ids up to 2048 bytes, but 512 is the width
 of every column that holds an agent id, so a longer id is refused everywhere — keys, the admin routes, and
 the evaluator, which blocks it. That is one rule for the whole product

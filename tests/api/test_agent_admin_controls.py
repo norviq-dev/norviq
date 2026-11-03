@@ -2403,9 +2403,9 @@ async def test_a_postgres_that_stops_answering_after_the_lock_does_not_hold_a_fr
 
     app, client, cache, ids = env
     spiffe = _agent(ids, "pghang")
-    # The documented bound (docs/cli.md: a freeze goes live in about 7 s), not one derived from the constants.
-    bound = 8.0
-    assert agents_mod._DB_STATEMENT_TIMEOUT_S + agents_mod._RELEASE_TIMEOUT_S <= 5.0
+    # The documented bound (docs/cli.md: about db_command_timeout, 5 s), not one derived from the constants.
+    bound = 6.5
+    assert agents_mod._db_statement_timeout_s() + agents_mod._RELEASE_TIMEOUT_S <= 7.0
     for score, expect in ((0, "Freeze applied live but NOT persisted"), (0.4, "Trust change not applied")):
         _admin_db(app, hang_after_lock=True)
         try:
@@ -2631,3 +2631,168 @@ async def test_an_admin_connection_refused_the_lock_and_not_reset_is_not_pooled(
         monkeypatch.undo()
     assert resp.status_code == 503 and "in progress" in resp.json()["detail"]
     assert len(invalidated) == 1, "a connection still carrying the admin settings was pooled"
+
+
+class _DeadAfterRead(_ConnProxy):
+    """Postgres stops answering right after the registry read: from the fence token's nextval on, every
+    statement, commit and rollback waits like a partitioned connection (until cut off) and then fails."""
+
+    async def _dead(self):
+        await asyncio.sleep(30)
+        raise TimeoutError("driver command_timeout")
+
+    async def execute(self, stmt, *a, **k):
+        if "nextval" in str(stmt):
+            self._hooks["dead"] = True
+        if self._hooks.get("dead"):
+            await self._dead()
+        return await self._real.execute(stmt, *a, **k)
+
+    async def rollback(self):
+        if self._hooks.get("dead"):
+            await self._dead()
+        return await self._real.rollback()
+
+    async def commit(self):
+        if self._hooks.get("dead"):
+            await self._dead()
+        return await super().commit()
+
+
+def _dead_after_read_db(app, **hooks) -> dict:
+    import norviq.api.routers.agents as agents_mod
+
+    hooks.setdefault("commits", 0)
+
+    class _Db:
+        async def connect(self):
+            return _DeadAfterRead(await agents_mod._EngineConnector().connect(), hooks)
+
+    app.dependency_overrides[get_admin_db] = _Db
+    return hooks
+
+
+async def test_a_freeze_whose_postgres_stops_after_the_read_is_still_applied_live(env) -> None:
+    """Round-8 verification (test_p_midhang_v.py): Postgres stopping after the registry read failed the fence
+    token; nothing was written to the store, no steal was tried, and the answer said 'may or may not be live'
+    while the freeze was NOT live. A failed fence token now takes the unreachable-registry path: the freeze
+    steals the fence and is applied live, answered as 'applied live but NOT persisted'."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "midhang")
+    await _seed_registered(spiffe)
+    _dead_after_read_db(app)
+    try:
+        started = time.monotonic()
+        with structlog.testing.capture_logs() as logs:
+            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+        elapsed = time.monotonic() - started
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Freeze applied live but NOT persisted")
+    assert await _live(cache, spiffe) == (True, None)
+    assert elapsed < 6.5, f"answered after {elapsed:.1f}s"
+    line = next(e for e in logs if e.get("code") == "NRVQ-API-7033")
+    assert line["stage"] == "fence_token" and line["live"] is True, logs
+
+
+async def test_a_cap_whose_postgres_stops_after_the_read_is_not_applied(env) -> None:
+    """Control for the test above: a cap is not the kill switch; with no fence token nothing was written, and
+    the answer says so (it used to say 'may or may not be live')."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "midhangcap")
+    await _seed_registered(spiffe)
+    _dead_after_read_db(app)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr())
+    finally:
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Trust change not applied")
+    assert await _live(cache, spiffe) == (False, None) and await _durable(spiffe) == (False, None)
+
+
+async def test_a_freeze_the_store_did_not_take_and_the_registry_did_not_confirm_is_stolen_live(env) -> None:
+    """Round-8 verification: the other half — the store write did not land (store error) and then the registry
+    write failed. A freeze must not end un-applied: it steals the fence and is applied live before answering."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "persistfail")
+    await _seed_registered(spiffe)
+
+    class _OwnWriteFails(_Proxy):
+        async def apply_admin_trust_control_if_owner(self, spiffe_id, token, **k):
+            if ":" not in str(token):  # the lock holder's own token; a steal's owner value is "<L>:<S>"
+                raise ConnectionError("store reset")
+            return await self._real.apply_admin_trust_control_if_owner(spiffe_id, token, **k)
+
+    app.state.cache = _OwnWriteFails(cache)
+    _admin_db(app, fail_commit_n=2)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+        app.dependency_overrides.pop(get_admin_db, None)
+    assert resp.status_code == 503 and resp.json()["detail"].startswith("Applied live, but it may NOT be persisted")
+    assert await _live(cache, spiffe) == (True, None)
+
+
+class _TableLock:
+    """A migration-like ACCESS EXCLUSIVE lock on agent_registry, held for ``hold`` seconds."""
+
+    def __init__(self, hold: float) -> None:
+        self.hold = hold
+
+    async def run(self, taken: asyncio.Event) -> None:
+        async with _session() as session:
+            await session.execute(text("LOCK TABLE agent_registry IN ACCESS EXCLUSIVE MODE"))
+            taken.set()
+            await asyncio.sleep(self.hold)
+            await session.rollback()
+
+
+def test_the_admin_statement_bound_follows_the_driver_timeout(monkeypatch) -> None:
+    """Round-8 verification: the bound was a fixed 3 s, shorter than db_command_timeout (5 s), so an operator who
+    raised the setting for a slow database was told the registry is unreachable."""
+    import norviq.api.routers.agents as agents_mod
+
+    monkeypatch.setattr(agents_mod.settings, "db_command_timeout", 8)
+    assert agents_mod._db_statement_timeout_s() == 8.0
+    monkeypatch.setattr(agents_mod.settings, "db_command_timeout", 1)
+    assert agents_mod._db_statement_timeout_s() == 3.0
+
+
+async def test_a_freeze_waiting_seconds_on_a_table_lock_is_still_persisted(env) -> None:
+    """Round-8 verification (slowread.py): a read waiting 3-5 s on a table lock (a migration) was cut off at 3 s,
+    and the freeze was only applied live. Within db_command_timeout it is persisted (200)."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "slowread")
+    await _seed_registered(spiffe)
+    taken = asyncio.Event()
+    holder = asyncio.create_task(_TableLock(3.6).run(taken))
+    await asyncio.wait_for(taken.wait(), 5)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+    finally:
+        await holder
+    assert resp.status_code == 200, resp.text
+    assert await _live(cache, spiffe) == (True, None) and await _durable(spiffe) == (True, None)
+
+
+async def test_a_reset_read_that_times_out_is_logged_as_a_timeout(env, monkeypatch) -> None:
+    """Round-8 verification: 7146 logged the TimeoutError's cause, 'CancelledError', which reads as a cancelled
+    request rather than a slow registry."""
+    import norviq.api.routers.agents as agents_mod
+
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "resettimeout")
+    await _seed_registered(spiffe)
+    monkeypatch.setattr(agents_mod, "_db_statement_timeout_s", lambda: 0.3)
+    taken = asyncio.Event()
+    holder = asyncio.create_task(_TableLock(1.5).run(taken))
+    await asyncio.wait_for(taken.wait(), 5)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            resp = await client.post(f"/api/v1/agents/{spiffe}/trust/reset", headers=_hdr())
+    finally:
+        await holder
+    assert resp.status_code == 503
+    line = next(e for e in logs if e.get("code") == "NRVQ-API-7146")
+    assert line["stage"] == "read" and line["error"].startswith("AdminStatementTimeout: admin statement did not answer"), line

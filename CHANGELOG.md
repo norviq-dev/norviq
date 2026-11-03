@@ -208,8 +208,13 @@ because they should be installed.
   that agent fail; a change the store refused because a newer one owns the agent says so ("refused: a
   newer change owns the agent") instead of reporting that the store did not answer. A Postgres that stops
   answering in the middle of a change no longer holds that request for about a minute: its reads and the
-  lock release are bounded, so a freeze goes live in about 7 s. `NRVQ-API-7033` carries the failing stage
-  (`registry`, `pool`, `admin_slots`, `fence_token`) and the underlying error. `NRVQ-API-7031` names the
+  lock release are bounded (statements at `db_command_timeout`, never under 3 s, and a connection whose
+  statement was cut off is given up at once; an ordinary release at 2 s), so a freeze goes live in about
+  5 s, also when Postgres stops after the registry read or at the commit: a
+  freeze that cannot be persisted is applied live through the fence. A retry within about 30 s of such a
+  partition may be answered "in progress" while Postgres still holds the orphaned backend's lock.
+  `NRVQ-API-7033` carries the failing stage (`registry`, `pool`, `admin_slots`, `fence_token`, `persist`)
+  and the underlying error. `NRVQ-API-7031` names the
   actor.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck

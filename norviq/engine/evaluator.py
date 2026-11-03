@@ -405,12 +405,13 @@ _SQL_TABLE_RE = re.compile(
 # and our signal to raise — not a reason to take their production down. They remain loudly logged and
 # distinctly attributed; they simply no longer drop the call when the namespace says not to.
 #
-# The two that remain are not automatic judgements about a call, which is what monitor mode governs:
+# The ones that remain are not automatic judgements about a call, which is what monitor mode governs:
 #   * `trust_frozen`     — an admin explicitly froze this agent. Incident response outranks posture;
 #                          an operator who froze an agent five minutes ago expects it to stay frozen.
 #   * `rate_limit_exceeded` — a resource control protecting the customer's OWN backend. "Do not block
 #                          on policy" is not a request for unbounded call volume. Configurable via
 #                          `monitor_exempt_rate_limit` for operators who want even this to soften.
+#   * `invalid_spiffe_identity` — see below.
 # Never softened by monitor mode. trust_frozen is the admin kill switch. invalid_spiffe_identity is an identity-
 # integrity failure, not a policy outcome: the identity is one no admin control can be applied to (the shared
 # rule in norviq/engine/identity.py), so softening it in a monitor namespace would let an unfreezable caller run.
