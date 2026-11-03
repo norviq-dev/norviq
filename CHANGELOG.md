@@ -276,17 +276,26 @@ either direction. The MCP proxy refuses a message nested more than 128 levels de
 whose evaluate request it cannot encode (`NRVQ-SDK-1016`) instead of applying the outage fallback. An MCP tool
 definition, or a resource or prompt list entry, that is too large or too deeply nested for Gate A to
 read in full is withheld. Gate A reads every key and every string of a tool definition and of the
-other surfaces it scans in full, with no per-field cut-off, and also reads them joined, so text split
-across fields is matched; property names, enum values and defaults on their own (such as `api_key` or
-`.env.example`) no longer flag a tool. A notification, handshake result or demand for input too large
-for Gate A to read in full is withheld (`NRVQ-MCP-5092`–`5094`), as is a prompt or elicitation,
-whatever the strip threshold. Gate A matches words joined by underscores, dots or camelCase, or
-wrapped over several lines, like ordinary prose, and charges its scan budget by the length text
-folds to. A description that only mentions a credential (such as the API key a tool takes) or the
-server's own logging is annotated rather than withheld. Gate A no longer withholds tools or prompts
-for role names in schemas (`system:masters`, a parameter called `system`), few-shot `User:`/`Assistant:`
-templates or template variables such as `{{system.hostname}}`, and its scanning stays fast on unusual
-input. Two security booleans no longer fall back to off when an
+other surfaces it scans in full, with no per-field cut-off, and charges its scan budget by the length
+text folds to. A notification, handshake result or demand for input too large for Gate A to read in
+full is withheld (`NRVQ-MCP-5092`–`5094`), as is a prompt or elicitation, whatever the strip
+threshold. Strings without whitespace (property names, enum values, defaults) are checked only for a
+dangerous URI scheme followed by code, an instruction-fencing tag such as `<IMPORTANT>`, an
+instruction override such as "ignore all previous instructions", and data sent to a URL or address,
+with underscores, dots and camelCase read as word breaks; credential names such as `api_key` or
+`.env.example` on their own no longer flag a tool. Text split across fields is matched when the match
+spans fields. A line break separates words but ends a sentence. A description that only mentions a
+credential (such as the API key a tool takes), the server's own logging, a bare Llama `[INST]` token
+or a `javascript:` URL it rejects is annotated rather than withheld, and a markdown heading such as
+`## Important` is not a marker unless a takeover follows it. A
+`system:`/`assistant:`/`developer:` line is treated as a role takeover only when its text starts with
+an instruction word (as listed in the MCP guide), so `system:masters`, `{{system.hostname}}` and most
+docstring parameter lists and few-shot templates are not withheld. Known limitations: text split
+exactly between two words across fields with no whitespace is not matched; a directive wrapped onto a
+second line within one sentence is not matched by the sentence-scoped rules; strings without
+whitespace are matched by the subset of rules above only; a docstring or few-shot line whose text
+starts with an instruction word is still graded as a role takeover. Gate A's scanning stays fast on
+unusual input. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

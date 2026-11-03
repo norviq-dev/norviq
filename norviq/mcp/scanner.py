@@ -156,10 +156,26 @@ def _excused(folded: str, m: "re.Match[str]", veto: "re.Pattern[str]") -> bool:
         return False
     return _CONTROL_OBJECT.search(folded[m.start():m.end() + _OBJECT_WINDOW]) is None
 
-# Markup tags that fence text as privileged: <IMPORTANT>, </system>, [INST]. Shared by the
-# hidden-marker rule and the identifier table.
-_MARKUP_TAG = (r"<[ \t]*/?[ \t]*(important|system|instruction|admin|critical)[ \t]*>|"
-               r"\[/?inst\]")
+# Markup tags that fence text as privileged: <IMPORTANT>, </system>. Shared by the hidden-marker rule
+# and the identifier table.
+_MARKUP_TAG = r"<[ \t]*/?[ \t]*(important|system|instruction|admin|critical)[ \t]*>"
+
+# A HIJACK aimed at the model: what turns an [INST] token or a "## System" heading into a marker. The
+# Llama 2 chat format ("[INST] {{ .Prompt }} [/INST]", a stop sequence "[/INST]") and a markdown
+# heading ("## System requirements", "## Important") are ordinary in LLM tooling; only what follows
+# says whether it fences an injection. Narrower than `_ROLE_PAYLOAD`: a prompt template legitimately
+# instructs the model ("[INST] Summarise the following ..."), so only taking over its instructions,
+# revealing them, or a new identity counts.
+_HIJACK_PAYLOAD = (r"\b(ignore|disregard|forget|override|reveal|from\s+now\s+on|you\s+are\s+now|"
+                   r"new\s+instructions?|do\s+not\s+tell)\b")
+
+# A regex negative lookaround open before a scheme: `^(?!javascript:)`, `^(?!.*javascript:)`,
+# `(?!\s*javascript:|vbscript:)` is a pattern EXCLUDING the scheme.
+_IN_NEGATIVE_LOOKAROUND = re.compile(r"\(\?<?![^()]{0,64}\Z")
+
+
+def _in_negative_lookaround(folded: str, m: "re.Match[str]") -> bool:
+    return _IN_NEGATIVE_LOOKAROUND.search(folded, max(0, m.start() - 64), m.start()) is not None
 
 # What makes a role label an impersonation: an instruction to the model right after it.
 # "System: You are a helpful assistant." is the ordinary system prompt of a template, so "you are"
@@ -253,10 +269,19 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         # NOT matched on its own — `data:image/png;base64` is an everyday thumbnail — so only the
         # text/html form, which is a document the client would render, is caught. `http:` is likewise
         # not here: an insecure URL is a different (and much noisier) finding than an executable one.
+        # HIGH when the scheme is followed by code (`javascript:void(...)`, `javascript:fetch(...)`),
+        # and not inside a regex negative lookaround (`^(?!.*javascript:)`, a pattern EXCLUDING it).
         "mcp_a_dangerous_scheme", "high",
-        # Not inside a negative lookaround: `^(?!javascript:)` is a pattern EXCLUDING the scheme.
-        re.compile(r"(?<!\(\?!)(?<!\(\?<!)(javascript|vbscript)\s*:|data\s*:\s*text/html"),
+        re.compile(r"(javascript|vbscript)[ \t]*:(?=[^\s)|])|data[ \t]*:[ \t]*text/html"),
         "the text carries a URL scheme that executes when followed",
+        _in_negative_lookaround,
+    ),
+    (
+        # LOW when only named — "Sanitize HTML: strips javascript: URLs", "javascript: URLs are
+        # rejected" — or excluded by a pattern: documentation of the scheme, not a link to follow.
+        "mcp_a_dangerous_scheme", "low",
+        re.compile(r"(javascript|vbscript)[ \t]*:"),
+        "the text names a URL scheme that executes when followed",
     ),
     (
         # LINE-JUMPING (F-013): a description that tells the model to attach something to EVERY
@@ -337,11 +362,22 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         # quadratic, ~40 s for a 641 KB listing of `#`. A run is now entered only at its first `#`
         # (lookbehind), and the template forms must close (`{{system}}`, not `{{system.hostname}}`,
         # which is an ordinary template variable).
+        #
+        # [INST] and a markdown heading count only with a hijack after them (`_HIJACK_PAYLOAD`); a bare
+        # [INST] is the low entry below, and a bare heading is documentation.
         re.compile(_MARKUP_TAG + r"|"
                    r"\[\[[ \t]*(system|important|instruction)[ \t]*\]\]|"
                    r"\{\{[ \t]*(system|important|instruction)[ \t]*\}\}|"
-                   r"(?<!#)#{2,}[ \t]*(system|important|instruction)\b"),
+                   r"\[inst\][^\n\[]{0,40}?" + _HIJACK_PAYLOAD + r"|"
+                   r"(?<!#)#{2,}[ \t]*(system|important|instruction)s?\b[^\n]{0,40}\n?[ \t]*"
+                   + _HIJACK_PAYLOAD),
         "the definition embeds a pseudo-privileged instruction marker",
+    ),
+    (
+        # The Llama 2 chat tokens on their own: annotated, not withheld.
+        "mcp_a_hidden_marker", "low",
+        re.compile(r"\[/?inst\]"),
+        "the text contains Llama-format [INST] tokens",
     ),
     (
         "mcp_a_tool_precondition", "high",
@@ -541,6 +577,13 @@ def _scan_text(text: str, field_path: str, rules: frozenset[str] | None = None,
             if pre is not None and pre.search(folded) is None:
                 continue
             veto = entry[4] if len(entry) > 4 else None
+            if callable(veto):
+                # A predicate on the match, rather than the adjacency veto below.
+                hit = next((m for m in pattern.finditer(folded) if not veto(folded, m)), None)
+                if hit is not None:
+                    findings.append(Finding(rule, severity, field_path, _excerpt(chunk, hit.span()), detail))
+                    seen.add((rule, severity))
+                continue
             # EVERY occurrence is considered, not just the first. `search` would let one ordinary
             # "silently ignored" earlier in the field veto the rule before it ever reached a later
             # "silently exfiltrate" — a one-line bypass for any server that wanted it. Still one
@@ -738,7 +781,7 @@ _STREAM_RULES = frozenset(e[0] for e in _STREAM_TABLE)
 # (`system:masters`, `override_system_prompt`, `{{system.hostname}}`, `never_notify_user`,
 # `first_run_tool_name`) are not enough.
 _IDENTIFIER_TABLE = (
-    _entry("mcp_a_dangerous_scheme", "(?<!"),
+    _entry("mcp_a_dangerous_scheme", "(javascript|vbscript)[ \\t]*:(?="),
     ("mcp_a_hidden_marker", "high", re.compile(_MARKUP_TAG),
      "the definition embeds a pseudo-privileged instruction marker"),
     # With a determiner and an instruction object: "ignore all previous instructions", not the
