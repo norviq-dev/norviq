@@ -123,3 +123,35 @@ async def test_a_non_finite_number_in_the_mcp_context_is_blocked(fallback_allow)
     event.mcp["weird"] = float("inf")
     decision = await _client(lambda r: httpx.Response(200, json={"decision": "allow"})).evaluate(event)
     assert decision.rule_id == "engine_request_unencodable"
+
+
+@pytest.mark.parametrize("params", [
+    {"b": frozenset({float("inf")})},
+    {"b": __import__("collections").deque([1.0, float("nan")])},
+    {"b": {float("inf"): 1}},
+], ids=["frozenset", "deque", "dict key"])
+async def test_a_non_finite_number_anywhere_the_encoder_reaches_is_blocked(fallback_allow, params):
+    """frozenset and deque are encoded as arrays and float keys as strings; the walk skipped all
+    three, so the inf/nan reached the engine as null or as text."""
+    sent: list = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, json={"decision": "allow"})
+
+    decision = await _client(handler).evaluate(_event(params))
+    assert decision.rule_id == "engine_request_unencodable" and sent == []
+
+
+@pytest.mark.parametrize(("count", "blocked"), [(99_990, False), (100_001, True)])
+async def test_the_container_cap_is_where_it_says(fallback_allow, count, blocked):
+    """Pins `_MAX_PARAM_NODES`: a call just under 100 000 containers is sent, one over is blocked."""
+    from norviq.sdk.client import engine
+
+    assert engine._MAX_PARAM_NODES == 100_000                              # noqa: SLF001
+
+    def handler(request):
+        return httpx.Response(200, json={"decision": "block", "rule_id": "policy"})
+
+    decision = await _client(handler).evaluate(_event({"b": [[] for _ in range(count)]}))
+    assert (decision.rule_id == "engine_request_unencodable") is blocked

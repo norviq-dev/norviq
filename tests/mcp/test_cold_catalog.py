@@ -620,6 +620,26 @@ async def test_the_firewall_rejects_an_answer_with_another_id():
     assert failed and "no response" in failed[0]["reason"]
 
 
+async def test_a_successful_self_list_clears_the_recorded_failure(monkeypatch):
+    """The failure time is forgotten on success: kept, a later cold catalog (the next restart of the
+    catalog, say) would sit out a back-off for a failure that has already been recovered from."""
+    from norviq.mcp import firewall as fw_mod
+
+    fw, evaluator = _fw()
+    await fw.on_client_message(_rpc_msg(_call("search_docs", 1)), list_upstream=_Lister(wrong_id=True))
+    assert evaluator.seen[-1].mcp["definition_seen"] is False
+
+    monkeypatch.setattr(fw_mod, "_COLD_LIST_RETRY_S", 0.0)
+    await fw.on_client_message(_rpc_msg(_call("search_docs", 2)), list_upstream=_Lister())
+    assert evaluator.seen[-1].mcp["definition_seen"] is True
+
+    monkeypatch.setattr(fw_mod, "_COLD_LIST_RETRY_S", 3600.0)
+    fw._catalog_listed = False                                            # noqa: SLF001 — cold again
+    lister = _Lister()
+    await fw.on_client_message(_rpc_msg(_call("search_docs", 3)), list_upstream=lister)
+    assert len(lister.requests) == 1, "a recovered failure still held the back-off"
+
+
 async def test_one_cancelled_waiter_does_not_cancel_the_shared_list():
     """Single flight shares ONE task. The first caller (an HTTP client that hung up, say) being
     cancelled must not take the list away from the caller waiting behind it."""

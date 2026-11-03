@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import math
 import weakref
@@ -39,15 +40,26 @@ def _non_finite(value: Any) -> bool:
             if not math.isfinite(node):
                 return True
             continue
-        if not isinstance(node, (dict, list, tuple, set)):
+        if not isinstance(node, _CONTAINERS):
             continue
         if id(node) in visited:
             continue
         visited.add(id(node))
         if len(visited) > _MAX_PARAM_NODES:
             raise _UnencodableRequest(f"more than {_MAX_PARAM_NODES} containers in the call")
-        stack.extend(node.values() if isinstance(node, dict) else node)
+        if isinstance(node, dict):
+            # Keys too: the encoder writes a float key as a string, so an inf/nan key reaches the
+            # engine as text it cannot tell from an ordinary one.
+            stack.extend(node.keys())
+            stack.extend(node.values())
+        else:
+            stack.extend(node)
     return False
+
+
+# Every container the encoder serialises as an object or array. frozenset and deque were walked past,
+# so an inf inside one reached the engine as null.
+_CONTAINERS = (dict, list, tuple, set, frozenset, collections.deque)
 
 
 # Containers `_non_finite` will visit in one call. Far above a real tool call; a structure past it is
