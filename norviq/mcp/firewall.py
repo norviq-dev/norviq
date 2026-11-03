@@ -2040,12 +2040,18 @@ class McpFirewall:
         _annotate(rewritten.get("result"), {
             "gate": "A", "surface": "prompts/get", "scan": scan,
         })
-        if _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3):
+        # NOT READ IN FULL is withheld whatever the strip setting: over the budget the scanner reports
+        # only its own HIGH finding, so with the strip setting at "critical" an unread template —
+        # whatever it said — was forwarded.
+        if report.budget_exhausted or (
+                _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3)):
+            why = ("is larger than the scan budget allows, so it could not be read in full"
+                   if report.budget_exhausted else "matched instruction-injection patterns")
             rewritten["result"]["messages"] = [{
                 "role": "user",
                 "content": {"type": "text", "text": (
-                    "[Prompt withheld by the Norviq MCP firewall: the template supplied by this "
-                    "server matched instruction-injection patterns.]"
+                    f"[Prompt withheld by the Norviq MCP firewall: the template supplied by this "
+                    f"server {why}.]"
                 )},
             }]
         return MediationResult(forward=P.encode(rewritten), note="gate_a_prompt")
@@ -2135,9 +2141,9 @@ class McpFirewall:
                 kept.append(item)
                 continue
             findings.extend(f.as_dict() for f in report.findings)
-            # AN ENTRY THAT WAS NOT SCANNED IS NOT AN ENTRY THAT SCANNED CLEAN. The exhaustion
-            # finding is graded medium — right for a notification, where withholding the whole
-            # message would be its own denial of service — but on a catalogue the whole point of the
+            # AN ENTRY THAT WAS NOT SCANNED IS NOT AN ENTRY THAT SCANNED CLEAN. Withheld on
+            # `budget_exhausted` itself, not on the grade of the exhaustion finding, so the strip
+            # setting cannot let an unread entry through: on a catalogue the whole point of the
             # gate is to keep unvetted server text out of the model's context. Grading alone would
             # have let a server spend the shared budget on a padded first entry and walk its payload
             # through in the second, which is a bypass built out of the bound.
@@ -2228,7 +2234,9 @@ class McpFirewall:
         self._bump("gate_a_elicitation_flagged")
         log.warning("nrvq.mcp.gate_a.elicitation_flagged", severity=report.severity,
                     findings=[f.rule for f in report.findings], code="NRVQ-MCP-5068")
-        if _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3):
+        if report.budget_exhausted or (
+                _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3)):
+            # Not read in full: refused whatever the strip setting, as on every other surface.
             # REFUSED rather than rewritten. A rewritten question still gets asked, and the thing
             # being protected here is a person deciding what to type — the one participant that
             # cannot be told "treat the following as data".
@@ -2556,8 +2564,10 @@ class McpFirewall:
                 if scan_on:
                     # The remaining budget is passed in: the scanner no longer truncates a field at
                     # 16 KiB, so one block larger than what is left is scanned up to the budget and
-                    # reported (`mcp_a_scan_budget_exhausted`, high), which fences it.
+                    # reported (`mcp_a_scan_budget_exhausted`, high), which fences it. It is charged
+                    # on the FOLDED length, which is what the scan costs.
                     report: ScanReport = scan_untrusted_content(text, path, remaining)
+                    budget = 0 if report.budget_exhausted else min(budget, remaining - report.scanned_chars)
                     if not report.clean:
                         findings.extend(f.as_dict() for f in report.findings)
                         # NOT dropped. This is DATA the agent asked for, and silently returning nothing
