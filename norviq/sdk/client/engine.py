@@ -24,18 +24,35 @@ log = structlog.get_logger()
 
 
 def _non_finite(value: Any) -> bool:
-    """Whether a float inf/nan occurs anywhere in `value`. Iterative, bounded by the data itself."""
+    """Whether a float inf/nan occurs anywhere in `value`.
+
+    Each container is visited once (by identity): a self-referential tool_params made this loop
+    forever, holding the event loop while memory grew, and a structure that shares one sub-object many
+    times would be walked once per reference. A cycle is left to the encoder, which refuses it.
+    Bounded at `_MAX_PARAM_NODES` containers; past that the request is refused as unencodable.
+    """
     stack = [value]
+    visited: set[int] = set()
     while stack:
         node = stack.pop()
         if isinstance(node, float):
             if not math.isfinite(node):
                 return True
-        elif isinstance(node, dict):
-            stack.extend(node.values())
-        elif isinstance(node, (list, tuple, set)):
-            stack.extend(node)
+            continue
+        if not isinstance(node, (dict, list, tuple, set)):
+            continue
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if len(visited) > _MAX_PARAM_NODES:
+            raise _UnencodableRequest(f"more than {_MAX_PARAM_NODES} containers in the call")
+        stack.extend(node.values() if isinstance(node, dict) else node)
     return False
+
+
+# Containers `_non_finite` will visit in one call. Far above a real tool call; a structure past it is
+# not one this process will encode for the engine.
+_MAX_PARAM_NODES = 100_000
 
 
 class _UnencodableRequest(Exception):

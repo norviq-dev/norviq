@@ -93,3 +93,33 @@ async def test_a_non_finite_number_is_blocked_rather_than_sent_as_null(fallback_
     decision = await _client(handler).evaluate(_event(params))
     assert decision.decision == "block" and decision.rule_id == "engine_request_unencodable"
     assert sent == []
+
+
+async def test_a_self_referential_call_is_blocked_promptly(fallback_allow):
+    """`_non_finite` had no cycle guard: a params dict containing itself spun forever on the event
+    loop. It is visited once; the encoder then refuses the cycle, and the call is blocked."""
+    import asyncio
+
+    event = _event({"a": 1})
+    event.tool_params["self"] = event.tool_params  # the event is frozen; its dict is not
+    decision = await asyncio.wait_for(_client(lambda r: httpx.Response(200, json={"decision": "allow"}))
+                                      .evaluate(event), 2)
+    assert decision.decision == "block" and decision.rule_id == "engine_request_unencodable"
+
+
+async def test_a_shared_sub_object_is_walked_once(fallback_allow):
+    import asyncio
+
+    shared: list = [1.5] * 1000
+    params = {f"k{i}": shared for i in range(5000)}
+    decision = await asyncio.wait_for(_client(lambda r: httpx.Response(200, json={"decision": "allow",
+                                                                                   "rule_id": "p"}))
+                                      .evaluate(_event(params)), 10)
+    assert decision.rule_id == "p"
+
+
+async def test_a_non_finite_number_in_the_mcp_context_is_blocked(fallback_allow):
+    event = _event({"q": 1})
+    event.mcp["weird"] = float("inf")
+    decision = await _client(lambda r: httpx.Response(200, json={"decision": "allow"})).evaluate(event)
+    assert decision.rule_id == "engine_request_unencodable"
