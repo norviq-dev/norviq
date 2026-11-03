@@ -381,10 +381,12 @@ were missed:
 ## Supply chain
 
 - **OPA binary** is pinned and checksummed in the build, not pulled loose at runtime.
-- **Container images** are scanned by Trivy after they are pushed (`build.yml`, on `main` and on a
-  release tag). A new fixable HIGH/CRITICAL finding fails the job before the image is signed, so it
-  stops the cosign signature and SBOM attestation, and on a release the chart and PyPI jobs that depend
-  on it — but the image tag is already in the registry. The SAST checks
+- **Container images** are scanned by Trivy after they are pushed under their per-commit tag only
+  (`build.yml`, on `main` and on a release tag). A new fixable HIGH/CRITICAL finding fails the job
+  before the image is signed and before the tag people pull (`-latest`, or `<component>-<version>` on a
+  release) is moved to it, so it also stops the cosign signature and SBOM attestation and, on a release,
+  the chart and PyPI jobs that depend on it. An image that failed the scan exists in the registry only
+  under its per-commit tag. The SAST checks
   (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) run gitleaks, bandit, and semgrep
   diff-aware against every PR — new findings fail the check, never backlogged.
   **eslint-security** (eslint-plugin-security) additionally scans the whole `ui/src` fail-closed — any

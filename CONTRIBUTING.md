@@ -168,6 +168,9 @@ silence a real finding.
   in monitor mode records engine-side failures as would-blocks; and a policy in `audit` mode does the
   same for its own OPA errors. New security-relevant code needs a test proving the block/deny path.
 - **Tests are required** for behavior changes. No new test failures against the baseline suite.
+- **Control-test every check.** A test that guards a fix must fail with the fix reverted and pass with
+  it; say so in the PR with both outputs. A check that cannot fail proves nothing, and a claim that
+  something works is reproduced, not accepted on the strength of the claim.
 - **Policies must validate** — any Rego must define `decision` / `rule_id` / `reason` and a
   `default decision`, and must not use network/environment builtins (see
   [docs/guides/writing-policies.md](docs/guides/writing-policies.md)).
