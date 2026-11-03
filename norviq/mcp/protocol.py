@@ -18,8 +18,8 @@ streamable-HTTP driver reuses the same message helpers over a different frame.
 from __future__ import annotations
 
 import json
-import json.encoder
 import math
+import re
 import unicodedata
 from typing import Any
 
@@ -107,19 +107,19 @@ E_UNSUPPORTED_PROTOCOL_VERSION = -32022
 class JsonRpcMessage:
     """One JSON-RPC 2.0 message, kept alongside the EXACT bytes it was decoded from.
 
-    ``raw`` serves the server->client direction: a server message the firewall does not rewrite is
-    re-emitted from the original bytes. A CLIENT message is forwarded upstream re-encoded from
-    ``data`` instead (`McpFirewall.on_client_message`), so the server parses exactly what Gate B
-    decided on; ``exact_numbers`` says whether ``data`` holds numbers whose literal text must be
-    re-emitted as written (`encode_exact`).
+    An allowed message is re-emitted from ``raw``, the original bytes, rather than re-serialised from
+    ``data``: key order, number literals and fields this proxy does not model survive the hop, and a
+    forwarded ``tools/call`` costs one parse, not a parse and a dump. That is safe only because
+    `decode` refuses what peers could read differently from ``data`` — duplicate keys, keys that
+    collide under case folding, non-JSON numbers — and the firewall refuses keys that alias a
+    protocol member (`_envelope_alias`, `_message_alias`).
     """
 
-    __slots__ = ("data", "raw", "exact_numbers")
+    __slots__ = ("data", "raw")
 
-    def __init__(self, data: Any, raw: bytes, exact_numbers: bool = False) -> None:
+    def __init__(self, data: Any, raw: bytes) -> None:
         self.data = data
         self.raw = raw
-        self.exact_numbers = exact_numbers
 
     @property
     def framed(self) -> bytes:
@@ -278,60 +278,32 @@ def decode(line: bytes) -> JsonRpcMessage | None:
     stripped = line.strip()
     if not stripped:
         return None
-    exact: list[bool] = []
-
-    def parse_float(text: str) -> float:
-        value = float(text)
-        if not math.isfinite(value):
-            # `1e400` overflows to inf. JSON has no non-finite numbers, and peers disagree on them.
-            raise ValueError("non-finite number")
-        if repr(value) == text:
-            return value
-        # A literal a double does not reproduce (`12345678901234567890.25`, `0.10000000000000000555`,
-        # `1.50`, `1e2`): kept, so a re-encoded message carries the number the client wrote.
-        kept = _ExactFloat(value)
-        kept.literal = text
-        exact.append(True)
-        return kept
-
     try:
-        data = json.loads(stripped, object_pairs_hook=_unique_keys, parse_float=parse_float,
+        # A float checker only when the bytes could hold a float that overflows (an exponent of three
+        # digits or more, or a digit run longer than a double's range): the C decoder stays on the
+        # common path, and number TYPES are unchanged either way.
+        hook = _finite_float if _MAYBE_HUGE.search(stripped) else None
+        data = json.loads(stripped, object_pairs_hook=_unique_keys, parse_float=hook,
                           parse_constant=_no_constant)
-        return JsonRpcMessage(data, stripped, bool(exact))
+        return JsonRpcMessage(data, stripped)
     except (ValueError, UnicodeDecodeError):
         return None
 
 
-class _ExactFloat(float):
-    """A decoded number that remembers its literal text (see `decode`)."""
+_MAYBE_HUGE = re.compile(rb"[eE][+-]?[0-9]{3}|[0-9]{300}")
 
-    literal: str
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        # `1e400` overflows to inf. JSON has no non-finite numbers, and peers disagree on them.
+        raise ValueError("non-finite number")
+    return value
 
 
 def _no_constant(name: str) -> Any:
     """`NaN`, `Infinity` and `-Infinity` are not JSON; Python's decoder accepts them, others do not."""
     raise ValueError(f"non-JSON constant {name}")
-
-
-def _exact_floatstr(value: float) -> str:
-    literal = getattr(value, "literal", None)
-    return literal if literal is not None else float.__repr__(value)
-
-
-def encode_exact(payload: Any) -> bytes:
-    """`encode`, but numbers decoded with a literal (`_ExactFloat`) are written as that literal.
-
-    The C encoder writes every float with `float.__repr__`, which would turn the client's
-    `12345678901234567890.25` into `1.2345678901234567e+19`. This uses the stdlib's pure-Python
-    iterencode with its own float writer; it is used only for messages that hold such a number.
-    """
-    def default(obj: Any) -> Any:
-        raise TypeError(f"not JSON serialisable: {type(obj).__name__}")
-
-    chunks = json.encoder._make_iterencode(  # noqa: SLF001 - the stdlib's own encoder loop
-        {}, default, json.encoder.encode_basestring_ascii, None, _exact_floatstr, ":", ",",
-        False, False, True)(payload, 0)
-    return "".join(chunks).encode("utf-8") + b"\n"
 
 
 def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -350,10 +322,13 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     obj = dict(pairs)
     if len(obj) != len(pairs):
         raise ValueError("duplicate key in a JSON object")
-    if len(pairs) > 1 and not all(k.isascii() and k.islower() for k, _ in pairs):
-        folded = {_fold(k) for k, _ in pairs}
-        if len(folded) != len(pairs):
-            raise ValueError("keys in a JSON object that differ only by case or compatibility form")
+    if len(obj) > 1:
+        # Fast path, in C: distinct keys that are ASCII with no uppercase letter cannot fold together.
+        joined = "".join(obj)
+        if not (joined.isascii() and joined == joined.lower()):
+            folded = {_fold(k) for k in obj}
+            if len(folded) != len(obj):
+                raise ValueError("keys in a JSON object that differ only by case or compatibility form")
     return obj
 
 

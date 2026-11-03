@@ -146,11 +146,11 @@ name, and gets no Gate A — deploy the `--http` driver yourself for that case.
 
 ## 2. Which method falls in which gate
 
-Everything not named below is forwarded, including future methods and vendor extensions, with every
-member and its order intact. A client message goes upstream as the compact encoding of what the proxy
-decoded, so the server reads exactly what was decided on; a server message the proxy does not rewrite
-goes to the client as its original bytes (`norviq/mcp/firewall.py` `McpFirewall.on_client_message`,
-`norviq/mcp/protocol.py` `JsonRpcMessage.framed`).
+Everything not named below is forwarded **byte-for-byte**, including future methods and vendor
+extensions: an allowed message is re-emitted from its original bytes, so key order, number literals
+and anything the proxy does not model survive the hop. That is safe because what peers could read
+differently from the proxy is refused first (see the end of this section)
+(`norviq/mcp/protocol.py` `JsonRpcMessage`).
 
 ### Gate B — invocation (an `/evaluate` round trip)
 
@@ -201,10 +201,8 @@ inside it ungoverned. A message the proxy cannot classify or decode is dropped, 
 both transports, and a JSON object that names a key twice, or two keys that differ only by case or
 compatibility form, counts as undecodable, since parsers disagree on which value wins and some match
 keys case-insensitively. A client message whose key differs from a protocol field only that way is
-refused (`NRVQ-MCP-5089`), and an allowed client message is forwarded as the message the proxy decoded
-(compact JSON, every member kept in order, every number as the client wrote it), not as the client's
-bytes. `NaN`, `Infinity` and numbers that overflow a double are not JSON and make a message
-undecodable. In the other direction, a
+refused (`NRVQ-MCP-5089`). `NaN`, `Infinity` and numbers that overflow a double are not JSON and make
+a message undecodable. In the other direction, a
 server object the proxy reads by member name (a list entry, a result, a content block, a prompt or
 sampling message, a notification's params) with a key that differs from such a member only by case or
 compatibility form fails closed: list entries are withheld (`mcp_a_alias_key`), other messages are

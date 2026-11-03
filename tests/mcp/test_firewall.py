@@ -88,18 +88,12 @@ async def test_tools_call_maps_one_to_one_onto_tool_call_event():
     assert event.agent_identity.spiffe_id == "spiffe://norviq/ns/agents/sa/default"
 
 
-async def test_allowed_call_forwards_exactly_the_decoded_message():
-    """REWRITTEN. This asserted the forward was byte-identical to what the client sent. Byte identity
-    is what let a parser differential through: Gate B decided on this proxy's reading of the bytes,
-    and an upstream that reads duplicate or case-folded keys differently acted on another message. An
-    allowed call now reaches the server as the compact encoding of the decoded object: every member,
-    in order, nothing added — exactly what Gate B decided on."""
+async def test_allowed_call_forwards_original_bytes_unmodified():
+    """An allowed call must reach the server byte-identical — and cost no re-serialisation."""
     fw, _ = _firewall("allow")
     msg = _call("search_docs", {"query": "x"})
     result = await fw.on_client_message(msg)
-    assert result.forward == P.encode(msg.data)
-    assert list(json.loads(result.forward)) == list(msg.data)
-    assert json.loads(result.forward) == msg.data
+    assert result.forward == msg.raw + b"\n"
     assert result.reply is None
     assert not result.blocked
 
@@ -172,9 +166,7 @@ async def test_unknown_methods_pass_through_untouched():
     fw, _ = _firewall("allow")
     msg = _msg({"jsonrpc": "2.0", "id": 9, "method": "experimental/vendorThing", "params": {"a": 1}})
     result = await fw.on_client_message(msg)
-    # Every member survives, unmodelled ones included (re-encoded, not byte-identical: see
-    # test_allowed_call_forwards_exactly_the_decoded_message).
-    assert json.loads(result.forward) == msg.data
+    assert result.forward == msg.raw + b"\n"
 
 
 # ── Gate A: poisoning ───────────────────────────────────────────────────────────────────────────

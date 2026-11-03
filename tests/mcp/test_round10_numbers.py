@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Re-encoded client messages carry the numbers the client wrote; non-JSON numbers are refused;
+"""Forwarded client messages carry the numbers the client wrote; non-JSON numbers are refused;
 `requestState` is a protocol member for the alias check; a post-back is bounded in total time."""
 
 from __future__ import annotations
@@ -54,7 +54,21 @@ async def test_a_post_back_is_bounded_in_total_time(monkeypatch):
     await asyncio.wait_for(proxy._post_back(b"{}", {}), 2)               # noqa: SLF001
 
 
-def test_json_encode_exact_matches_encode_without_literals():
-    payload = {"a": 1, "b": [1.5, "x", None, True], "c": {"d": "é"}}
-    assert P.encode_exact(payload) == P.encode(payload)
-    assert json.loads(P.encode_exact(payload)) == payload
+@pytest.mark.parametrize("literal", ["10", "10.0", "10.00", "1e1", "1.0E1"])
+async def test_an_integral_literal_satisfies_an_integer_schema_as_before(literal):
+    """Number types are unchanged by decoding: an integral float reaches the schema check as it did
+    before this branch."""
+    fw, _ = _fw()
+    tool = {"name": "count", "description": "Counts.", "inputSchema": {
+        "type": "object", "properties": {"n": {"type": "integer"}}}}
+    fw._corr.pending.put(9, "tools/list")                                  # noqa: SLF001
+    await fw.on_server_message(_rpc_msg({"jsonrpc": "2.0", "id": 9, "result": {"tools": [tool]}}))
+    raw = ('{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"count","arguments":{"n":'
+           + literal + '}}}').encode()
+    result = await fw.on_client_message(P.decode(raw))
+    assert result.note != "schema_violation", json.loads(result.reply) if result.reply else result
+
+
+def test_decoding_does_not_change_number_types():
+    msg = P.decode(b'{"a":1.5,"b":1e300,"c":10,"d":12345678901234567890.25}')
+    assert [type(msg.data[k]) for k in "abcd"] == [float, float, int, float]

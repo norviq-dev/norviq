@@ -51,16 +51,30 @@ async def test_a_key_aliasing_a_protocol_member_is_refused(payload):
     assert json.loads(result.reply)["error"]["code"] == P.E_INVALID_REQUEST
 
 
-async def test_an_allowed_client_message_is_forwarded_as_its_decoded_form():
+async def test_an_allowed_client_message_is_forwarded_as_the_clients_bytes():
+    """Forwarded as received — safe because what peers could read differently is refused at decode
+    (duplicate and case-folded keys) and in the firewall (aliases of protocol members)."""
     fw, _ = _fw()
     raw = b'{ "jsonrpc" : "2.0", "id" : 3, "method" : "ping", "params" : { "x" : 1.50 } }'
     result = await fw.on_client_message(P.decode(raw))
-    # The number keeps the literal the client wrote (see test_round10_numbers.py).
-    assert result.forward == b'{"jsonrpc":"2.0","id":3,"method":"ping","params":{"x":1.50}}\n'
+    assert result.forward == raw + b"\n"
 
 
-async def test_http_the_upstream_receives_the_decoded_form():
-    client, upstream, _, _, _ = _make()
-    await client.post("/mcp", content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{},'
-                                      b'"extra" :  "kept"}', headers={"content-type": "application/json"})
-    assert upstream.received[0] == {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}, "extra": "kept"}
+async def test_http_the_upstream_receives_the_clients_bytes():
+    seen: list[bytes] = []
+    client, upstream, _, proxy, _ = _make()
+    original = upstream.handle
+
+    async def recording(request):
+        seen.append(await request.body())
+        return await original(request)
+
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    proxy._client = httpx.AsyncClient(transport=httpx.ASGITransport(                   # noqa: SLF001
+        app=Starlette(routes=[Route("/mcp", recording, methods=["POST"])])), base_url="http://upstream")
+    raw = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{},"extra" :  "kept"}'
+    await client.post("/mcp", content=raw, headers={"content-type": "application/json"})
+    assert seen[0].strip() == raw
