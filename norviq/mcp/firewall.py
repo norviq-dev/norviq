@@ -909,6 +909,18 @@ class McpFirewall:
             self._bump("batch_refused")
             return MediationResult(blocked=True, note="batch_refused_from_server")
 
+        # The ENVELOPE first. Messages are classified by exact keys, so `{"Id": 7, "method":
+        # "sampling/createMessage", ...}` read here as a notification (no `id`) and was forwarded,
+        # while a case-insensitive client (Go's encoding/json) read `Id` and ran it as a sampling
+        # request: past the sampling gate. `Params`, `Method`, `Result` and the rest likewise move text
+        # or a whole shape past the gate that would have read it. Such a message is dropped.
+        envelope_alias = _alias_in(msg.data, _ENVELOPE_KEYS) if isinstance(msg.data, dict) else ""
+        if envelope_alias:
+            self._bump("alias_key_refused")
+            log.warning("nrvq.mcp.server.alias_key_refused", surface="envelope", key=envelope_alias[:64],
+                        server=self._server_id, code="NRVQ-MCP-5091")
+            return MediationResult(blocked=True, note="alias_key")
+
         # Server-INITIATED request (the reverse direction: sampling, roots/list, elicitation).
         if msg.is_request:
             self._server_pending.put(msg.id, msg.method)
