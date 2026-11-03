@@ -19,6 +19,7 @@ genuinely matches an attack pattern (astronomically unlikely for real text).
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 # Latin-confusable letters → ASCII prototype. Lowercase targets (skeleton casefolds first). Whole-alphabet
@@ -45,15 +46,36 @@ _RAW_MAP: dict[str, str] = {
 _TABLE: dict[int, str] = {ord(k): v for k, v in _RAW_MAP.items() if len(k) == 1}
 
 
+_DROPPED = ("Mn", "Mc", "Me", "Cf", "Cc")
+_ASCII_CONTROLS = re.compile(r"[\x00-\x1f\x7f]")
+# Bound on the codepoints `_MarkTable` remembers; past it lookups are computed and not stored, so a
+# text of many distinct characters cannot grow the table without limit.
+_MARK_TABLE_MAX = 65536
+
+
+class _MarkTable(dict):
+    """A `str.translate` table that deletes Mn/Mc/Me/Cf/Cc, filled lazily by category."""
+
+    def __missing__(self, cp: int) -> int | None:
+        value = None if unicodedata.category(chr(cp)) in _DROPPED else cp
+        if len(self) < _MARK_TABLE_MAX:
+            self[cp] = value
+        return value
+
+
+_MARKS = _MarkTable({cp: (None if unicodedata.category(chr(cp)) in _DROPPED else cp) for cp in range(128)})
+
+
 def _strip_marks(text: str) -> str:
-    """Drop combining marks (Mn/Mc/Me) and zero-width / format / control chars (Cf/Cc)."""
-    out = []
-    for ch in text:
-        cat = unicodedata.category(ch)
-        if cat in ("Mn", "Mc", "Me", "Cf", "Cc"):
-            continue
-        out.append(ch)
-    return "".join(out)
+    """Drop combining marks (Mn/Mc/Me) and zero-width / format / control chars (Cf/Cc).
+
+    One `str.translate` over a lazily-filled table: the per-character Python loop this replaced was
+    most of the cost of folding, ~0.6 us per character.
+    """
+    if text.isascii():
+        # The only ASCII characters dropped are the controls (Cc).
+        return _ASCII_CONTROLS.sub("", text)
+    return text.translate(_MARKS)
 
 
 def skeleton(text: str) -> str:
@@ -65,5 +87,6 @@ def skeleton(text: str) -> str:
     """
     if not text:
         return text
-    folded = _strip_marks(unicodedata.normalize("NFKD", text))
-    return folded.casefold().translate(_TABLE)
+    folded = _strip_marks(unicodedata.normalize("NFKD", text)).casefold()
+    # The table maps non-ASCII look-alikes only; ASCII is its own skeleton.
+    return folded if folded.isascii() else folded.translate(_TABLE)
