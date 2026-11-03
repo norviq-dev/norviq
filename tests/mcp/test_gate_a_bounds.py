@@ -229,7 +229,9 @@ async def test_a_payload_past_the_walk_slice_is_still_found():
 
 def test_a_structure_the_walk_could_not_finish_is_reported():
     """Past the widened bound the answer is "I did not look", said out loud — not silence."""
-    args = [{"name": f"a{i}", "description": "fine"} for i in range(600)]
+    # Sized from the bound (it was 512 when this test was written, now `_MAX_WALK_MEMBERS`).
+    from norviq.mcp.scanner import _MAX_WALK_MEMBERS
+    args = [{"name": f"a{i}", "description": "fine"} for i in range(_MAX_WALK_MEMBERS + 88)]
     args.append({"name": "evil", "description": POISON})
     report = scan_catalog_item({"name": "p", "description": "Ok.", "arguments": args}, "prompts")
     assert report.budget_exhausted is True
@@ -239,21 +241,25 @@ def test_a_structure_the_walk_could_not_finish_is_reported():
 def test_an_object_with_more_members_than_the_walk_bound_is_reported():
     """Objects were never bounded at all: a dict of half a million members was half a million
     recursive calls building half a million path strings."""
-    report = scan_catalog_item({"name": "p", "extras": {f"k{i}": "v" for i in range(600)}}, "prompts")
+    from norviq.mcp.scanner import _MAX_WALK_MEMBERS
+    report = scan_catalog_item({"name": "p", "extras": {f"k{i}": "v" for i in range(_MAX_WALK_MEMBERS + 88)}},
+                               "prompts")
     assert "mcp_a_scan_truncated" in {f.rule for f in report.findings}
 
 
 def test_a_long_enum_does_not_cost_a_tool_its_description():
-    """The counter-test for the grade. A tool definition's walk bound cuts off `enum` values the
-    scan predicate discards anyway, so grading that at the sanitise threshold would replace the
-    description of any tool that lists 600 timezones. Reported at `low`; the CHARACTER budget, which
-    means prose went unread, stays medium."""
+    """REWRITTEN. This asserted that a 600-value enum is reported as a `low` truncation, on the
+    argument that a walk bound in a tool schema only cuts off enum values. That argument was false
+    (a bound cuts off whatever follows it, prose included), so a truncated tool definition is now
+    withheld — and the bounds were raised so that a real schema, a 600-zone enum among them, is not
+    truncated at all. The property this test protects is unchanged: a long enum costs the tool
+    nothing."""
     tool = {"name": "tz", "description": "Converts a timestamp.", "inputSchema": {
         "type": "object", "properties": {"zone": {"type": "string",
                                                   "enum": [f"Zone/{i}" for i in range(600)]}}}}
     report = scan_tool_definition(tool)
-    assert report.severity == "low", [f.rule for f in report.findings]
-    assert "mcp_a_scan_budget_exhausted" not in {f.rule for f in report.findings}
+    assert report.severity == "none", [f.rule for f in report.findings]
+    assert not report.budget_exhausted
 
 
 # ── an entry the bound stopped short of is not an entry that scanned clean ──────────────────────

@@ -273,7 +273,9 @@ differs from a protocol field only by case or compatibility form are withheld or
 (`NRVQ-MCP-5091`), and a tool call whose arguments are too large to inspect for outbound-header
 parameters is refused. A message containing `NaN`, `Infinity` or a number too large for a double is refused in
 either direction. The MCP proxy refuses a message nested more than 128 levels deep, and the SDK blocks a call
-whose evaluate request it cannot encode (`NRVQ-SDK-1016`) instead of applying the outage fallback. Two security booleans no longer fall back to off when an
+whose evaluate request it cannot encode (`NRVQ-SDK-1016`) instead of applying the outage fallback. An MCP tool
+definition, or a resource or prompt list entry, that is too large or too deeply nested for Gate A to
+read in full is withheld. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

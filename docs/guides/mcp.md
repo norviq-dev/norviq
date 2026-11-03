@@ -239,7 +239,7 @@ carries no `method`; anything else is dropped.
 `norviq/mcp/scanner.py` matches a fixed rule table against a **confusable skeleton** of each string —
 casefolded, combining marks and zero-width/format characters stripped — so homoglyph and
 mark-stacking evasion collapses before the rules run. Invisible characters are checked separately on
-the *raw* text, because the skeleton can never witness them (`scanner.py:257-266`).
+the *raw* text, because the skeleton can never witness them (`scanner.py` `_INVISIBLE`).
 
 | Rule | Severity | Fires on |
 |---|---|---|
@@ -258,21 +258,23 @@ the *raw* text, because the skeleton can never witness them (`scanner.py:257-266
 | `mcp_a_unclassifiable_item` | high | a listing entry that is not an object |
 | `mcp_a_oversized_field` | medium | a field past 16 KiB (truncated for analysis) |
 | `mcp_a_scan_budget_exhausted` | medium | text the scanner meant to read went unread |
-| `mcp_a_scan_truncated` | medium (low on a tool definition) | the structure walk hit a bound |
+| `mcp_a_scan_truncated` | medium (high on a tool definition, which is then withheld) | the structure walk hit a bound |
 | `mcp_a_oversized_description` | low | a description past 2 KiB |
 
 `mcp_a_credential_read` is **demoted to medium** on the `description`/`title` of a resource, template
 or prompt entry, and only there: in a tool description "read `~/.ssh/id_rsa`" is the payload, but in a
 catalogue entry's prose it is usually the subject ("How to configure your API key"). It keeps full
 severity on `uri`/`uriTemplate`/`name`, where it is the address *of* a secret rather than prose about
-one (`scanner.py:534-540`).
+one (`scanner.py` `_demote_catalog_prose`).
 
 Every bound is **reported, never silent**. One `tools/list` response gets a shared 512 KiB scan budget
-(`firewall.py` `_LIST_SCAN_BUDGET`), one message 64 KiB (`scanner.py:212`), one field 16 KiB, and the structure walk
-stops at 512 strings / 512 members per node / 12 levels deep. Exhausting any of them raises a finding
-and sets `budget_exhausted`, and on `tools/list` a definition the budget could not read is **stripped
-rather than sanitised** — a walk that stopped early must not produce the same report as a walk that
-found nothing (`firewall.py` `McpFirewall._gate_a_tools_list`).
+(`firewall.py` `_LIST_SCAN_BUDGET`), one message 64 KiB (`scanner.py` `_MAX_TOTAL_SCAN_CHARS`), one field 16 KiB, and the structure walk
+stops at 4096 strings / 4096 members per node / 32 levels deep / 65536 nodes in all, well above real schemas (a 600-value
+enum, a dozen nested objects). Exhausting any of them raises a finding and sets `budget_exhausted`,
+and a tool definition, or a `resources/`/`prompts/list` entry, that the budget or a walk bound could
+not finish is **withheld rather than sanitised** — on the cold-catalog self-list as on a client's
+listing — because a walk that stopped early must not produce the same report as a walk that found
+nothing (`firewall.py` `McpFirewall._gate_a_tools_list`).
 
 ### 3.2 Severity → action
 
@@ -296,7 +298,7 @@ budget-exhausted definition is `strip` for the reason above.
 Sanitising leaves `inputSchema` in place, whose `description` and `default` values reach the model
 exactly as prose does — which is why the threshold for withholding is set where it is, and why the
 name-charset rule is graded `high`. A sanitised homoglyph twin is still listed, still visually
-identical to its target, and still selectable (`scanner.py:433-439`).
+identical to its target, and still selectable (`scanner.py` `scan_tool_definition`).
 
 ### 3.3 Homoglyph and shadowing detection
 
@@ -307,7 +309,7 @@ Two independent mechanisms:
   Charset-based rather than skeleton-based on purpose, so it fires on confusables the fold table
   happens not to cover. Applied to `tools/list` names and to `prompts/list` names — a prompt is
   addressed by name — but **not** to `resources/list` names, which are display strings addressed by
-  `uri` (`scanner.py:519-532`).
+  `uri` (`scanner.py` `scan_catalog_item`).
 - **Cross-catalog collision** (`mcp_a_name_shadowing`, critical): `send_email` and `send_emaiI` fold
   to the same skeleton and are indistinguishable to a model reading a list. Only detectable with the
   whole catalog in hand, so it lives in the firewall rather than the scanner

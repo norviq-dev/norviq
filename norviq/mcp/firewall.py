@@ -1916,10 +1916,10 @@ class McpFirewall:
             # the description and drops `annotations`, and leaves `inputSchema` — whose `description`
             # and `default` values reach the model exactly as prose does. This file's own argument for
             # preferring strip applies verbatim: a sanitised entry "is still listed, still selectable,
-            # and still points wherever the server said". Only the CHARACTER budget triggers it; the
-            # walk bound is graded `low` on purpose, because the leaves it cuts off in a tool schema
-            # are enum values the scan predicate discards anyway (see `_scan_pairs`).
-            if any(f.rule == "mcp_a_scan_budget_exhausted" for f in report.findings):
+            # and still points wherever the server said". Either bound triggers it — the character
+            # budget AND the walk bounds (depth, strings, members): `report.budget_exhausted` is set
+            # by both. Only the first did, and a definition the walk could not finish was passed.
+            if report.budget_exhausted:
                 action = "strip"
 
             schema = tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {}

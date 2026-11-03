@@ -357,9 +357,15 @@ _MAX_SCAN_CHARS = 16384
 # this fact wearing the costume of the fact is compliant" shape this file exists to avoid.
 _MAX_TOTAL_SCAN_CHARS = 65536
 
-# How many strings one walk will collect before it gives up. Retained from the original bound; it is
-# a bound on the number of FINDINGS, not on the work, which is why `_MAX_TOTAL_SCAN_CHARS` exists.
-_MAX_WALK_STRINGS = 512
+# How many strings one walk will collect before it gives up. It bounds the number of FINDINGS, not the
+# work — `_MAX_TOTAL_SCAN_CHARS` bounds the work. Since a tool definition the walk could not finish
+# is now WITHHELD (see `scan_tool_definition`), the bounds sit well above real schemas: 4096 strings
+# covers a 600-value time-zone enum several times over.
+_MAX_WALK_STRINGS = 4096
+
+# How deep the walk descends. Each schema level costs two (`properties` and the property name), so 32
+# is ~15 nested objects; real schemas, pydantic `$defs` and `anyOf` included, stay well inside it.
+_MAX_WALK_DEPTH = 32
 
 # How many members of one list or object the walk descends into.
 #
@@ -369,12 +375,17 @@ _MAX_WALK_STRINGS = 512
 # CLEAN and was forwarded. A bound that decides not to look must say so, or it is indistinguishable
 # from having looked and found nothing — the exact shape `_MAX_TOTAL_SCAN_CHARS` exists to avoid.
 #
-# Raised to 512 and now REPORTED. Raising it costs nothing in the worst case: `_MAX_WALK_STRINGS`
+# Raised (512, now 4096) and REPORTED. Raising it costs little in the worst case: `_MAX_WALK_STRINGS`
 # still caps how many strings are collected and `_MAX_TOTAL_SCAN_CHARS` still caps how many
 # characters are matched, so the extra members are walked (cheap, on an already-parsed object) but
 # cannot buy more scanning. Objects are bounded here too, which they were not: a dict of half a
 # million empty values was half a million recursive calls building half a million path strings.
-_MAX_WALK_MEMBERS = 512
+_MAX_WALK_MEMBERS = 4096
+
+# How many nodes one walk visits in all. With 4096 members per node, a list of lists of numbers
+# (which collect no strings, so the string cap never stops it) could otherwise be walked to millions
+# of nodes inside one 8 MiB message; 65536 is far above a real schema and keeps a walk to ~tens of ms.
+_MAX_WALK_NODES = 65536
 
 # The charset every real MCP tool name uses. See the rationale at the call site in
 # scan_tool_definition — anything outside this is treated as an impersonation attempt, not a typo.
@@ -449,19 +460,26 @@ def _note(unwalked: list[str] | None, text: str) -> None:
 
 
 def _walk_strings(node: Any, path: str, out: list[tuple[str, str]], depth: int = 0,
-                  unwalked: list[str] | None = None) -> None:
+                  unwalked: list[str] | None = None, nodes: list[int] | None = None) -> None:
     """Collect every string in a nested structure with its JSON path.
 
     Depth-bounded: a JSON Schema is attacker-controlled and can be nested arbitrarily to blow the
-    stack or the scan budget. 12 levels covers any real schema; deeper structures stop being walked
-    and the caller reports the truncation rather than silently scanning half a definition.
+    stack or the scan budget. `_MAX_WALK_DEPTH` levels covers any real schema; deeper structures stop
+    being walked and the caller reports the truncation rather than silently scanning half a
+    definition.
 
     Breadth-bounded at `_MAX_WALK_MEMBERS` per list or object. Anything the bounds cut off is
     appended to `unwalked` so the caller can report it: a walk that stopped early and a walk that
     found nothing must not produce the same report.
     """
-    if depth > 12:
-        _note(unwalked, f"{path} (nested deeper than 12 levels)")
+    if nodes is None:
+        nodes = [_MAX_WALK_NODES]
+    nodes[0] -= 1
+    if nodes[0] < 0:
+        _note(unwalked, f"{path} (past the {_MAX_WALK_NODES}-node walk budget)")
+        return
+    if depth > _MAX_WALK_DEPTH:
+        _note(unwalked, f"{path} (nested deeper than {_MAX_WALK_DEPTH} levels)")
         return
     if len(out) > _MAX_WALK_STRINGS:
         _note(unwalked, f"{path} (past the {_MAX_WALK_STRINGS}-string collection cap)")
@@ -488,7 +506,9 @@ def _walk_strings(node: Any, path: str, out: list[tuple[str, str]], depth: int =
         key, value = member
         child = f"{path}[{key}]" if isinstance(node, list) else (
             f"{path}.{key}" if path else str(key))
-        _walk_strings(value, child, out, depth + 1, unwalked)
+        _walk_strings(value, child, out, depth + 1, unwalked, nodes)
+        if nodes[0] < 0:
+            break
 
 
 # Schema keys whose values are FREE TEXT the host may surface to the model. Instructions hide here
@@ -569,7 +589,7 @@ def _scan_pairs(
             "mcp_a_scan_truncated", truncation_severity, "<message>",
             f"<at least {len(gave_up)} node(s) not walked; first: {gave_up[0]}>",
             f"the structure exceeded the walk bounds ({_MAX_WALK_STRINGS} strings, "
-            f"{_MAX_WALK_MEMBERS} members per node, 12 levels deep), so part of it was never "
+            f"{_MAX_WALK_MEMBERS} members per node, {_MAX_WALK_DEPTH} levels deep), so part of it was never "
             f"examined; what was not walked is not what was found clean",
         ))
 
@@ -622,11 +642,13 @@ def scan_tool_definition(tool: dict, budget: int = _MAX_TOTAL_SCAN_CHARS) -> Sca
         # case-insensitive client (Go's encoding/json), not skipped as an unknown short leaf.
         return _fold_key(leaf) in _SCHEMA_TEXT_KEYS or len(value) > 80
 
-    # `low` for the walk bound only: see `_scan_pairs`. The `wanted` predicate above discards short
-    # non-prose leaves, so the nodes a walk bound cuts off here are overwhelmingly `enum` values that
-    # were never going to be scanned, and a medium grade would sanitise a timezone tool for having
-    # 600 zones. The CHARACTER budget stays medium — that one means prose went unread.
-    _scan_pairs(strings, report, budget, wanted, unwalked, truncation_severity="low")
+    # HIGH for the walk bound. This was `low`, on the argument that the nodes a bound cuts off in a
+    # tool schema are enum values the `wanted` predicate discards anyway. That was false: a bound
+    # cuts off whatever comes after it — a `description` or `default` deeper than 12 levels, or past
+    # the 512th member — and a low finding left the action at `pass`, so the definition went to the
+    # model byte for byte with that prose unread. The bounds were raised so real schemas (large
+    # enums included) do not reach them; one that does is withheld (see `_gate_a_tools_list`).
+    _scan_pairs(strings, report, budget, wanted, unwalked, truncation_severity="high")
     return report
 
 
@@ -643,7 +665,7 @@ def scan_object_text(obj: dict, base_path: str = "params",
     a schema text key and neither lives under a schema root, so the definition scanner walked past
     both — the payload is not hiding in the structure here, the payload IS the structure.
 
-    Bounded by `_walk_strings` (depth 12, 512 strings) AND by `budget` CHARACTERS. Only the second of
+    Bounded by `_walk_strings` (`_MAX_WALK_DEPTH` levels, `_MAX_WALK_STRINGS` strings) AND by `budget` CHARACTERS. Only the second of
     those is a real bound: the string count caps how many findings can be raised, while the work is
     512 x `_MAX_SCAN_CHARS` of folding and regex, which one in-limit unsolicited notification was
     enough to spend. See `_MAX_TOTAL_SCAN_CHARS`.
@@ -756,7 +778,7 @@ def scan_prompt_messages(messages: Iterable[dict], budget: int = _MAX_TOTAL_SCAN
             # has always deep-walked with this same helper, so the shallow read here was an oversight
             # rather than a scope decision, and the two halves of one defence disagreed.
             #
-            # Bounded by `_walk_strings` (depth 12, 512 strings) AND by a `budget` in CHARACTERS
+            # Bounded by `_walk_strings` (`_MAX_WALK_DEPTH` levels, `_MAX_WALK_STRINGS` strings) AND by a `budget` in CHARACTERS
             # shared across every message here, which is the bound that actually costs a hostile
             # server anything — see `_MAX_TOTAL_SCAN_CHARS`.
             _walk_strings(block, f"messages[{i}].content[{j}]", strings, 0, unwalked)
