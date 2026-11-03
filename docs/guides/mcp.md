@@ -241,6 +241,14 @@ casefolded, combining marks and zero-width/format characters stripped — so hom
 mark-stacking evasion collapses before the rules run. Invisible characters are checked separately on
 the *raw* text, because the skeleton can never witness them (`scanner.py` `_INVISIBLE`).
 
+What is read: in a tool definition, every member except `name` (which has its own identifier rule),
+every string value at any depth and every object **key** (property names, `$defs` names, annotation
+keys), each scanned on its own; then the values joined in document order, and the keys of each object
+joined, are scanned once more, so text split across several short fields is matched as a whole. The
+same applies to list entries and to the free-text surfaces (elicitation, notifications). The joined
+pass re-reads text already scanned and is not charged to the scan budget, so it at most doubles the
+work the budget allows (`scanner.py` `_scan_pairs`).
+
 | Rule | Severity | Fires on |
 |---|---|---|
 | `mcp_a_instruction_override` | critical | "ignore/disregard/forget previous instructions" |
@@ -269,7 +277,8 @@ one (`scanner.py` `_demote_catalog_prose`).
 
 Every bound is **reported, never silent**. One `tools/list` response gets a shared 512 KiB scan budget
 (`firewall.py` `_LIST_SCAN_BUDGET`), one message 64 KiB (`scanner.py` `_MAX_TOTAL_SCAN_CHARS`), one field 16 KiB, and the structure walk
-stops at 4096 strings / 4096 members per node / 32 levels deep / 65536 nodes in all, well above real schemas (a 600-value
+stops at 4096 strings / 4096 members per node / 32 levels deep / 65536 nodes per walk (one walk per
+tool definition, list entry or message), well above real schemas (a 600-value
 enum, a dozen nested objects). Exhausting any of them raises a finding and sets `budget_exhausted`,
 and a tool definition, or a `resources/`/`prompts/list` entry, that the budget or a walk bound could
 not finish is **withheld rather than sanitised** — on the cold-catalog self-list as on a client's

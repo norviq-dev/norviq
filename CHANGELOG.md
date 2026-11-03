@@ -275,7 +275,8 @@ parameters is refused. A message containing `NaN`, `Infinity` or a number too la
 either direction. The MCP proxy refuses a message nested more than 128 levels deep, and the SDK blocks a call
 whose evaluate request it cannot encode (`NRVQ-SDK-1016`) instead of applying the outage fallback. An MCP tool
 definition, or a resource or prompt list entry, that is too large or too deeply nested for Gate A to
-read in full is withheld. Two security booleans no longer fall back to off when an
+read in full is withheld. Gate A reads every key and every string of a tool definition and of the
+other surfaces it scans, and also reads them joined, so text split across fields is matched. Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way

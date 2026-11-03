@@ -36,6 +36,7 @@ reported, so audit and console always show what the server actually sent.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -504,11 +505,50 @@ def _walk_strings(node: Any, path: str, out: list[tuple[str, str]], depth: int =
             _note(unwalked, f"{path} (+{len(node) - i} more member(s) after the string cap)")
             break
         key, value = member
-        child = f"{path}[{key}]" if isinstance(node, list) else (
-            f"{path}.{key}" if path else str(key))
+        if isinstance(node, list):
+            child = _bounded_path(f"{path}[{key}]")
+        else:
+            segment = _path_segment(str(key))
+            child = _bounded_path(f"{path}.{segment}" if path else segment)
+            # The KEY is text too. A property name, a `$defs` name or an annotation key reaches the
+            # model as part of the schema it reads, and was never collected, so a whole injection
+            # written as a property name passed as clean.
+            if isinstance(key, str) and key:
+                if len(out) > _MAX_WALK_STRINGS:
+                    _note(unwalked, f"{path} (past the {_MAX_WALK_STRINGS}-string collection cap)")
+                    break
+                out.append((child + _KEY_MARK, key))
         _walk_strings(value, child, out, depth + 1, unwalked, nodes)
         if nodes[0] < 0:
             break
+
+
+# Rules about the size of ONE field. The joined text is not a field, so they do not apply to it: a
+# 600-value enum joined is long, and that says nothing about any field in it.
+_SIZE_RULES = frozenset({"mcp_a_oversized_description", "mcp_a_oversized_field"})
+
+# A collected KEY is recorded at its child's path with this suffix, so a finding says it was the key.
+_KEY_MARK = "{key}"
+
+# Bounds on the PATH stored with each collected string. Paths were built in full, so memory grew as
+# strings x key length: long keys at every level made a 1.1 MB tools/list cost ~4 GiB. A segment over
+# 64 characters is shortened with a hash of the whole (still telling two long keys apart), and a path
+# over 256 characters keeps its head and its tail (the leaf, which `wanted` predicates read).
+_MAX_PATH_SEGMENT = 64
+_MAX_PATH = 256
+
+
+def _path_segment(key: str) -> str:
+    if len(key) <= _MAX_PATH_SEGMENT:
+        return key
+    digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    return f"{key[:_MAX_PATH_SEGMENT - 12]}..{digest}"
+
+
+def _bounded_path(path: str) -> str:
+    if len(path) <= _MAX_PATH:
+        return path
+    return f"{path[:96]}...{path[-(_MAX_PATH - 99):]}"
 
 
 # Schema keys whose values are FREE TEXT the host may surface to the model. Instructions hide here
@@ -528,6 +568,7 @@ def _scan_pairs(
     predicate: Any = None,
     unwalked: list[str] | None = None,
     truncation_severity: str = "medium",
+    joined: str = "",
 ) -> None:
     """Scan collected (path, value) pairs into `report` under a shared CHARACTER budget.
 
@@ -553,6 +594,7 @@ def _scan_pairs(
     is clean.
     """
     collected = list(pairs)
+    scanned: list[tuple[str, str]] = []
     remaining = max(0, budget)
     starved = 0
     truncated = 0
@@ -570,6 +612,33 @@ def _scan_pairs(
         remaining -= len(text)
         report.scanned_chars += len(text)
         report.findings.extend(_scan_text(text, path))
+        scanned.append((path, text))
+    if joined and scanned and not (starved or truncated):
+        # THE WHOLE, AS WELL AS THE PARTS. Every leaf is scanned on its own above, but a payload can be
+        # split into pieces none of which matches alone — 30-character fragments under `x-note-0..N`,
+        # or as the values of an `enum`. The leaves are scanned again joined in document order, one
+        # per line, and a rule that only matches across them is reported against `joined` (the
+        # definition). Not charged to the shared budget: it re-reads text already paid for, so it at
+        # most doubles the work the budget allows, and it never starves a later entry of a listing.
+        #
+        # Two streams, values and keys, each joined on its own: interleaving a key with its value
+        # ("description" then "Fails silently ...") puts words in front of a sentence that it never
+        # has, and that alone tripped a contextual rule on ordinary prose. A payload split across
+        # values, or across keys, is matched; one alternated between keys and values is not.
+        #
+        # Keys are joined per parent object (the members of one `properties` read as one run), since
+        # in document order a schema's keys interleave with each child's own `type`/`description`.
+        seen = {f.rule for f in report.findings}
+        key_runs: dict[str, list[str]] = {}
+        for p, t in scanned:
+            if p.endswith(_KEY_MARK):
+                key_runs.setdefault(p[:-len(_KEY_MARK)].rsplit(".", 1)[0], []).append(t)
+        for stream in ([t for p, t in scanned if not p.endswith(_KEY_MARK)], *key_runs.values()):
+            if len(stream) > 1:
+                found = [f for f in _scan_text("\n".join(stream), joined)
+                         if f.rule not in seen and f.rule not in _SIZE_RULES]
+                report.findings.extend(found)
+                seen.update(f.rule for f in found)
     if starved or truncated:
         report.budget_exhausted = True
         report.findings.append(Finding(
@@ -624,23 +693,13 @@ def scan_tool_definition(tool: dict, budget: int = _MAX_TOTAL_SCAN_CHARS) -> Sca
 
     strings: list[tuple[str, str]] = []
     unwalked: list[str] = []
-    for path_key in ("description", "title"):
-        value = tool.get(path_key)
-        if isinstance(value, str):
-            strings.append((path_key, value))
-    _walk_strings(tool.get("inputSchema") or {}, "inputSchema", strings, 0, unwalked)
-    _walk_strings(tool.get("outputSchema") or {}, "outputSchema", strings, 0, unwalked)
-    _walk_strings(tool.get("annotations") or {}, "annotations", strings, 0, unwalked)
-
-    def wanted(path: str, value: str) -> bool:
-        if path in ("description", "title"):
-            return True                       # the definition's own prose, always scanned
-        leaf = path.rsplit(".", 1)[-1].split("[", 1)[0]
-        # Scan free-text schema keys always; scan other values only when long enough to hide prose in
-        # (an enum of "read"/"write" is not a payload and scanning it is pure noise).
-        # Folded, so `Description` or `deſcription` inside a schema is read as the prose it is to a
-        # case-insensitive client (Go's encoding/json), not skipped as an unknown short leaf.
-        return _fold_key(leaf) in _SCHEMA_TEXT_KEYS or len(value) > 80
+    # The WHOLE definition, every key and every string. This read `description`/`title` and walked
+    # three members (`inputSchema`, `outputSchema`, `annotations`), scanning a schema leaf only under
+    # a prose key or past 80 characters: keys were never read, an unknown top-level member was never
+    # read, and an injection cut into short leaves (or written as enum values) passed piece by piece.
+    # `name` is left to the identifier rule above.
+    _walk_strings({k: v for k, v in tool.items() if k != "name"}, "", strings, 0, unwalked)
+    wanted = None
 
     # HIGH for the walk bound. This was `low`, on the argument that the nodes a bound cuts off in a
     # tool schema are enum values the `wanted` predicate discards anyway. That was false: a bound
@@ -648,7 +707,8 @@ def scan_tool_definition(tool: dict, budget: int = _MAX_TOTAL_SCAN_CHARS) -> Sca
     # the 512th member — and a low finding left the action at `pass`, so the definition went to the
     # model byte for byte with that prose unread. The bounds were raised so real schemas (large
     # enums included) do not reach them; one that does is withheld (see `_gate_a_tools_list`).
-    _scan_pairs(strings, report, budget, wanted, unwalked, truncation_severity="high")
+    _scan_pairs(strings, report, budget, wanted, unwalked, truncation_severity="high",
+                joined="<definition>")
     return report
 
 
@@ -674,7 +734,7 @@ def scan_object_text(obj: dict, base_path: str = "params",
     strings: list[tuple[str, str]] = []
     unwalked: list[str] = []
     _walk_strings(obj or {}, base_path, strings, 0, unwalked)
-    _scan_pairs(strings, report, budget, None, unwalked)
+    _scan_pairs(strings, report, budget, None, unwalked, joined=f"{base_path}<joined>")
     return report
 
 
@@ -733,7 +793,7 @@ def scan_catalog_item(item: dict, base_path: str = "item",
     strings: list[tuple[str, str]] = []
     unwalked: list[str] = []
     _walk_strings(item or {}, base_path, strings, 0, unwalked)
-    _scan_pairs(strings, report, budget, None, unwalked)
+    _scan_pairs(strings, report, budget, None, unwalked, joined=f"{base_path}<joined>")
     report.findings = [_demote_catalog_prose(f) for f in report.findings]
     return report
 
