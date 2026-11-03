@@ -68,7 +68,7 @@ class AgentRegistryEntry(Base):
 
     __tablename__ = "agent_registry"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    spiffe_id: Mapped[str] = mapped_column(String(2048), unique=True)
+    spiffe_id: Mapped[str] = mapped_column(String(512), unique=True)
     namespace: Mapped[str] = mapped_column(String(255))
     agent_class: Mapped[str] = mapped_column(String(255))
     trust_score: Mapped[float] = mapped_column(Float, default=0.8)
@@ -188,7 +188,7 @@ class ApiKey(Base):
     # evaluated as a different (looser) class or shed its agent_frozen: kill-switch by asserting another
     # spiffe_id. Issue workload keys WITH these set; leave them empty only for operator/CI keys.
     agent_class: Mapped[str] = mapped_column(String(255), default="")
-    spiffe_id: Mapped[str] = mapped_column(String(2048), default="")
+    spiffe_id: Mapped[str] = mapped_column(String(512), default="")
     created_by: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -206,7 +206,7 @@ class AuditLogEntry(Base):
     event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     tool_name: Mapped[str] = mapped_column(String(255))
     decision: Mapped[str] = mapped_column(String(20))
-    agent_id: Mapped[str] = mapped_column(String(2048))
+    agent_id: Mapped[str] = mapped_column(String(512))
     agent_class: Mapped[str] = mapped_column(String(255))
     namespace: Mapped[str] = mapped_column(String(255))
     policy_id: Mapped[str] = mapped_column(String(255), default="")
@@ -348,8 +348,8 @@ class AttackPath(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     graph_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("asset_graph.id"))
     namespace: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    source_node: Mapped[str] = mapped_column(String(2048))
-    target_node: Mapped[str] = mapped_column(String(2048))
+    source_node: Mapped[str] = mapped_column(String(512))
+    target_node: Mapped[str] = mapped_column(String(512))
     path_json: Mapped[dict[str, object]] = mapped_column(JSONB)
     risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

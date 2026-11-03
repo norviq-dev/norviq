@@ -343,15 +343,8 @@ async def ensure_schema_compatibility() -> None:
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
         # SECURITY (trust fail-open fix): durable freeze/cap so a Redis flush can't lift a kill-switch.
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT false",
-        # Agent ids up to the SPIFFE limit (2048 bytes; norviq/engine/identity.py). Widening a varchar is
-        # metadata-only in Postgres (no table rewrite), and re-running it at the same width is a no-op.
-        "ALTER TABLE agent_registry ALTER COLUMN spiffe_id TYPE VARCHAR(2048)",
         # Monotonic fence tokens for admin trust store writes (norviq/api/routers/agents.py::_fence_token).
         "CREATE SEQUENCE IF NOT EXISTS agent_trust_fence_seq",
-        "ALTER TABLE api_keys ALTER COLUMN spiffe_id TYPE VARCHAR(2048)",
-        "ALTER TABLE audit_log ALTER COLUMN agent_id TYPE VARCHAR(2048)",
-        "ALTER TABLE attack_paths ALTER COLUMN source_node TYPE VARCHAR(2048)",
-        "ALTER TABLE attack_paths ALTER COLUMN target_node TYPE VARCHAR(2048)",
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS trust_cap DOUBLE PRECISION",
     )
     # Same treatment as create_tables, and for the same reason — the timeout simply moved one function

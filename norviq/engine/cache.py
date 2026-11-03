@@ -674,16 +674,27 @@ return 1
     # claim only ever raises the owner; a writer whose lock died and whose claim lands late carries the smaller
     # token, is refused, and its fenced write is then a no-op (review round 6: a random token let such a late
     # claim win over a freeze committed with 200 in between). A claim without a token (a freeze stealing the
-    # fence while it cannot get the lock) takes the current owner + 1. A non-numeric owner (written by an older
-    # release) is replaced.
+    # fence while it cannot get the lock) keeps the last lock holder's token and adds a steal count (see
+    # _CLAIM_LUA). An owner value this release cannot parse (an older release's) counts as token 0; a non-numeric
+    # token (no product writer sends one) is not ordered and replaces the owner, as before.
+    # The owner value is "<L>" or "<L>:<S>": L is the last lock-holding writer's sequence token, S counts freezes
+    # that stole the fence since. A lock-holding claim (a token) wins iff it is newer than L, or it IS L and nothing
+    # stole since; it sets "<token>". A steal (no token) keeps L and bumps S, so the writer it took the fence from
+    # is fenced off, while every later lock holder (a larger sequence token) still wins: steals never move the
+    # owner ahead of the global sequence, so K steals cannot starve the writers after them (review round 7).
     _CLAIM_LUA = """
 local cur = redis.call('GET', KEYS[1])
 local token = ARGV[1]
-local curn = cur and tonumber(cur)
+local last, stolen = 0, 0
+if cur then
+  local l, s = string.match(cur, '^(%d+):(%d+)$')
+  if l then last, stolen = tonumber(l), tonumber(s) else last = tonumber(cur) or 0 end
+end
 if token == '' then
-  token = tostring((curn or 0) + 1)
-elseif curn and tonumber(token) and tonumber(token) < curn then
-  return false
+  token = tostring(last) .. ':' .. tostring(stolen + 1)
+else
+  local t = tonumber(token)
+  if t and (t < last or (t == last and stolen > 0)) then return false end
 end
 redis.call('SET', KEYS[1], token, 'PX', ARGV[2])
 return token
@@ -725,8 +736,8 @@ return token
 
         The caller holds the batch's Postgres locks, so no LIVE admin writer can own these agents: a lost or
         missing fence here is a dead writer's late claim (a SET cut off on the wire that landed after the warm's
-        claim) or a freeze steal (add-only, so re-adding over it is safe). Those agents are re-claimed and
-        re-added, up to ``rounds`` times; the outcomes returned are the last ones, so the caller can see any
+        claim). Those agents are re-claimed and re-added, up to ``rounds`` times (a freeze steal since the warm's
+        claim keeps the warm fenced off: the agent reports lost and the caller retries it with a newer token); the outcomes returned are the last ones, so the caller can see any
         agent that still did not take its control."""
         client = self._client()
         outcomes = [self.FENCE_LOST] * len(entries)

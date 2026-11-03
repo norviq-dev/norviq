@@ -41,21 +41,24 @@ class SpiffeResolutionError(RuntimeError):
 # (binding a key to it), the evaluator (deciding for it) and the admin trust routes (freezing it). They used
 # to disagree — the evaluator took any "spiffe://..." string, the key API any up to 512 characters including
 # the bare prefix, while the admin routes refused the bare prefix and anything longer than the registry's
-# 512-character column — so an identity could make decisions that no freeze could reach. The bound is the
-# SPIFFE specification's: a SPIFFE ID is at most 2048 bytes. The columns that hold an agent id are 2048
-# characters wide (ensure_schema_compatibility widens older ones), and 2048 bytes never exceed that.
-SPIFFE_ID_MAX_BYTES = 2048
+# 512-character column — so an identity could make decisions that no freeze could reach. The bound is 512
+# characters: the width of every column that holds an agent id and what POST /keys always stored. The SPIFFE
+# specification allows 2048 bytes; ids longer than 512 characters are refused everywhere, consistently (a
+# known limitation, docs/cli.md). Widening the columns was tried and reverted: on Postgres the ALTER rebuilds
+# the (namespace, agent_id) index on every audit_log partition under ACCESS EXCLUSIVE, 10 s per API start at
+# 6M audit rows, with API-key auth stalled meanwhile.
+SPIFFE_ID_MAX_LEN = 512
 
 
 def is_controllable_spiffe_id(spiffe_id: object) -> bool:
     """True when ``spiffe_id`` starts with "spiffe://", is not empty or only whitespace after it, and is at
-    most SPIFFE_ID_MAX_BYTES bytes in UTF-8. Any other character, whitespace and glob characters included, is
+    most SPIFFE_ID_MAX_LEN characters. Any other character, whitespace and glob characters included, is
     accepted: the id only names registry rows and Redis keys used with GET/SET/DEL/EVAL."""
     return (
         isinstance(spiffe_id, str)
         and spiffe_id.startswith("spiffe://")
         and bool(spiffe_id[len("spiffe://"):].strip())
-        and len(spiffe_id.encode("utf-8", "surrogatepass")) <= SPIFFE_ID_MAX_BYTES
+        and len(spiffe_id) <= SPIFFE_ID_MAX_LEN
     )
 
 

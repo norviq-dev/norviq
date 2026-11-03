@@ -481,7 +481,7 @@ def _require_agent_id(spiffe_id: str) -> None:
     from norviq.engine.identity import is_controllable_spiffe_id
 
     if not is_controllable_spiffe_id(spiffe_id):
-        raise HTTPException(status_code=422, detail="Not a valid agent id (spiffe://..., at most 2048 bytes)")
+        raise HTTPException(status_code=422, detail="Not a valid agent id (spiffe://..., at most 512 characters)")
 
 
 # The bound on every store (Redis) call made while an agent's lock is held. A store that hangs rather than
@@ -893,6 +893,7 @@ async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) ->
     if token is not None:
         outcome, store_error = await _fenced_write(cache, spiffe_id, frozen, cap, display, conn=conn, token=token)
     live = outcome == 1
+    refused = outcome == 0  # RedisCache.FENCE_LOST: the store answered, and a newer change owns the agent
     try:
         await _persist_trust_control(conn, spiffe_id, frozen, cap, score)
         await conn.commit()
@@ -903,14 +904,19 @@ async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) ->
         raise HTTPException(status_code=503, detail=(
             "Applied live, but it may NOT be persisted (the registry write failed or its result was lost). Retry."
             if live else "Not confirmed: the change may be persisted (the registry did not confirm it), and the "
-                         "store did not confirm it either, so it may or may not be live. Retry.")) from exc
+                         "store write was refused: a newer change owns the agent, and the store holds that change. "
+                         "Retry." if refused
+            else "Not confirmed: the change may be persisted (the registry did not confirm it), and the "
+                 "store did not confirm it either, so it may or may not be live. Retry.")) from exc
     if not live:
         log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=store_error, score=score,
                     direction="tightening", durable=True, actor=user.get("sub"), code="NRVQ-API-7147")
         raise HTTPException(status_code=503, detail=(
-            "Persisted but NOT confirmed live: the store did not confirm it (it may or may not have taken it). It "
-            "is applied by the next successful change to "
-            "this agent or the next API start; retry now."))
+            "Persisted but NOT live: the store write was refused, because a newer change owns the agent (a "
+            "freeze applied while this change waited, or a later change), and the store holds that change. "
+            "Check the agent; retry to apply this one." if refused
+            else "Persisted but NOT confirmed live: the store did not confirm it (it may or may not have taken it). "
+                 "It is applied by the next successful change to this agent or the next API start; retry now."))
 
 
 async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> None:
@@ -922,13 +928,19 @@ async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> 
 
     try:
         token = await _fence_token(conn)
-        if await _store(cache.claim_admin_trust_owner(spiffe_id, token, _owner_ttl_ms())) is None:
-            raise RuntimeError("fence: a newer admin write owns the agent")
+        claimed = await _store(cache.claim_admin_trust_owner(spiffe_id, token, _owner_ttl_ms()))
     except Exception as exc:  # noqa: BLE001 - without the fence the store write could not be made safely
         log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=f"{type(exc).__name__}: {exc}",
                     score=score, direction="loosening", durable=False, actor=user.get("sub"), code="NRVQ-API-7147")
         raise HTTPException(status_code=503, detail=(
             "Trust change not applied: the store did not answer. Retry.")) from exc
+    if claimed is None:
+        log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id,
+                    error="fence: a newer admin write owns the agent", score=score, direction="loosening",
+                    durable=False, actor=user.get("sub"), code="NRVQ-API-7147")
+        raise HTTPException(status_code=503, detail=(
+            "Trust change not applied: refused, a newer change owns the agent (a freeze applied while this change "
+            "waited, or a later change). Check the agent and retry."))
     try:
         await _persist_trust_control(conn, spiffe_id, frozen, cap, score)
         await conn.commit()
@@ -955,9 +967,13 @@ async def _loosen(conn, cache, spiffe_id, frozen, cap, display, score, user) -> 
         log.warning("nrvq.api.agent.trust_live_failed", spiffe_id=spiffe_id, error=error, score=score,
                     direction="loosening", durable=True, actor=user.get("sub"), code="NRVQ-API-7147")
         raise HTTPException(status_code=503, detail=(
-            "Persisted, but the store did not confirm the update: it may have taken it, or it still holds whatever "
-            "it held before this change (if an earlier change was answered 'Persisted but NOT confirmed live', that may be older "
-            "than the registry). Retry, or restart the API to re-apply the registry."))
+            "Persisted, but NOT live: the store write was refused, because a newer change owns the agent (a "
+            "freeze applied while this change ran, or a later change), and the store holds that change. Check "
+            "the agent and retry." if outcome == RedisCache.FENCE_LOST
+            else "Persisted, but the store did not confirm the update: it may have taken it, or it still holds "
+                 "whatever it held before this change (if an earlier change was answered 'Persisted but NOT "
+                 "confirmed live', that may be older than the registry). Retry, or restart the API to re-apply "
+                 "the registry."))
 
 
 async def _still_connected(conn) -> bool:
@@ -1015,6 +1031,49 @@ async def _rollback(session) -> None:
     await _quietly(session.rollback())
 
 
+# The skipped-agent retry: per-agent lock wait and total time, well inside warm_with_backoff's 10 s attempt.
+_WARM_RETRY_LOCK_MS = 300
+_WARM_RETRY_BUDGET_S = 2.0
+
+
+@asynccontextmanager
+async def _warm_session(session_factory):
+    """The boot warm's session. With the product's own session factory it runs on a connection configured exactly
+    like the admin lock connection (_apply_admin_session: idle and idle-in-transaction timeouts, TCP keepalives),
+    because a batch holds up to _WARM_BATCH agents' locks: a replica vanishing mid-warm otherwise kept them for
+    TCP keepalive time (review round 7). The settings are put back before the connection is pooled; a connection
+    that cannot be reset is invalidated. Any other factory (tests) is used as is."""
+    if session_factory is not get_session:
+        provider = session_factory()
+        session = await provider.__anext__()
+        try:
+            yield session
+        finally:
+            await _rollback(session)
+            await provider.aclose()
+        return
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    conn = await asyncio.wait_for(_EngineConnector().connect(), _CONNECT_TIMEOUT_S)
+    try:
+        await _apply_admin_session(conn)
+        await conn.commit()
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+        try:
+            yield session
+        finally:
+            await _rollback(session)
+            await _quietly(session.close())
+    finally:
+        try:
+            await conn.rollback()
+            await _reset_admin_session(conn)
+            await conn.commit()
+        except BaseException:  # noqa: BLE001 - a connection whose settings could not be put back is not pooled
+            await _quietly(conn.invalidate())
+        await _quietly(conn.close())
+
+
 async def warm_agent_overrides(cache, session_factory=get_session, progress: dict | None = None,
                                batch_size: int | None = None) -> int:
     """SECURITY (fail-open fix): at startup, re-seed durable admin freeze/cap from agent_registry into Redis so
@@ -1051,9 +1110,7 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
     progress.setdefault("after", "")
     progress.setdefault("seeded", 0)
     skipped: set[str] = progress.setdefault("skipped", set())
-    provider = session_factory()
-    session = await provider.__anext__()
-    try:
+    async with _warm_session(session_factory) as session:
         while True:
             ids = [r["spiffe_id"] for r in (await session.execute(
                 text("SELECT spiffe_id FROM agent_registry WHERE (frozen = true OR trust_cap IS NOT NULL) "
@@ -1092,10 +1149,20 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
             await session.commit()
             progress["after"] = ids[-1]
             progress["seeded"] += seeded
+        if skipped:
+            # Named BEFORE the retry: the retry can be cut off by warm_with_backoff's bound, and the ids must be
+            # in the log whatever happens next (review round 7: with 4+ held agents 7160 was never logged).
+            names = sorted(skipped)
+            log.error("nrvq.api.agent.overrides_warm_skipped", count=len(names), spiffe_ids=names[:10],
+                      phase="retrying", code="NRVQ-API-7160")
+        deadline = asyncio.get_running_loop().time() + _WARM_RETRY_BUDGET_S
         for spiffe_id in sorted(skipped):
-            # One at a time, each waiting at most the admin lock timeout for the agent's lock.
+            # One at a time, each waiting at most _WARM_RETRY_LOCK_MS for the agent's lock, all of them within
+            # _WARM_RETRY_BUDGET_S, so even many held agents stay well inside the 10 s attempt bound.
+            if asyncio.get_running_loop().time() >= deadline:
+                break
             try:
-                await session.execute(text(f"SET LOCAL lock_timeout = '{_lock_timeout_ms()}ms'"))
+                await session.execute(text(f"SET LOCAL lock_timeout = '{_WARM_RETRY_LOCK_MS}ms'"))
                 await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), _lock_key(spiffe_id))
             except Exception as exc:
                 await _rollback(session)
@@ -1110,15 +1177,12 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
         if skipped:
             names = sorted(skipped)
             log.error("nrvq.api.agent.overrides_warm_skipped", count=len(names), spiffe_ids=names[:10],
-                      code="NRVQ-API-7160")
+                      phase="unwritten", code="NRVQ-API-7160")
             # The attempt fails, so warm_with_backoff retries — only these agents, the cursor is past the rest —
             # and logs NRVQ-API-7035 at ERROR with them if they never take their control.
             raise RuntimeError(f"{len(names)} frozen or capped agent(s) not written back (agent lock held, or the "
                                f"store fence would not take): {', '.join(names[:5])}{' ...' if len(names) > 5 else ''}")
         log.info("nrvq.api.agent.overrides_warmed", count=progress["seeded"], code="NRVQ-API-7034")
-    finally:
-        await _rollback(session)
-        await provider.aclose()
     return progress["seeded"]
 
 

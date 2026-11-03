@@ -17,7 +17,7 @@ from norviq.api.auth import _required_bound_fields, get_current_user, require_ad
 from norviq.api.db.models import ApiKey
 from norviq.api.db.session import get_session
 from norviq.config import settings
-from norviq.engine.identity import SPIFFE_ID_MAX_BYTES, is_controllable_spiffe_id
+from norviq.engine.identity import SPIFFE_ID_MAX_LEN, is_controllable_spiffe_id
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -40,7 +40,7 @@ class KeyCreate(BaseModel):
     # under a different (looser) agent_class or shed its agent_frozen: kill-switch. Omit for
     # operator/CI keys — empty stays unbound, exactly as before.
     agent_class: str = Field(default="", max_length=255)
-    spiffe_id: str = Field(default="", max_length=2048)
+    spiffe_id: str = Field(default="", max_length=512)
 
 
 def _resolve_expiry(expires_in_days: int | None) -> datetime | None:
@@ -126,7 +126,7 @@ async def create_key(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
                 "spiffe_id must start with spiffe://, not be empty after it, and be at most "
-                f"{SPIFFE_ID_MAX_BYTES} bytes (the SPIFFE limit)"
+                f"{SPIFFE_ID_MAX_LEN} characters"
             ),
         )
     if body.role == "service" and not body.agent_class.strip():

@@ -24,8 +24,7 @@ REFUSED = [
     "spiffe://",
     "spiffe://   ",
     "spiffe://\t",
-    "spiffe://" + "a" * 2040,
-    "spiffe://" + "\u00e9" * 1020,
+    "spiffe://" + "a" * 504,
     "not-spiffe",
     "",
     " spiffe://x",
@@ -35,8 +34,8 @@ ACCEPTED = [
     "spiffe://Acme.com/agent",
     "spiffe://norviq/ns/a/sa/my agent",
     "spiffe://norviq/ns/a/sa/b*?[0]",
-    "spiffe://" + "a" * 2039,
-    "spiffe://" + "a" * 600,
+    "spiffe://" + "a" * 503,
+    "spiffe://" + "\u00e9" * 503,
 ]
 
 
@@ -51,7 +50,7 @@ def test_the_rule_accepts_operator_chosen_ids(spiffe_id) -> None:
     OPAEvaluator(_CacheStub())._validate_spiffe(spiffe_id)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("spiffe_id", ["spiffe://", "spiffe://   ", "spiffe://" + "a" * 2040])
+@pytest.mark.parametrize("spiffe_id", ["spiffe://", "spiffe://   ", "spiffe://" + "a" * 504])
 def test_the_evaluator_refuses_an_identity_the_admin_routes_would_422(spiffe_id) -> None:
     """FAIL-ON-BUG: it checked only the prefix, so these got real decisions and could not be frozen."""
     with pytest.raises(InvalidSpiffeIdentity):
@@ -72,11 +71,12 @@ async def test_an_uncontrollable_identity_is_blocked_with_the_existing_invalid_i
     assert (decision.decision, decision.rule_id) == ("block", "invalid_spiffe_identity")
 
 
-def test_the_bound_is_the_spiffe_limit_in_bytes() -> None:
-    """Review round 6: the SPIFFE specification limits an id to 2048 bytes; 512 refused valid ids."""
-    assert is_controllable_spiffe_id("spiffe://" + "a" * 2039)  # 2048 bytes
-    assert not is_controllable_spiffe_id("spiffe://" + "a" * 2040)  # 2049 bytes
-    assert not is_controllable_spiffe_id("spiffe://" + "\u00e9" * 1020)  # 1029 characters, 2049 bytes
+def test_the_bound_is_the_column_width_in_characters() -> None:
+    """Review round 7: the bound is the 512-character width of every agent-id column (widening them on every
+    API start rebuilt audit_log's indexes under ACCESS EXCLUSIVE). Characters, not bytes, as the columns count."""
+    assert is_controllable_spiffe_id("spiffe://" + "a" * 503)  # 512 characters
+    assert is_controllable_spiffe_id("spiffe://" + "\u00e9" * 503)  # 512 characters, 1015 bytes
+    assert not is_controllable_spiffe_id("spiffe://" + "a" * 504)  # 513
 
 
 def test_an_uncontrollable_identity_gets_no_registry_row() -> None:

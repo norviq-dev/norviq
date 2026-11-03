@@ -615,13 +615,13 @@ async def test_with_the_store_down_a_tightening_is_persisted_and_a_loosening_is_
         "spiffe://",
         "spiffe://%20%20",
         "x" * 20 + "spiffe://a",
-        "spiffe://norviq/ns/a/sa/" + "x" * 2100,
+        "spiffe://norviq/ns/a/sa/" + "x" * 600,
     ],
 )
 async def test_admin_trust_routes_refuse_an_id_the_product_does_not_accept(env, bad) -> None:
     """FAIL-ON-BUG (review N3). The upsert wrote a frozen registry row for any string, '*' and ' '
     included. PUT, reset and DELETE refuse exactly what the evaluator and POST /keys refuse — no
-    "spiffe://" prefix, more than 2048 bytes — plus an id empty after the prefix (422), and write
+    "spiffe://" prefix, more than 512 characters — plus an id empty after the prefix (422), and write
     nothing. Counted for these exact ids, so rows another run left in a shared database cannot fail it."""
     from urllib.parse import unquote
 
@@ -1556,12 +1556,12 @@ def test_the_lock_timeout_stays_below_the_command_timeout(monkeypatch, command_t
     assert _lock_timeout_ms() == expected_ms
 
 
-async def test_an_id_of_exactly_2048_bytes_is_accepted_and_one_more_is_not(env) -> None:
-    """The SPIFFE limit (2048 bytes) is the bound everywhere, and the registry column holds it."""
+async def test_an_id_of_exactly_512_characters_is_accepted_and_513_is_not(env) -> None:
+    """512 characters is the bound everywhere: the width of the registry column (review round 7)."""
     _, client, _, ids = env
-    longest = "spiffe://" + "a" * 2039
+    longest = "spiffe://" + "a" * 503
     ids.append(longest)
-    assert len(longest.encode()) == 2048
+    assert len(longest) == 512
     assert (await client.put(f"/api/v1/agents/{longest}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
     assert (await _row(longest))["frozen"] is True
     assert (await client.put(f"/api/v1/agents/{longest}b/trust", json={"score": 0}, headers=_hdr())).status_code == 422
@@ -1721,7 +1721,11 @@ async def test_a_warm_agent_that_cannot_take_its_fence_is_skipped_named_and_retr
             await warm_agent_overrides(_LossyWarmCache(cache, stuck, rounds=99), progress=progress)
     assert progress["skipped"] == {stuck} and progress["seeded"] == 1
     assert await cache._client().get(f"agent_frozen:{fine}") == "1"
-    assert [e["spiffe_ids"] for e in logs if e.get("code") == "NRVQ-API-7160"] == [[stuck]]
+    # Named before the retry (so it is in the log even if the attempt is then cut off) and again when it stays.
+    assert [(e["phase"], e["spiffe_ids"]) for e in logs if e.get("code") == "NRVQ-API-7160"] == [
+        ("retrying", [stuck]),
+        ("unwritten", [stuck]),
+    ]
     # The next attempt (same progress) retries only the skipped agent, and now it lands.
     assert await warm_agent_overrides(cache, progress=progress) == 2
     assert await cache._client().get(f"agent_frozen:{stuck}") == "1" and progress["skipped"] == set()
@@ -1803,7 +1807,7 @@ class _LoseFence(_Proxy):
 
 
 async def test_a_tightening_that_loses_its_fence_is_not_answered_as_live(env) -> None:
-    """Round 5 mutation gap: FENCE_LOST is not 'live'. The store did not take it, so 'Persisted but NOT confirmed live'."""
+    """Round 5 mutation gap: FENCE_LOST is not 'live'. The store refused it, and the answer says why (round 7)."""
     app, client, cache, ids = env
     spiffe = _agent(ids, "tlost")
     app.state.cache = _LoseFence(cache)
@@ -1811,8 +1815,49 @@ async def test_a_tightening_that_loses_its_fence_is_not_answered_as_live(env) ->
         resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
     finally:
         app.state.cache = cache
-    assert resp.status_code == 503 and resp.json()["detail"].startswith("Persisted but NOT confirmed live")
+    detail = resp.json()["detail"]
+    assert resp.status_code == 503 and detail.startswith("Persisted but NOT live: the store write was refused")
+    assert "a newer change owns the agent" in detail and "did not answer" not in detail
     assert await _live(cache, spiffe) == (False, None)
+
+
+async def test_a_loosening_whose_store_write_is_refused_says_a_newer_change_owns_the_agent(env) -> None:
+    """Round 7: a FENCE_LOST after the commit is a refusal (a newer change owns the agent), not a store that did
+    not answer; the answer says which, and the store keeps the newer change's state."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "llost")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    app.state.cache = _LoseFence(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+    detail = resp.json()["detail"]
+    assert resp.status_code == 503 and detail.startswith("Persisted, but NOT live: the store write was refused")
+    assert "a newer change owns the agent" in detail and "did not confirm" not in detail
+    assert await _live(cache, spiffe) == (True, None)
+
+
+async def test_a_loosening_whose_claim_is_refused_applies_nothing_and_says_why(env) -> None:
+    """Round 7: the loosening's claim refused (a newer owner) is 'refused', not 'the store did not answer'."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "lrefused")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+
+    class _Refuse(_Proxy):
+        async def claim_admin_trust_owner(self, spiffe_id, token, ttl_ms=None):
+            return None
+
+    app.state.cache = _Refuse(cache)
+    try:
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())
+    finally:
+        app.state.cache = cache
+    detail = resp.json()["detail"]
+    assert resp.status_code == 503 and detail.startswith("Trust change not applied: refused, a newer change owns")
+    assert "did not answer" not in detail
+    assert await _live(cache, spiffe) == (True, None)
+    assert await _durable(spiffe) == (True, None)
 
 
 async def test_a_steal_that_loses_its_fence_is_not_answered_as_live(env, short_waits) -> None:
@@ -2003,8 +2048,54 @@ async def test_a_tightening_that_lost_its_fence_to_a_stolen_freeze_does_not_retr
     finally:
         app.state.cache = cache
     assert freeze.status_code == 503 and freeze.json()["detail"].startswith("Freeze applied live")
-    assert cap_resp.status_code == 503 and cap_resp.json()["detail"].startswith("Persisted but NOT confirmed live")
+    assert cap_resp.status_code == 503 and cap_resp.json()["detail"].startswith(
+        "Persisted but NOT live: the store write was refused, because a newer change owns the agent")
     assert await _live(cache, spiffe) == (True, None)
+
+
+async def test_stolen_freezes_do_not_starve_the_lock_holding_writes_after_them(env, short_waits) -> None:
+    """Round 7: each steal used to set the owner to current + 1, so K steals ran the owner K ahead of the
+    global sequence and the next K lock-holding writes were refused. A steal now bumps a steal count beside the
+    last lock holder's token: the next lock holder (a newer sequence token) wins at once."""
+    app, client, cache, ids = env
+    spiffe = _agent(ids, "steals")
+    await _seed_registered(spiffe)
+    async with _HeldLock(spiffe) as session:
+        # The agent's last lock holder took the sequence's latest token, so the next tokens are 1, 2, 3 ahead.
+        last = (await session.execute(text("SELECT nextval('agent_trust_fence_seq')"))).scalar()
+        await cache._client().set(f"agent_trust_owner:{spiffe}", str(last))
+        for _ in range(5):
+            resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())
+            assert resp.status_code == 503 and resp.json()["detail"].startswith("Freeze applied live")
+    for score, state in ((0.4, (False, 0.4)), (1.0, (False, None)), (0.3, (False, 0.3))):
+        resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": score}, headers=_hdr())
+        assert resp.status_code == 200, resp.text
+        assert await _live(cache, spiffe) == state
+
+
+async def test_the_claim_script_orders_lock_holders_and_steals(env) -> None:
+    """Round 7, the real script: a steal fences off the writer it took the fence from (its re-claim and its write
+    are refused), never a newer lock holder; a late claim with an older token is still refused (monotonic)."""
+    from norviq.engine.cache import RedisCache
+
+    _, _, cache, ids = env
+    spiffe = _agent(ids, "claimseq")
+    assert await cache.claim_admin_trust_owner(spiffe, 10) == "10"
+    stolen = await cache.claim_admin_trust_owner(spiffe, None)
+    assert stolen == "10:1" and await cache.claim_admin_trust_owner(spiffe, None) == "10:2"
+    assert await cache.apply_admin_trust_control_if_owner(spiffe, 10, frozen=False, cap=0.5) == RedisCache.FENCE_LOST
+    assert await cache.claim_admin_trust_owner(spiffe, 10) is None      # the writer the steal fenced off
+    assert await cache.claim_admin_trust_owner(spiffe, 9) is None       # a dead writer's late claim
+    assert await cache.claim_admin_trust_owner(spiffe, 11) == "11"      # the next lock holder: not starved
+    assert await cache.claim_admin_trust_owner(spiffe, 10) is None      # still monotonic after it
+    assert await cache.claim_admin_trust_owner(spiffe, 11) == "11"      # the same holder re-claims (no steal since)
+    assert await cache.apply_admin_trust_control_if_owner(spiffe, 11, frozen=False, cap=0.5) == RedisCache.FENCE_APPLIED
+    await cache._client().set(f"agent_trust_owner:{spiffe}", "7")      # an older release's plain-number owner
+    assert await cache.claim_admin_trust_owner(spiffe, None) == "7:1"
+    assert await cache.claim_admin_trust_owner(spiffe, 8) == "8"
+    await cache._client().delete(f"agent_trust_owner:{spiffe}")
+    assert await cache.claim_admin_trust_owner(spiffe, None) == "0:1"   # a steal on a missing owner key
+    assert await cache.claim_admin_trust_owner(spiffe, 1) == "1"
 
 
 async def test_writers_queued_on_one_agent_do_not_take_slots_from_other_agents(env, short_waits, monkeypatch) -> None:
@@ -2175,3 +2266,93 @@ async def test_a_claim_from_a_writer_that_lost_its_lock_cannot_win_over_a_later_
     assert b.status_code == 200 and h_resp.status_code == 503
     assert await _durable(spiffe) == (True, None)
     assert await _live(cache, spiffe) == (True, None), "a writer that lost its lock replaced a later freeze"
+
+
+async def test_many_held_agents_are_named_and_the_retry_stays_inside_the_attempt_bound(env, monkeypatch) -> None:
+    """Review round 7 (warm_held4.py): the skipped-agent retry waited 3 s per held agent, so 4+ held agents
+    overran the 10 s attempt bound — 7160 was never logged and 7035 named nobody. They are named before the
+    retry, and the retry has a per-agent wait and a total budget. With 10 held agents and a 0.6 s budget the
+    per-agent waits alone (10 x 0.3 s) would take 3 s, so the bound below holds only if the budget is kept."""
+    import norviq.api.routers.agents as agents_mod
+
+    monkeypatch.setattr(agents_mod, "_WARM_RETRY_BUDGET_S", 0.6)
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-held-{uuid.uuid4().hex[:8]}"
+    agents = [f"{prefix}/{n:02d}" for n in range(16)]
+    ids.extend(agents)
+    await _seed_frozen_rows(agents)
+    held = agents[:10]
+    locks = [_HeldLock(a) for a in held]
+    for lock in locks:
+        await lock.__aenter__()
+    try:
+        with structlog.testing.capture_logs() as logs:
+            started = time.monotonic()
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(warm_agent_overrides(cache, progress={"after": prefix}), 30)
+            elapsed = time.monotonic() - started
+    finally:
+        for lock in locks:
+            await lock.__aexit__(None, None, None)
+    bound = agents_mod._lock_timeout_ms() / 1000 + 0.6 + agents_mod._WARM_RETRY_LOCK_MS / 1000 + 1.5
+    assert elapsed < bound, f"the warm took {elapsed:.1f}s with {len(held)} held agents (bound {bound:.1f}s)"
+    first = next(e for e in logs if e.get("code") == "NRVQ-API-7160")
+    assert first["phase"] == "retrying" and first["spiffe_ids"] == held
+    for spiffe in agents[10:]:
+        assert await cache._client().get(f"agent_frozen:{spiffe}") == "1"
+
+
+async def test_the_warm_runs_on_a_connection_configured_like_the_admin_lock_connection(env) -> None:
+    """Review round 7: the warm's batch transaction ran on an ordinary pooled session, so a replica vanishing
+    mid-warm kept up to 500 agent locks for TCP keepalive time. It now applies the admin session settings and
+    puts them back before the connection is pooled."""
+    import norviq.api.routers.agents as agents_mod
+
+    _, _, cache, ids = env
+    prefix = f"spiffe://zzzz-warmconn-{uuid.uuid4().hex[:8]}"
+    ids.append(f"{prefix}/a")
+    await _seed_frozen_rows([f"{prefix}/a"])
+    seen: dict = {}
+
+    class _Spy(_Proxy):
+        async def warm_admin_trust_controls(self, *a, **k):
+            # The session's connection is checked out right now: read what it is configured with.
+            conn = await agents_mod._EngineConnector().connect()
+            try:
+                seen["active"] = (
+                    await conn.execute(
+                        text(
+                            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                            "AND pid <> pg_backend_pid() AND state = 'idle in transaction'"
+                        )
+                    )
+                ).scalar()
+            finally:
+                await conn.close()
+            return await self._real.warm_admin_trust_controls(*a, **k)
+
+    before = await _session_settings(agents_mod._ADMIN_SESSION_SETTINGS)
+    applied: list = []
+    real_apply = agents_mod._apply_admin_session
+
+    async def _record(conn):
+        applied.append(1)
+        return await real_apply(conn)
+
+    agents_mod._apply_admin_session = _record
+    try:
+        assert await warm_agent_overrides(_Spy(cache), progress={"after": prefix}) == 1
+    finally:
+        agents_mod._apply_admin_session = real_apply
+    assert applied == [1], "the warm's connection was not configured like the admin lock connection"
+    # Every pooled connection (the spy's and the warm's: the pool hands them out in FIFO order) is back to the
+    # server's settings.
+    held = [await agents_mod._EngineConnector().connect() for _ in range(3)]
+    try:
+        for conn in held:
+            names = agents_mod._ADMIN_SESSION_SETTINGS
+            assert {n: (await conn.execute(text(f"SHOW {n}"))).scalar() for n in names} == before
+    finally:
+        for conn in held:
+            await conn.rollback()
+            await conn.close()
