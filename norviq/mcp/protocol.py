@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import unicodedata
 from typing import Any
 
@@ -279,11 +278,9 @@ def decode(line: bytes) -> JsonRpcMessage | None:
     if not stripped:
         return None
     try:
-        # A float checker only when the bytes could hold a float that overflows (an exponent of three
-        # digits or more, or a digit run longer than a double's range): the C decoder stays on the
-        # common path, and number TYPES are unchanged either way.
-        hook = _finite_float if _MAYBE_HUGE.search(stripped) else None
-        data = json.loads(stripped, object_pairs_hook=_unique_keys, parse_float=hook,
+        # Every float is checked: a pre-filter on the bytes cannot tell `9`*250 + `e99` (inf) from an
+        # ordinary number without doing the conversion, and inf reaches policy as null.
+        data = json.loads(stripped, object_pairs_hook=_unique_keys, parse_float=_finite_float,
                           parse_constant=_no_constant)
         # Counting brackets is C-speed and bounds the depth from above; only a message with more than
         # MAX_DEPTH of them is walked.
@@ -302,19 +299,21 @@ MAX_DEPTH = 128
 
 
 def _deeper_than(data: Any, limit: int) -> bool:
-    stack: list[tuple[Any, int]] = [(data, 1)]
-    while stack:
-        node, depth = stack.pop()
+    """Whether `data` nests deeper than `limit`. Level by level, so each level is one comprehension
+    over that level's containers rather than a Python-level push and pop per node."""
+    level = [data] if isinstance(data, (dict, list)) else []
+    depth = 0
+    while level:
+        depth += 1
         if depth > limit:
             return True
-        if isinstance(node, dict):
-            stack.extend((v, depth + 1) for v in node.values() if isinstance(v, (dict, list)))
-        elif isinstance(node, list):
-            stack.extend((v, depth + 1) for v in node if isinstance(v, (dict, list)))
+        level = [child
+                 for node in level
+                 for child in (node.values() if isinstance(node, dict) else node)
+                 if isinstance(child, (dict, list))]
     return False
 
 
-_MAYBE_HUGE = re.compile(rb"[eE][+-]?[0-9]{3}|[0-9]{300}")
 
 
 def _finite_float(text: str) -> float:

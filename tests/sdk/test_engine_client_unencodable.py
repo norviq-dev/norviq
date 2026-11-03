@@ -78,3 +78,18 @@ async def test_a_deep_but_reasonable_request_is_sent_and_decided(fallback_allow)
 
     decision = await _client(handler).evaluate(_event({"b": _deep(100)}))
     assert decision.rule_id == "policy" and len(seen) == 1
+
+
+@pytest.mark.parametrize("params", [{"amount": float("inf")}, {"amount": float("-inf")},
+                                    {"nested": [{"amount": float("nan")}]}])
+async def test_a_non_finite_number_is_blocked_rather_than_sent_as_null(fallback_allow, params):
+    """pydantic's JSON mode writes inf and nan as null; the engine would decide on null."""
+    sent: list = []
+
+    def handler(request):
+        sent.append(request.content)
+        return httpx.Response(200, json={"decision": "allow"})
+
+    decision = await _client(handler).evaluate(_event(params))
+    assert decision.decision == "block" and decision.rule_id == "engine_request_unencodable"
+    assert sent == []

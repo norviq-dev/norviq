@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import weakref
+from typing import Any
 from time import monotonic
 
 import httpx
@@ -19,6 +21,21 @@ from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 
 log = structlog.get_logger()
+
+
+def _non_finite(value: Any) -> bool:
+    """Whether a float inf/nan occurs anywhere in `value`. Iterative, bounded by the data itself."""
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, float):
+            if not math.isfinite(node):
+                return True
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple, set)):
+            stack.extend(node)
+    return False
 
 
 class _UnencodableRequest(Exception):
@@ -99,6 +116,12 @@ class PolicyEngineClient:
         # sdk_fallback_mode=allow a call nobody could evaluate was allowed. The caller chooses the
         # params, so that was a bypass on demand. A request this process cannot encode is not an
         # outage: `evaluate` blocks it whatever the fallback mode.
+        #
+        # Non-finite floats are refused BEFORE pydantic sees them: `model_dump(mode="json")` writes inf
+        # and nan as null, so the engine would decide on `amount: null` — a threshold rule that is not
+        # written for null lets it through — while the tool runs with the caller's real value.
+        if _non_finite(event.tool_params) or _non_finite(event.mcp):
+            raise _UnencodableRequest("a non-finite number (inf or nan) in the call")
         try:
             body = json.dumps(event.model_dump(mode="json"), separators=(",", ":"),
                               ensure_ascii=False, allow_nan=False).encode("utf-8")
