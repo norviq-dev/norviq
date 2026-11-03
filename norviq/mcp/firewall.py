@@ -2374,8 +2374,11 @@ class McpFirewall:
         the model READING advertised text as instructions — which fencing addresses and refusal does
         not.
         """
-        report: ScanReport = scan_untrusted_content(
-            json.dumps(msg.result, sort_keys=True)[:16384], label)
+        # Every string of the result, under the shared scan budget. This scanned the first 16384
+        # characters of the result's JSON, so `instructions` text past that point — which the host
+        # puts in front of the model — was never looked at and the handshake passed as clean. A result
+        # larger than the budget now carries the budget finding instead of a clean verdict.
+        report: ScanReport = scan_object_text(msg.result, label)
         if report.clean:
             self._bump("discover_clean")
             return MediationResult(forward=msg.framed)
