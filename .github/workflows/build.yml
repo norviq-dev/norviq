@@ -26,6 +26,10 @@ on:
         required: false
         default: ""
 
+# Read-only by default. Jobs that need more ask for it in their own `permissions:` block.
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: false

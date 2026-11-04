@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+# Dependabot version updates. Security updates are switched on in the repository settings, not here.
+#
+# Weekly, on Monday. Minor and patch updates arrive as one grouped pull request per ecosystem.
+# Major updates still come one per pull request, because they are the ones that need reading.
+#
+# Not covered on purpose: the Helm chart. Its third-party images are pinned by digest through
+# global.thirdPartyImageDigests in values.yaml, keyed by the exact rendered ref, so a tag bump from
+# Dependabot would break that key. Those pins are moved by hand, and scripts/check_image_pins.py
+# fails a release that renders any image on a bare tag.
+version: 2
+
+updates:
+  # The Python package. `uv` updates pyproject.toml and uv.lock together; the `pip` ecosystem
+  # does not read uv.lock.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      python:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # Example app requirements files (examples/chatbot/requirements*.txt).
+  - package-ecosystem: pip
+    directory: /examples/chatbot
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      examples-python:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The console, and its Playwright suite, which has its own lockfile.
+  - package-ecosystem: npm
+    directories:
+      - /ui
+      - /ui/tests/e2e
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The admission webhook.
+  - package-ecosystem: gomod
+    directory: /webhook
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      go:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # Workflow actions. They are pinned by full commit SHA with the version in a trailing comment;
+  # Dependabot updates both.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # Base images in every directory that holds a Dockerfile: Dockerfile.{api,engine,ui,bootstrap}
+  # at the root, webhook/Dockerfile, examples/chatbot/Dockerfile{,.mcp} and scripts/*.Dockerfile.
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /webhook
+      - /examples/chatbot
+      - /scripts
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      docker:
+        patterns: ["*"]
+        update-types: [minor, patch]

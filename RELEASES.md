@@ -36,9 +36,9 @@ are published with it.
 
 ## What a tag publishes
 
-On a tag push, `.github/workflows/release.yml` runs four jobs in order. Each starts only if the one
-before it succeeded. (A rehearsal run, below, skips the images and pypi jobs and still runs the chart
-job.)
+On a tag push, `.github/workflows/release.yml` runs these jobs. Each of the first four starts only if
+the one before it succeeded. (A rehearsal run, below, skips the images and pypi jobs and the GitHub
+Release jobs, and still runs the chart job.)
 
 1. **version** — `scripts/check_release_versions.py` checks the tag against the files above.
 2. **images** — `.github/workflows/build.yml` builds five images (`engine`, `api`, `ui`, `webhook`,
@@ -52,9 +52,14 @@ job.)
    signature.
 4. **pypi** — builds the `norviq` wheel and sdist, checks the wheel contents
    (`scripts/check_wheel_contents.py`) and uploads to PyPI with Trusted Publishing, which attaches a
-   PEP 740 attestation. It runs last because a PyPI version cannot be re-uploaded.
-
-`release.yml` does not create the GitHub release; the maintainer writes it.
+   PEP 740 attestation. It is the last irreversible step because a PyPI version cannot be
+   re-uploaded.
+5. **release-sbom**, **release-sign**, **github-release** — write an SPDX SBOM of the tagged source,
+   give the wheel, sdist, chart `.tgz` and SBOM each a keyless Sigstore bundle
+   (`<file>.sigstore.json`), verify every bundle, and attach them all to the GitHub Release for the
+   tag. If no Release exists, the job creates one with short notes that point at the CHANGELOG; a
+   draft the maintainer made first keeps its notes and gets the assets. These jobs change nothing
+   that cannot be redone, so they run after PyPI.
 
 ## Before tagging
 

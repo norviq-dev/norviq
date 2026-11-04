@@ -89,6 +89,10 @@ repository:
           Each is cosign-signed and carries an SPDX SBOM attestation.
       - uri: pkg:pypi/norviq
         comment: Python package, published with PyPI Trusted Publishing.
+      - uri: https://github.com/norviq-dev/norviq/releases
+        comment: |
+          GitHub Release per tag, carrying the wheel, sdist, chart .tgz and an SPDX SBOM of the
+          tagged source, each with a keyless Sigstore bundle (<file>.sigstore.json).
     attestations:
       - name: Image SBOM
         location: https://github.com/norviq-dev/norviq/blob/main/README.md#sbom
@@ -154,6 +158,12 @@ repository:
         rulesets: [default]
         comment: Report-only.
         integration: {adhoc: true, ci: true, release: false}
+        results: {}
+      - name: Dependabot
+        type: SCA
+        rulesets: [.github/dependabot.yml]
+        comment: Weekly version-update pull requests for Python, npm, Go, GitHub Actions and Docker base images.
+        integration: {adhoc: false, ci: true, release: false}
         results: {}
       - name: OpenSSF Scorecard
         type: other

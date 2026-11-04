@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Settings for the DCO GitHub App (https://github.com/apps/dco), read from the default branch.
+#
+# Individual remediation commits: the author of a commit that lacks a Signed-off-by can fix it with
+# a follow-up signed-off commit instead of rewriting history, as CONTRIBUTING.md describes.
+# Third-party remediation (signing off on someone else's behalf) stays off.
+allowRemediationCommits:
+  individual: true

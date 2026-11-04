@@ -3,8 +3,9 @@
 
 How Norviq is released, what is irreversible, and what a human has to do that CI cannot.
 
-A release is **one git tag**. Pushing `vX.Y.Z` builds the four images, publishes the Helm chart, and
-uploads the Python package. There is no other trigger — no branch push and no manual dispatch
+A release is **one git tag**. Pushing `vX.Y.Z` builds the five images, publishes the Helm chart,
+uploads the Python package, and attaches the signed wheel, sdist, chart and SBOM to the GitHub
+Release. There is no other trigger — no branch push and no manual dispatch
 publishes anything.
 
 ## What a tag does
@@ -17,9 +18,21 @@ push tag vX.Y.Z
         ├── chart     needs: images
         │             stamp Chart.yaml, resolve each image digest, pin images.<c>.digest,
         │             lint, render, package, push OCI, cosign sign, VERIFY the signature
-        └── pypi      needs: images + chart   (inline — see the note below)
-                      version gate -> build -> twine check -> wheel gate -> PyPI (Trusted Publishing)
+        ├── pypi      needs: images + chart   (inline — see the note below)
+        │             version gate -> build -> twine check -> wheel gate -> PyPI (Trusted Publishing)
+        ├── release-sbom     contents: read only
+        │                    SPDX SBOM of the tagged source
+        ├── release-sign     needs: chart + pypi + release-sbom   (id-token: write only)
+        │                    cosign sign-blob every asset -> VERIFY each bundle
+        └── github-release   needs: release-sign   (contents: write only, gh CLI, no checkout)
+                             attach wheel, sdist, chart .tgz, SBOM and their .sigstore.json bundles
 ```
+
+The GitHub Release jobs run after PyPI because nothing they do is irreversible: if one fails, re-run
+the failed jobs. If no GitHub Release exists for the tag, `github-release` creates it as a draft with
+short notes that point at CHANGELOG.md, attaches the assets, and then publishes it. If one already
+exists, it adds the assets and leaves the notes alone. A published Release with immutable releases on
+cannot take new assets, so in that case the job fails; see step 2b of "Cutting the release" below.
 
 `chart` depends on `images` so the chart can never be published referencing images that do not
 exist. That ordering is only expressible between jobs of one workflow, which is why `build.yml` is
@@ -188,6 +201,12 @@ CI cannot do these — they need an account login.
    (`repositoryID`) and push the ownership artifact per that file's header comments. Chart.yaml
    already carries the Artifact Hub annotations.
 
+3. **Immutable releases.** Know whether the repository has immutable releases turned on
+   (*Settings* → *General* → *Releases*). With it on, a Release published before `release.yml`
+   finishes cannot take the signed assets and `github-release` fails; step 2b of "Cutting the
+   release" says how to avoid that. TODO(San): confirm whether immutable releases is on for
+   norviq-dev/norviq.
+
 ## Cutting the release
 
 Set this once and every command below follows. It is a variable rather than a literal on purpose:
@@ -212,7 +231,7 @@ python3 scripts/check_release_versions.py "$VERSION"
 
 # 1c. security fixes: if the release contains any, its CHANGELOG entry says so and links each
 #     advisory, committed before step 2 like 1b. The GitHub Release notes for the tag must say the
-#     same and link the same advisories; check them once the Release exists.
+#     same and link the same advisories: write them as a draft Release in step 2b.
 
 # 2. exercise the ARTIFACT, not the source. Throwaway kind cluster: stamps the chart by digest
 #    exactly as release.yml does, then installs, uses (sidecar injection + a real allow and block),
@@ -228,6 +247,13 @@ python3 scripts/verify_release.py --upgrade-from none  # fresh install
 # or, both in parallel on a runner:
 gh workflow run verify-release.yml
 # every check must pass before you tag
+
+# 2b. GitHub Release: do NOT publish a vX.Y.Z Release by hand before release.yml finishes; its
+#     github-release job creates and publishes it with short notes pointing at CHANGELOG.md. To
+#     write the notes yourself (always, for a release with security fixes: see 1c), create the
+#     Release as a DRAFT for the tag; the job attaches the signed assets to the draft and leaves it
+#     for you to publish once the workflow is green. With immutable releases on, a Release
+#     published early cannot take the assets and the job fails.
 
 # 3. tag and push
 git tag -a "v$VERSION" -m "Norviq v$VERSION"
@@ -285,6 +311,13 @@ helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version "$VERSION"
 
 # package
 pip download "norviq==$VERSION" --no-deps -d /tmp/nrvq && unzip -l /tmp/nrvq/*.whl | grep opa-capabilities
+
+# GitHub Release assets (wheel, sdist, chart .tgz, SBOM), each with a Sigstore bundle
+gh release download "v$VERSION" -R norviq-dev/norviq -D "/tmp/nrvq-gh-$VERSION"
+( cd "/tmp/nrvq-gh-$VERSION" && for f in *; do case "$f" in *.sigstore.json) continue;; esac
+  cosign verify-blob "$f" --bundle "$f.sigstore.json" \
+    --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com || exit 1; done )
 ```
 
 ## The docs pin a version too

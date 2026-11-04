@@ -33,6 +33,10 @@ on:
   # this file must never be a second path to an upload.
   workflow_dispatch: {} # build + validate only — never publishes
 
+# Read-only by default. Jobs that need more ask for it in their own `permissions:` block.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest

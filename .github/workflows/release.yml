@@ -36,6 +36,13 @@
 #   cosign verify ghcr.io/norviq-dev/charts/norviq:<x.y.z> \
 #     --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# The GitHub Release for the tag also carries the wheel, the sdist, the chart .tgz and an SBOM, each
+# with a keyless Sigstore bundle (`<file>.sigstore.json`) from the same release.yml identity:
+#   cosign verify-blob norviq-<x.y.z>-py3-none-any.whl \
+#     --bundle norviq-<x.y.z>-py3-none-any.whl.sigstore.json \
+#     --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 name: Release
 
 on:
@@ -45,6 +52,10 @@ on:
   # `charts-rehearsal/` repo. Publishes nothing consumers can reach: no version-tagged images, no
   # chart in `charts/`, no PyPI upload. See the header note above for why it is not a no-op.
   workflow_dispatch: {}
+
+# Read-only by default. Jobs that need more ask for it in their own `permissions:` block.
+permissions:
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -231,13 +242,24 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
           echo "signature verifies against the documented cosign command"
 
+      # Tag only. The same .tgz that was pushed and signed above, handed to `release-sign` below.
+      - name: Keep the packaged chart for the GitHub Release
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-chart
+          path: dist/norviq-${{ env.VERSION }}.tgz
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Rehearsal summary
         if: needs.version.outputs.publish != 'true'
         run: |
           echo "::notice::Rehearsal complete — versions reconciled, chart version-stamped, images \
           digest-pinned from -latest, linted, rendered, packaged, the .tgz re-rendered, and the \
           chart PUSHED AND SIGNED for real into ${CHART_REPO_REHEARSAL} (signature verified). \
-          Not exercised (tag-only): the image build/scan/sign job, and the PyPI upload. Nothing \
+          Not exercised (tag-only): the image build/scan/sign job, the PyPI upload, and the \
+          GitHub Release jobs. Nothing \
           reachable by consumers was published. Push a v*.*.* tag to run those for real."
 
   # ---------------------------------------------------------------------------------------------
@@ -308,5 +330,219 @@ jobs:
       - name: The wheel must contain the runtime assets, not just .py files
         run: python3 scripts/check_wheel_contents.py dist
 
+      # Before the upload, so a failure here costs nothing. These are the exact files PyPI receives;
+      # `release-sign` and `github-release` below sign them and attach them to the GitHub Release.
+      - name: Keep the distribution for the GitHub Release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+
+  # ---------------------------------------------------------------------------------------------
+  # After PyPI, and only on a tag: attach the released files to the GitHub Release for the tag.
+  #
+  # The chart and the images are signed in GHCR, and PyPI holds the PEP 740 attestation for the
+  # wheel. A GitHub Release page carried only the source archives GitHub generates, so someone who
+  # downloads from the Release (and tools such as OpenSSF Scorecard that read its assets) found
+  # nothing signed there. These three jobs add the wheel and sdist PyPI received, the chart .tgz that
+  # was pushed to GHCR, and an SPDX SBOM of the tagged source, each with a Sigstore bundle.
+  #
+  # Same trust root as everything else in this file: keyless cosign, Fulcio certificate for the
+  # release.yml workflow identity, Rekor entry. No key, no new secret. Each bundle is verified with
+  # the command the header gives consumers before anything is uploaded.
+  #
+  # Split three ways so each permission sits with the least code:
+  #   release-sbom     contents: read only. The only job that checks out and scans the source.
+  #   release-sign     id-token: write only. Downloads, signs, verifies. No checkout, no repo token.
+  #   github-release   contents: write only. Downloads the signed set and runs the runner's gh CLI.
+  #                    No checkout and no third-party action; GH_TOKEN is set on the one step that
+  #                    calls gh, not on the job.
+  #
+  # Runs after `pypi` because it changes nothing that cannot be redone: if it fails, re-run the
+  # failed jobs. Do not publish the Release by hand first: see step 2b (GitHub Release) of "Cutting
+  # the release" in docs/engineering/release-runbook.md.
+  # ---------------------------------------------------------------------------------------------
+  release-sbom:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # The lockfiles it reads are uv.lock, ui/package-lock.json and webhook/go.sum, among others.
+      - name: Generate SBOM of the tagged source (SPDX)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: spdx-json
+          output: ${{ runner.temp }}/norviq-${{ needs.version.outputs.version }}.sbom.spdx.json
+
+      - name: Keep the SBOM for the GitHub Release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-sbom
+          path: ${{ runner.temp }}/norviq-${{ needs.version.outputs.version }}.sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true      # a re-run of this job replaces the earlier attempt's file
+
+  release-sign:
+    needs: [version, chart, pypi, release-sbom]
+    if: >-
+      ${{ !cancelled()
+          && needs.version.outputs.publish == 'true'
+          && needs.chart.result == 'success'
+          && needs.pypi.result == 'success'
+          && needs.release-sbom.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write        # keyless cosign signing via the workflow's OIDC identity
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      # Same-run download: authenticates with the runner's artifact token, not the repo token.
+      - name: Collect the chart, the distribution and the SBOM from the earlier jobs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+
+      - name: Check the asset set
+        working-directory: assets
+        run: |
+          set -euo pipefail
+          for f in "norviq-${VERSION}.tgz" "norviq-${VERSION}.tar.gz" "norviq-${VERSION}.sbom.spdx.json"; do
+            test -s "$f" || { echo "::error::missing release asset: $f"; exit 1; }
+          done
+          ls norviq-"${VERSION}"-*.whl > /dev/null || { echo "::error::missing release asset: wheel"; exit 1; }
+          ls -l
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Retries for the same reason as build.yml: keyless signing calls the OIDC token endpoint and
+      # Sigstore on every attempt, and those fail transiently. Still fail-closed after 5 attempts.
+      - name: Sign every asset (keyless, Sigstore bundle)
+        env:
+          COSIGN_YES: "true"
+        working-directory: assets
+        run: |
+          set -euo pipefail
+          sign() {
+            for attempt in 1 2 3 4 5; do
+              if cosign sign-blob --bundle "$1.sigstore.json" "$1"; then return 0; fi
+              if [ "$attempt" -lt 5 ]; then
+                delay=$(( attempt * 15 ))
+                echo "::warning::cosign sign-blob $1 attempt ${attempt}/5 failed; retrying in ${delay}s"
+                sleep "${delay}"
+              fi
+            done
+            echo "::error::cosign sign-blob failed for $1 after 5 attempts"
+            return 1
+          }
+          for f in *; do sign "$f"; done
+          ls -l
+
+      # Verify with the command the header hands to users. Also check that each bundle is a Sigstore
+      # bundle (the format `.sigstore.json` names), not cosign's older bundle layout.
+      - name: Verify every bundle we just produced
+        working-directory: assets
+        run: |
+          set -euo pipefail
+          for b in *.sigstore.json; do
+            f="${b%.sigstore.json}"
+            python3 -c 'import json,sys; m=json.load(open(sys.argv[1])).get("mediaType",""); sys.exit(0 if m.startswith("application/vnd.dev.sigstore.bundle") else "not a Sigstore bundle: "+sys.argv[1])' "$b"
+            cosign verify-blob "$f" --bundle "$b" \
+              --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          done
+          echo "every release asset verifies against the documented cosign command"
+
+      - name: Keep the signed set for the GitHub Release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-release-assets
+          path: assets/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true      # a re-run of this job replaces the earlier attempt's set
+
+  github-release:
+    needs: [version, release-sign]
+    if: ${{ !cancelled() && needs.release-sign.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write        # create the GitHub Release for the tag and upload its assets
+    steps:
+      # First-party action, same-run download: it is given no token input and uses the runner's
+      # artifact token. The contents: write token reaches only the gh step below.
+      - name: Collect the signed assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-release-assets
+          path: assets
+
+      # Uses the gh CLI that ships on the runner, so no extra action.
+      #
+      # Immutable releases: once a Release is published with that setting on, assets can no longer be
+      # added. So a new Release is created as a DRAFT, the assets go on, and only then is it
+      # published. If a Release already exists: a draft gets the assets and stays a draft (whoever
+      # made it publishes it); a published, mutable one gets the assets; a published, immutable one
+      # cannot take them, so the job fails with an explanation instead of a bare API error. Existing
+      # notes are left alone in every case.
+      - name: Attach the signed assets to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -l assets
+          # Only a real "release not found" takes the create path. Any other failure of the view
+          # (API or auth error, a gh too old to know a field) stops the job with gh's own message.
+          view_err="${RUNNER_TEMP}/release-view.err"
+          if state="$(gh release view "$TAG" --json isDraft,isImmutable --jq '"\(.isDraft) \(.isImmutable)"' 2>"$view_err")"; then
+            read -r is_draft is_immutable <<< "$state"
+            if [ "$is_draft" != "true" ] && [ "$is_immutable" = "true" ]; then
+              echo "::error::The GitHub Release for ${TAG} was already published and is immutable, so the signed assets cannot be added. See step 2b (GitHub Release) of 'Cutting the release' in docs/engineering/release-runbook.md."
+              exit 1
+            fi
+            gh release upload "$TAG" assets/* --clobber
+            if [ "$is_draft" = "true" ]; then
+              echo "::notice::The Release for ${TAG} is a draft made before this run. Its assets are attached; publish it by hand."
+            fi
+          elif grep -qi 'release not found' "$view_err"; then
+            cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          Norviq ${VERSION}. Changes are listed in [CHANGELOG.md](https://github.com/${GH_REPO}/blob/${TAG}/CHANGELOG.md).
+
+          Each file this workflow attached below has a keyless Sigstore bundle (\`<file>.sigstore.json\`). Verify one with:
+
+          \`\`\`
+          cosign verify-blob <file> --bundle <file>.sigstore.json \\
+            --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          \`\`\`
+          EOF
+            gh release create "$TAG" assets/* --draft --verify-tag --title "Norviq ${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
+            gh release edit "$TAG" --draft=false
+          else
+            echo "::error::Could not read the GitHub Release for ${TAG}; gh said:"
+            cat "$view_err"
+            exit 1
+          fi

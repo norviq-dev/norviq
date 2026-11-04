@@ -37,6 +37,10 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+# Read-only by default. Jobs that need more ask for it in their own `permissions:` block.
+permissions:
+  contents: read
+
 concurrency:
   # A newer push to the same PR supersedes the old run; tests are pure so cancelling is safe.
   #
