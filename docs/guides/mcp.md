@@ -319,14 +319,16 @@ guard on tool results charges the same folded length against its 1 MiB budget. O
 `_DEFINITION_SCAN_BUDGET`); one free-text message gets 196 Ki units, which reads 64 KiB of prose
 (`scanner.py` `_MAX_TOTAL_SCAN_CHARS`). The structure walk stops at 4096 strings / 4096 members per
 node / 32 levels deep / 65536 nodes per walk and per discovery response, well above real schemas (a
-600-value enum, a dozen nested objects). Measured on the reference host, time spent in the scanner
+600-value enum, a dozen nested objects). Timings vary by host: the figures below are from one
+reference host, a slower host takes proportionally longer, and only the cost units are the same
+everywhere. Measured on the reference host, time spent in the scanner
 for an 8 MiB `tools/list`: long prose 95 ms, tiny prose strings 145 ms, identifiers 130 ms, empty
 strings 85 ms, numbers 30 ms, U+FDFA prose 60 ms, U+FDFA identifiers 30 ms, camelCase payload
 identifiers 140 ms, verb-dense prose ("send post upload … to as the …") 165 ms, a run of newlines
 100 ms, a run of `#` 70 ms; the whole gate, including decoding, pinning and rewriting, 120–440 ms.
 A 640 KB listing of `#` or 1.3 MB of newlines takes 80–115 ms through the gate, and a 1 MB tool result
 of either 150–260 ms through the result guard. A realistic 1200-entry resource catalogue (220 KB)
-costs 760 Ki units and ~165 ms.
+costs 763,560 units (~746 Ki) and ~165 ms.
 
 Anything the budget or a walk bound did not let the scanner read in full is **withheld, never
 sanitised or passed**: a tool definition or a `resources/`/`prompts/list` entry is removed from the
@@ -354,6 +356,20 @@ name, its severity and the finding names below, and a call to the tool is refuse
 
 Raising the thresholds applies to every server behind that proxy, so it lowers protection for all of
 them; prefer asking the server author to rephrase.
+
+#### Known limits of the listing budget
+
+- **About 1235 entries per listing page.** The shared budget covers about 1235 ordinary catalogue
+  entries of ~180 characters each (a uri, a name and a three-sentence description) in one
+  `resources/list`, `resources/templates/list` or `prompts/list` page, and fewer when entries are
+  longer. Entries past the budget are **withheld, never forwarded unscanned**: the client sees a
+  shorter listing with `_meta.norviq.withheld_total`, and the operator sees
+  `nrvq.mcp.gate_a.item_list_flagged` (`NRVQ-MCP-5067`) with `mcp_a_scan_budget_exhausted` and the
+  withheld identifiers. A `tools/list` page is charged against the same budget; a tool past it is
+  withheld the same way and logged per tool (`NRVQ-MCP-5031`).
+- **Pagination keeps a server within it.** The budget is per response, so a server that paginates
+  (`nextCursor`) with pages under the ceiling has every page scanned and forwarded in full. A server
+  that returns a larger catalogue in a single page loses its tail; page it, or split it across servers.
 
 #### Known detection limits
 

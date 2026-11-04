@@ -323,6 +323,11 @@ freeze or cap lifted since: the restart adds what Postgres holds and removes not
 with `norviq agent reset-trust <id> --score 1.0` (which clears a cap too; `--score <cap>` lifts the
 freeze and keeps that cap). Details in docs/trust-score-design.md §5.
 
+One MCP listing page is scanned within a fixed budget: about 1235 ordinary entries of ~180 characters
+each. Entries past it are withheld, never forwarded unscanned, and logged as `NRVQ-MCP-5067`
+(`mcp_a_scan_budget_exhausted`); a server that paginates its listings stays within it per page. The
+MCP guide (§3.1) states the limit.
+
 An admin trust change (`PUT /api/v1/agents/{spiffe_id}/trust`) that fails part-way answers `503` saying
 which state it left: a tightening may be live without being persisted, a loosening the registry took may not
 be live yet, and a tightening the store did not confirm is persisted but NOT confirmed live (the store may then enforce

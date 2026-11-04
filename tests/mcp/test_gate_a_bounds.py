@@ -283,15 +283,79 @@ async def test_a_padded_first_entry_cannot_walk_a_payload_through_the_second():
     ]
 
 
-async def test_a_realistic_large_catalogue_is_not_withheld():
+def _ordinary_catalogue(entries: int) -> list[dict]:
+    """Ordinary files: a uri, a name and a three-sentence description, ~180 characters of JSON each."""
+    return [{"uri": f"file:///docs/{i}.md", "name": f"doc{i}",
+             "description": "Quarterly figures for one department. " * 3} for i in range(entries)]
+
+
+def _count_catalogue_scans(monkeypatch) -> list:
+    """The report of every catalogue-entry scan the gate ran, recorded around the real scanner."""
+    import norviq.mcp.firewall as firewall_module
+
+    reports: list = []
+    real_scan = firewall_module.scan_catalog_item
+
+    def counting_scan(*args, **kwargs):
+        report = real_scan(*args, **kwargs)
+        reports.append(report)
+        return report
+
+    monkeypatch.setattr(firewall_module, "scan_catalog_item", counting_scan)
+    return reports
+
+
+async def test_a_realistic_large_catalogue_is_not_withheld(monkeypatch):
     """The counter-test for the bound's SIZE. Withholding is the fail-closed action, which makes an
     under-sized budget an outage rather than a saving: 1200 ordinary files are 220 KB of uri, name
-    and description, and the previous 64 KiB budget would have cut the catalogue off partway."""
-    items = [{"uri": f"file:///docs/{i}.md", "name": f"doc{i}",
-              "description": "Quarterly figures for one department. " * 3} for i in range(1200)]
-    fw, result, elapsed = await _listing("resources/list", "resources", items)
+    and description, and the previous 64 KiB budget would have cut the catalogue off partway.
+
+    Asserted on the units the scan SPENT, like the tools/list and bare-string tests above. This was a
+    wall-clock `elapsed < 0.300` and failed about half the runs on a 4-vCPU 2.1 GHz host where the
+    listing costs ~290 ms of CPU (CPU == wall: real work, not scheduling) while the code was correct:
+    the ~165 ms the MCP guide quotes was measured on a faster host. Whether the listing fits is decided
+    by the cost units alone, which are exact on every host. The time check stays as a coarse guard
+    against the denial of service the budget exists for (1.7-2.1 s for one listing before it), at a
+    bound well above any host this suite runs on."""
+    reports = _count_catalogue_scans(monkeypatch)
+    fw, result, elapsed = await _listing("resources/list", "resources", _ordinary_catalogue(1200))
     assert result.forward is not None and result.note == "", "an ordinary catalogue pays nothing"
-    assert elapsed < 0.300
+    assert len(_kept(result, "resources")) == 1200
+    assert len(reports) == 1200, "every entry must still go through the scanner"
+    unread = [i for i, report in enumerate(reports) if report.budget_exhausted]
+    spent = sum(report.scanned_chars for report in reports)
+    assert not unread and spent < _LIST_SCAN_BUDGET, (
+        f"1200 ordinary entries cost {spent} units against a listing budget of {_LIST_SCAN_BUDGET}; "
+        f"{len(unread)} entries did not fit")
+    assert elapsed < 1.0, f"one ordinary listing took {elapsed * 1000:.0f} ms"
+
+
+async def test_the_documented_catalogue_ceiling_holds():
+    """Pins the ceiling the MCP guide states (section 3.1): on the shipped budget an ordinary listing
+    page of 1235 such entries is forwarded whole, and past it the tail is WITHHELD, never forwarded
+    unscanned, and logged as `NRVQ-MCP-5067` with `mcp_a_scan_budget_exhausted`. A change to the
+    budget or to the scanner's cost per entry moves the ceiling, and must move the documentation with
+    it: this test is what makes that change visible."""
+    from structlog.testing import capture_logs
+
+    _, result, _ = await _listing("resources/list", "resources", _ordinary_catalogue(1235))
+    assert result.note == "", "an ordinary catalogue at the documented ceiling pays nothing"
+    assert len(_kept(result, "resources")) == 1235
+
+    items = _ordinary_catalogue(1300)
+    with capture_logs() as logs:
+        _, result, _ = await _listing("resources/list", "resources", items)
+    assert _kept(result, "resources") == items[:1235]
+    meta = _norviq(result)
+    assert meta["withheld_total"] == 65
+    assert {f["rule"] for f in meta["findings"]} == {"mcp_a_scan_budget_exhausted"}
+    # The operator's log names the withheld entries by uri (the client's annotation names them by
+    # position), both capped at `_MAX_LIST_ANNOTATIONS` with the total kept.
+    from norviq.mcp.firewall import _MAX_LIST_ANNOTATIONS
+    flagged = [e for e in logs if e.get("code") == "NRVQ-MCP-5067"]
+    assert len(flagged) == 1 and flagged[0]["withheld_total"] == 65
+    assert flagged[0]["withheld"] == [f"file:///docs/{i}.md" for i in range(1235, 1300)][:_MAX_LIST_ANNOTATIONS]
+    assert set(flagged[0]["findings"]) == {"mcp_a_scan_budget_exhausted"}
 
 
 # ── the charset rule is scoped by how the entry is ADDRESSED ────────────────────────────────────
