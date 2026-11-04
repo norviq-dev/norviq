@@ -3,6 +3,11 @@ Copyright 2026 Norviq Contributors
 
 This product is licensed under the Apache License, Version 2.0 — see LICENSE.
 
+Apache License, Version 2.0, Section 4(d) requires a NOTICE file that a dependency carries to be
+reproduced when that dependency is redistributed. The sections below do that for the Python runtime
+closure (api and engine images), the console UI bundle (ui image) and the admission webhook binary
+(webhook image).
+
 The shipped Python distribution (the `norviq[spiffe]` runtime closure the api and engine images
 install: 58 packages, measured from installed metadata) includes the following packages, each of
 which carries its own NOTICE file that the Apache License, Version 2.0, Section 4(d) requires to be
@@ -70,3 +75,177 @@ yarl
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+
+The console UI image serves a JavaScript bundle built from ui/. Of the non-dev packages in
+ui/package-lock.json, two are under Apache-2.0: echarts 6.1.0, whose NOTICE is reproduced in full
+below (trailing whitespace removed), and oidc-client-ts 3.5.0, which ships no NOTICE file. dompurify
+3.4.17 is offered under MPL-2.0 or Apache-2.0 and ships no NOTICE file.
+
+==============================================================================
+echarts
+==============================================================================
+
+Apache ECharts
+Copyright 2017-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (https://www.apache.org/).
+
+
+The admission webhook image is a Go binary. Of the modules linked into it (`go list -deps` in
+webhook/), the five below carry a NOTICE file. They are reproduced in full, with trailing whitespace
+removed.
+
+==============================================================================
+github.com/go-openapi/jsonpointer v1.0.0
+==============================================================================
+
+Copyright 2015-2025 go-swagger maintainers
+
+// SPDX-FileCopyrightText: Copyright 2015-2025 go-swagger maintainers
+// SPDX-License-Identifier: Apache-2.0
+
+This software library, github.com/go-openapi/jsonpointer, includes software developed
+by the go-swagger and go-openapi maintainers ("go-swagger maintainers").
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this software except in compliance with the License.
+
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0.
+
+This software is copied from, derived from, and inspired by other original software products.
+It ships with copies of other software which license terms are recalled below.
+
+The original software was authored on 25-02-2013 by sigu-399 (https://github.com/sigu-399, sigu.399@gmail.com).
+
+github.com/sigu-399/jsonpointer
+===========================
+
+// SPDX-FileCopyrightText: Copyright 2013 sigu-399 ( https://github.com/sigu-399 )
+// SPDX-License-Identifier: Apache-2.0
+
+Copyright 2013 sigu-399 ( https://github.com/sigu-399 )
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+==============================================================================
+github.com/go-openapi/jsonreference v1.0.0
+==============================================================================
+
+Copyright 2015-2025 go-swagger maintainers
+
+// SPDX-FileCopyrightText: Copyright 2015-2025 go-swagger maintainers
+// SPDX-License-Identifier: Apache-2.0
+
+This software library, github.com/go-openapi/jsonreference, includes software developed
+by the go-swagger and go-openapi maintainers ("go-swagger maintainers").
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this software except in compliance with the License.
+
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0.
+
+This software is copied from, derived from, and inspired by other original software products.
+It ships with copies of other software which license terms are recalled below.
+
+The original software was authored on 25-02-2013 by sigu-399 (https://github.com/sigu-399, sigu.399@gmail.com).
+
+github.com/sigh-399/jsonreference
+===========================
+
+// SPDX-FileCopyrightText: Copyright 2013 sigu-399 ( https://github.com/sigu-399 )
+// SPDX-License-Identifier: Apache-2.0
+
+Copyright 2013 sigu-399 ( https://github.com/sigu-399 )
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+==============================================================================
+go.yaml.in/yaml/v2 v2.4.4
+==============================================================================
+
+Copyright 2011-2016 Canonical Ltd.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+==============================================================================
+go.yaml.in/yaml/v3 v3.0.4
+==============================================================================
+
+Copyright 2011-2016 Canonical Ltd.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+==============================================================================
+sigs.k8s.io/randfill v1.0.0
+==============================================================================
+
+When donating the randfill project to the CNCF, we could not reach all the
+gofuzz contributors to sign the CNCF CLA. As such, according to the CNCF rules
+to donate a repository, we must add a NOTICE referencing section 7 of the CLA
+with a list of developers who could not be reached.
+
+`7. Should You wish to submit work that is not Your original creation, You may
+submit it to the Foundation separately from any Contribution, identifying the
+complete details of its source and of any license or other restriction
+(including, but not limited to, related patents, trademarks, and license
+agreements) of which you are personally aware, and conspicuously marking the
+work as "Submitted on behalf of a third-party: [named here]".`
+
+Submitted on behalf of a third-party: @dnephin (Daniel Nephin)
+Submitted on behalf of a third-party: @AlekSi (Alexey Palazhchenko)
+Submitted on behalf of a third-party: @bbigras (Bruno Bigras)
+Submitted on behalf of a third-party: @samirkut (Samir)
+Submitted on behalf of a third-party: @posener (Eyal Posener)
+Submitted on behalf of a third-party: @Ashikpaul (Ashik Paul)
+Submitted on behalf of a third-party: @kwongtailau (Kwongtai)
+Submitted on behalf of a third-party: @ericcornelissen (Eric Cornelissen)
+Submitted on behalf of a third-party: @eclipseo (Robert-André Mauchin)
+Submitted on behalf of a third-party: @yanzhoupan (Andrew Pan)
+Submitted on behalf of a third-party: @STRRL (Zhiqiang ZHOU)
+Submitted on behalf of a third-party: @disconnect3d (Disconnect3d)

@@ -5,29 +5,80 @@ Norviq and its users safe.
 
 ## Reporting a vulnerability
 
-**Please do not open a public GitHub issue for security reports.**
+**Please do not open a public GitHub issue, discussion or pull request for a security report.**
 
 Report privately through either channel:
 
-- **GitHub Private Vulnerability Reporting** — on this repository, go to the **Security** tab →
-  **Report a vulnerability**. This is the preferred channel.
-- **Email** — `security@norviq.dev`. Encrypt with our PGP key if the report is sensitive (key available
-  on request).
+- **GitHub private vulnerability reporting (preferred)** — use the repository's **Security** tab →
+  **Report a vulnerability**, or open <https://github.com/norviq-dev/norviq/security/advisories/new>
+  directly. A report made this way, the discussion and the fix stay private until the advisory is
+  published.
+- **Email** — `security@norviq.dev`. Use this channel if the form is not available to you, or if you
+  prefer email.
 
-Please include, where possible:
+If you have had no acknowledgement within 3 business days, send a short note through the other channel.
+
+### What to include
 
 - A description of the issue and its impact.
-- The affected component (engine, API, webhook, console UI, Helm chart, SDK) and version / commit.
+- The affected component (engine, API, webhook, console UI, Helm chart, SDK, MCP proxy) and version /
+  commit.
 - Steps to reproduce, or a proof-of-concept.
-- Any suggested remediation.
+- The configuration that matters (Helm values you changed, `config.spiffeMode`, whether sidecar
+  injection is enabled), with secrets removed.
+- Whether you plan to publish your findings, and when.
+- Any suggested remediation, and how you would like to be credited.
+
+## Security response team
+
+Reports go to the maintainer listed in [MAINTAINERS.md](MAINTAINERS.md). Norviq has one maintainer, so
+that person is the whole response team: there is no separate security team.
 
 ## What to expect
 
 - **Acknowledgement** within **3 business days**.
-- An initial assessment and severity rating within **10 business days**.
-- We practice **coordinated disclosure**: we'll agree on a disclosure timeline with you, fix the issue,
-  and credit you in the advisory unless you prefer to remain anonymous.
-- Please give us a reasonable window to release a fix before any public disclosure.
+- An initial assessment and severity rating (CVSS) within **10 business days**. If we conclude the
+  report is not a vulnerability, we say why.
+- Updates as the fix progresses, and a fix date agreed with you before anything is published.
+- Credit in the advisory, unless you prefer to remain anonymous.
+
+## Disclosure process
+
+We practice coordinated disclosure:
+
+1. **Triage.** We confirm the issue, work out which versions are affected and rate its severity.
+2. **Fix.** The fix is developed and reviewed privately.
+3. **CVE.** We request a CVE id through the GitHub security advisory for the report.
+4. **Release.** The fix ships in a new patch release of the supported line (see
+   [Supported versions](#supported-versions)). The release notes and [CHANGELOG.md](CHANGELOG.md) say that
+   the release contains security fixes and link the advisory.
+5. **Advisory.** The GitHub security advisory is published when the release is out.
+
+### Embargo
+
+- Details stay private until the fixed release is published, for **at most 90 days** from the report.
+  If a fix needs longer, we agree an extension with the reporter before the 90 days run out.
+- If the issue is already public or is being exploited, we may release and disclose sooner, and we
+  tell the reporter first.
+- We ask reporters to keep the details private for the same period.
+- There is no pre-disclosure list: no user or distributor is told before the advisory is published.
+
+## Security bulletins
+
+Security advisories are published at <https://github.com/norviq-dev/norviq/security/advisories>. To be
+told about a security release, watch the repository on GitHub (**Watch** → **Custom** → **Releases**):
+each release's notes say whether it contains security fixes.
+
+## Supported versions
+
+Norviq is pre-1.0. Security fixes land on `main` and ship in the next release of the latest minor line.
+Earlier releases are not patched: upgrade to the latest release to get a fix.
+
+| Version | Supported |
+|---|---|
+| 0.2.x, latest patch release | Yes |
+| Earlier 0.2.x patch releases | No, upgrade to the latest 0.2.x |
+| 0.1.x and earlier | No |
 
 ## Scope
 
@@ -39,6 +90,7 @@ In scope:
 - The console UI (`ui/`).
 - The Helm chart and default configuration (`helm/`).
 - The agent SDK (`norviq/sdk`).
+- The MCP proxy (`norviq/mcp`).
 
 Out of scope (report to the upstream project instead):
 
@@ -47,11 +99,6 @@ Out of scope (report to the upstream project instead):
 - Findings that require a pre-existing cluster-admin compromise.
 - Denial of service from unbounded self-inflicted configuration.
 
-## Supported versions
-
-Norviq is pre-1.0. Security fixes are released against the latest `main`. Pin to a released tag and
-watch releases for security updates.
-
 ## Hardening posture
 
 For operators, the current threat-model notes and operator responsibilities are documented in
@@ -59,6 +106,33 @@ For operators, the current threat-model notes and operator responsibilities are 
 [`docs/engineering/security-baseline.md`](docs/engineering/security-baseline.md). In particular, review
 the production checklist (`api.secretKey`, `config.requireStrongSecret`, TLS, image provenance, and the
 sidecar-injection trust model) in [`docs/configuration.md`](docs/configuration.md) before deploying.
+
+## Dependency management
+
+How dependencies are taken in:
+
+- **Python.** Declared in `pyproject.toml` and locked in `uv.lock`. The api and engine images install
+  `.[spiffe]` with pip, which does not read `uv.lock`, so a version floor a shipped package needs is
+  declared in `[project] dependencies` (see the `cryptography` note below).
+- **Console UI.** Declared in `ui/package.json` and locked in `ui/package-lock.json`; the image build
+  runs `npm ci`.
+- **Admission webhook.** `webhook/go.mod` and `webhook/go.sum`.
+- **Container images.** The released chart pins every image by digest, including third-party ones
+  (`global.thirdPartyImageDigests` in `helm/norviq/values.yaml`); `scripts/check_image_pins.py` fails
+  the release otherwise.
+- **GitHub Actions.** Third-party actions are pinned to a commit SHA.
+
+How they are checked and updated:
+
+- The FOSSA gate (`.github/workflows/fossa.yml`) fails on a known vulnerability in the Python, Node or
+  Go graph, except the exceptions listed below. `pip-audit` and `npm audit` run in
+  `.github/workflows/security.yml`, report-only for now.
+- Each image is scanned by Trivy after it is built (`.github/workflows/build.yml`). A fixable HIGH or
+  CRITICAL finding that is not in `.trivyignore.yaml` fails the build before the image is signed or
+  tagged.
+- No automated dependency-update tool is configured. Dependencies are bumped by hand. A vulnerable
+  dependency with a fixed release is bumped, not accepted; one that cannot be bumped is listed below
+  with the reason, and the list is reviewed each release.
 
 ## Accepted dependency exceptions
 

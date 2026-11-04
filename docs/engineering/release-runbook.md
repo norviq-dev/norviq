@@ -203,6 +203,17 @@ export VERSION=0.1.3          # the version you are cutting
 # 1. versions agree (this is also gate 0 in CI, but fail locally first)
 python3 scripts/check_release_versions.py "$VERSION"
 
+# 1b. third-party notices: ui/THIRD_PARTY_NOTICES.txt must match ui/package-lock.json (see
+#     "Third-party notices" below). If the check fails, or the file does not exist yet, run the
+#     script without --check, review the diff and commit the file NOW: every commit this step causes
+#     must come before step 2, so that the SHA step 2 verifies is the SHA you tag. If you commit
+#     anything after step 2, run step 2 again on the new SHA.
+(cd ui && npm ci) && python3 scripts/ui_third_party_notices.py --check
+
+# 1c. security fixes: if the release contains any, its CHANGELOG entry says so and links each
+#     advisory, committed before step 2 like 1b. The GitHub Release notes for the tag must say the
+#     same and link the same advisories; check them once the Release exists.
+
 # 2. exercise the ARTIFACT, not the source. Throwaway kind cluster: stamps the chart by digest
 #    exactly as release.yml does, then installs, uses (sidecar injection + a real allow and block),
 #    and uninstalls it, checking nothing is stranded.
@@ -236,6 +247,18 @@ number, so the bump is a mechanical follow-the-errors loop rather than a search 
 It runs as gate 0 of the release *and* as a unit test on every PR, so drift is caught by the PR that
 introduces it — not by a tag you cannot take back.
 
+### Third-party notices
+
+Step 1b above checks the console's notices file; nothing in CI does this yet.
+`scripts/ui_third_party_notices.py` builds `ui/THIRD_PARTY_NOTICES.txt` from `ui/package-lock.json`
+and the packages `npm ci` installed: the licence, NOTICE and third-party-notice files of every non-dev
+package. With `--check` it exits 1 when the file is missing or differs from what it would write.
+
+`NOTICE` is maintained by hand, also before you tag. If `uv.lock`, `ui/package-lock.json` or
+`webhook/go.mod` changed since the last release, re-check which shipped dependencies carry a NOTICE
+file (the Python runtime closure the api and engine images install, the non-dev console packages, and
+the modules `go list -deps` links into the webhook) and update the matching section of `NOTICE`.
+
 ## Verify after publishing
 
 ```bash
@@ -249,6 +272,11 @@ cosign verify "ghcr.io/norviq-dev/charts/norviq:$VERSION" \
 cosign verify "ghcr.io/norviq-dev/norviq-engine:api-$VERSION" \
   --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/build.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# each image's SPDX SBOM is a cosign attestation on its digest, signed by the same identity
+cosign verify-attestation --type spdxjson "ghcr.io/norviq-dev/norviq-engine:api-$VERSION" \
+  --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/build.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
 
 # the released chart must pin digests, never floating tags
 helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version "$VERSION" \

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/norviq-dev/norviq/security/policy
+    about: Do not open a public issue. Report privately as described in SECURITY.md.
+  - name: Ask a question
+    url: https://github.com/norviq-dev/norviq/discussions
+    about: Questions, ideas and show-and-tell go to GitHub Discussions.

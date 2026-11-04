@@ -244,9 +244,9 @@ reports 47 standard-library advisories, 29 of them reachable from the webhook. A
 webhook from a cached `golang:1.26-alpine` older than 1.26.10 needs `--pull`. `golang.org/x/net` moves
 to 0.62.0 (GO-2026-6860, GO-2026-6866).
 
-**Security.** Fixes in the engine's caller authentication, logout token revocation, the webhook's
-sidecar image trust and two chart authentication switches that could not be turned off; details in the advisories published with this release. Dependency floors for
-pyjwt, aiohttp, urllib3, anyio, multidict, certifi and opentelemetry; DOMPurify 3.4.17 in the console.
+**Security.** 0.2.6 contains security fixes; their advisories publish with the release.
+Dependency floors for pyjwt, aiohttp, urllib3, anyio, multidict, certifi and opentelemetry;
+DOMPurify 3.4.17 in the console.
 Image builds now move `-latest` and version tags only after the scan and signature pass. The FOSSA
 dependency gate grades Python again: from 2026-08-19 `.fossa.yml` named the Python target `type: pip`,
 which is not a fossa-cli type, so no Python package was scanned and the gate passed on the console and
@@ -325,12 +325,21 @@ instruction word, and `<system>` as an XML tag-name example (graded high: rephra
 `mcp_scan_strip_severity` and `mcp_scan_sanitize_severity` to `critical` for that deployment). Known
 detection limits: text split exactly between two words across fields with no whitespace, a
 directive wrapped onto a second line within one sentence, the reduced rule set for strings without
-whitespace, and paraphrase. The MCP guide lists both. Gate A's scanning stays fast on
-unusual input. Two security booleans no longer fall back to off when an
+whitespace, and paraphrase. The MCP guide lists both.
+Two security booleans no longer fall back to off when an
 overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way
 before its ERROR, `NRVQ-API-7138`.
+
+**Project.** SECURITY.md names the response team and sets out the disclosure process, a 90-day
+embargo, the security bulletin channel, a supported-versions table and how dependencies are managed.
+New: issue and pull request templates (the pull request template asks for a DCO sign-off), an OpenSSF
+Security Insights file (`security-insights.yml`) and a CLOMonitor file (`.clomonitor.yml`). The README
+gains Scope and SBOM sections, a note on community channels and the Artifact Hub badge. NOTICE now
+reproduces the NOTICE files of the console's and the webhook's Apache-2.0 dependencies, and
+`scripts/ui_third_party_notices.py` collects the licence files of the console's JavaScript
+dependencies.
 
 **Known issues.** Agent freezes, trust caps and namespace posture are persisted in Postgres but
 enforced from the store, and the store copy is written only by the admin change and once when an API
