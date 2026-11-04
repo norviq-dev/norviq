@@ -322,8 +322,16 @@ Go for the admission webhook. See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
   items each carry a file path, a reproduction and a definition of done.
 - **[Discussions](https://github.com/norviq-dev/norviq/discussions)** — show us your policy, say which
   framework you run, argue about what comes after MCP.
-- [CONTRIBUTING.md](CONTRIBUTING.md) · [GOVERNANCE.md](GOVERNANCE.md) · [MAINTAINERS.md](MAINTAINERS.md) · [ROADMAP.md](ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) · [GOVERNANCE.md](GOVERNANCE.md) · [MAINTAINERS.md](MAINTAINERS.md) · [REVIEWING.md](REVIEWING.md) · [RELEASES.md](RELEASES.md) · [ROADMAP.md](ROADMAP.md) · [SECURITY.md](SECURITY.md) · [CHANGELOG.md](CHANGELOG.md)
 - **Running it somewhere real?** Add yourself to [ADOPTERS.md](ADOPTERS.md).
+
+### Code of Conduct
+
+Everyone taking part in Norviq follows the
+[CNCF Code of Conduct](https://github.com/cncf/foundation/blob/main/code-of-conduct.md), adopted by
+reference in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) (the CNCF project-template form). Report a
+violation to `conduct@norviq.dev`, which reaches the maintainer. Norviq is not a CNCF project; the
+CNCF Code of Conduct Committee route applies only if and when it is accepted.
 
 ## Security
 

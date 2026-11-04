@@ -5,6 +5,23 @@ deliberately small: one maintainer, no committees, no vote that has ever needed 
 document that describes a process the project does not follow is the same defect as a doc that
 claims fail-closed on an audit-mode chart, and this project has shipped enough of those.
 
+## Scope
+
+Norviq is a policy enforcement point for LLM agent tool calls on Kubernetes: an engine and API that
+evaluate each call against OPA/Rego policy for the workload's identity, an admission webhook that
+injects the sidecar, an SDK, a console, an MCP proxy and a Helm chart. The components and the
+adversaries the project defends against are listed in [SECURITY.md](SECURITY.md) and
+[docs/security-model.md](docs/security-model.md); a change that widens either is decided the way
+any other change is, below.
+
+## Values
+
+- **Fail closed.** On an error in the enforcement or authentication path, deny. The configured
+  exceptions are named in [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Reproduce before asserting.** A claim that a control works is accepted when it reproduces, with a
+  control that shows the check can fail.
+- **Documents describe what the code does today.** This one included.
+
 ## Roles
 
 **Maintainer** — listed in [MAINTAINERS.md](MAINTAINERS.md). Merges pull requests, cuts releases,
@@ -13,6 +30,9 @@ is one.
 
 **Contributor** — anyone who has had a pull request merged, filed a reproducible issue, or improved
 the documentation. No formal status; the git history is the record.
+
+There is no separate reviewer role. Review is done by the maintainer; what a review checks is in
+[REVIEWING.md](REVIEWING.md).
 
 ## How decisions are made
 
@@ -27,7 +47,10 @@ rather than dressed up as a process.
 
 **What is not decided by discussion:** whether a control enforces what it claims to. That is decided
 by reproduction. A claim that something works is not accepted on the strength of the claim — see the
-house rule in [CONTRIBUTING.md](CONTRIBUTING.md) on control-testing every gate.
+house rule in [CONTRIBUTING.md](CONTRIBUTING.md) on control-testing every check.
+
+**Design proposals** start as an issue, as CONTRIBUTING.md asks for anything non-trivial, and are
+discussed there before code is written. There is no separate proposal document or template.
 
 ## How code lands
 
@@ -40,6 +63,21 @@ because there is nobody to guarantee it. When a second maintainer exists this se
 branch protection is switched on the same day.
 
 Commit messages say what changed and why it was wrong before. See CONTRIBUTING.md.
+
+## Releases
+
+The maintainer cuts releases. How, and what a release publishes, is in [RELEASES.md](RELEASES.md).
+
+## Security response
+
+Vulnerability reports follow [SECURITY.md](SECURITY.md). The maintainer receives them, assesses
+them, prepares the fix and publishes the advisory. There is no second responder today, so a report
+depends on one person being available. SECURITY.md states the response times.
+
+## Meetings
+
+None are held. Discussion happens in issues, pull requests and
+[GitHub Discussions](https://github.com/norviq-dev/norviq/discussions), where it stays on the record.
 
 ## Becoming a maintainer
 
@@ -59,15 +97,18 @@ a second — that is fine, and the pull request is the record.
 ## Stepping back
 
 A maintainer who expects to be unavailable for a while says so in an issue. One who has made no
-commit, review or issue comment for six months is moved to an *emeritus* line in MAINTAINERS.md by
-another maintainer — or, if they are the only one, the project is at that point unmaintained and the
-README should say so rather than leave the appearance of activity. Emeritus maintainers keep their
-name and lose merge rights; they can return by the nomination path above.
+commit, review or issue comment for six months is moved to the *Emeritus maintainers* section of
+MAINTAINERS.md by another maintainer — or, if they are the only one, the project is at that point
+unmaintained and the README should say so rather than leave the appearance of activity. Emeritus
+maintainers keep their name and lose merge rights; they can return by the nomination path above.
 
 ## Conduct
 
-Contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Reports go to
-conduct@norviq.dev.
+Norviq follows the [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/main/code-of-conduct.md);
+see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Reports go to conduct@norviq.dev, which reaches the
+maintainer. Norviq is not a CNCF project; if and when it is accepted, reports can also go to the CNCF
+Code of Conduct Committee at conduct@cncf.io. There is no contact outside the project yet for a report
+that concerns the maintainer.
 
 ## Changing this document
 

@@ -25,7 +25,8 @@ ARG NRVQ_GIT_SHA=dev
 # Carry the SHA as a runtime env + OCI revision label (broadcast by CI) so the UI image is
 # NO-STALE-checkable like api/engine/webhook.
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
-LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA} \
+      org.opencontainers.image.licenses=Apache-2.0
 RUN apk update && apk upgrade --no-cache && echo "os-patched @ ${NRVQ_GIT_SHA}"
 COPY --from=builder /build/dist /usr/share/nginx/html
 COPY ui/nginx.conf /etc/nginx/conf.d/default.conf

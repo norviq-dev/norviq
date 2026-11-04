@@ -204,7 +204,8 @@ using the name and email you commit as; the sign-off has to match the commit's a
 commits you have already made on a branch, run `git rebase --signoff main` and force-push the branch.
 
 **Why it is required.** The CNCF charter (§11) requires inbound code contributions to carry a DCO
-sign-off once a project is accepted, and Norviq follows that now rather than at acceptance.
+sign-off once a project is accepted. Norviq asks for it now rather than at acceptance. Most commits in
+the history carry no sign-off; it is enforced only from the day the DCO check below is enabled.
 
 **What is checked.** Every commit in a pull request needs a sign-off. A DCO check on pull requests
 will enforce it once the DCO check is enabled on the repository; commits merged before that are not

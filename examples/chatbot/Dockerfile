@@ -4,6 +4,7 @@
 # Build from the REPO ROOT — the context needs both norviq/ and examples/chatbot/:
 #   docker build -f examples/chatbot/Dockerfile -t norviq-demo-chatbot:dev .
 FROM python:3.12-slim
+LABEL org.opencontainers.image.licenses=Apache-2.0
 
 WORKDIR /app
 

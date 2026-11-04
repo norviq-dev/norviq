@@ -36,7 +36,8 @@ ARG NRVQ_GIT_SHA=dev
 ARG NRVQ_TREE_DIGEST=unknown
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
 ENV NRVQ_BUILD_TREE_DIGEST=${NRVQ_TREE_DIGEST}
-LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA} \
+      org.opencontainers.image.licenses=Apache-2.0
 # apk verifies the repository index over TLS, so the CA has to land before `apk update`.
 #
 # NON-FATAL HERE, AND ONLY HERE. `Dockerfile.ui` keeps this step fatal, which is correct: the shipped

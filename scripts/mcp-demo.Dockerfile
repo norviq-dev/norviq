@@ -42,7 +42,8 @@ ARG NRVQ_GIT_SHA=unknown
 ARG NRVQ_TREE_DIGEST=unknown
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
 ENV NRVQ_BUILD_TREE_DIGEST=${NRVQ_TREE_DIGEST}
-LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA} \
+      org.opencontainers.image.licenses=Apache-2.0
 
 # The OPA binary is copied from the pinned OPA image rather than downloaded, so the build needs no
 # egress to openpolicyagent.org. Same version the chart's sidecar runs.
