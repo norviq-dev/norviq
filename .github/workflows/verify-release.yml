@@ -70,20 +70,35 @@ jobs:
           # The script manages install/uninstall itself; it only needs the cluster to exist.
           wait: 120s
 
-      # The candidate webhook, not main's published one. Without this the run would validate the
-      # LAST release's binary against this PR's chart and report green on a webhook nobody is
-      # shipping — which is the same mistake, one level up, as testing the unstamped chart.
-      - name: Build the webhook under test and load it into kind
+      # The candidate's OWN images, not main's published ones. release.yml builds every component
+      # from the tagged commit, so that is what users receive; the stamped chart's `<comp>-latest`
+      # digests come from MAIN, which a release branch is ahead of. Building only the webhook ran this
+      # PR's chart and checks against main's api/engine: on #123 (0.2.6) that was revision 46f04c7,
+      # without the saved-controls fix (f12e627) or the retried-refusal trust fix (1a199c4), and the
+      # job failed on the very behaviour those commits add. Same Dockerfiles and contexts as build.yml's matrix.
+      - name: Build the images under test and load them into kind
         run: |
-          docker build -f webhook/Dockerfile -t ghcr.io/norviq-dev/norviq-engine:webhook-verify webhook/
-          kind load docker-image ghcr.io/norviq-dev/norviq-engine:webhook-verify --name nrvq-verify-${{ matrix.mode }}
+          set -euo pipefail
+          build() {  # component dockerfile context
+            docker build --build-arg NRVQ_GIT_SHA=${{ github.sha }} -f "$2" -t "ghcr.io/norviq-dev/norviq-engine:$1-verify" "$3"
+            kind load docker-image "ghcr.io/norviq-dev/norviq-engine:$1-verify" --name nrvq-verify-${{ matrix.mode }}
+          }
+          build engine    Dockerfile.engine    .
+          build api       Dockerfile.api       .
+          build ui        Dockerfile.ui        .
+          build webhook   webhook/Dockerfile   webhook/
+          build bootstrap Dockerfile.bootstrap .
 
       - name: Verify the artifact (stamp -> install -> use -> uninstall)
         run: |
           python scripts/verify_release.py \
             --cluster nrvq-verify-${{ matrix.mode }} --skip-create --keep \
             --upgrade-from ${{ matrix.from }} \
-            --webhook-image ghcr.io/norviq-dev/norviq-engine:webhook-verify \
+            --candidate-image engine=ghcr.io/norviq-dev/norviq-engine:engine-verify \
+            --candidate-image api=ghcr.io/norviq-dev/norviq-engine:api-verify \
+            --candidate-image ui=ghcr.io/norviq-dev/norviq-engine:ui-verify \
+            --candidate-image webhook=ghcr.io/norviq-dev/norviq-engine:webhook-verify \
+            --candidate-image bootstrap=ghcr.io/norviq-dev/norviq-engine:bootstrap-verify \
             ${{ inputs.version && format('--version {0}', inputs.version) || '' }}
 
       # Runs even when the verification fails — a red run without the cluster state behind it is a

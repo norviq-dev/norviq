@@ -118,9 +118,14 @@ def wait_until(fn, timeout: int, interval: float = 2.0) -> bool:
 def stamp(version: str, workdir: Path) -> Path:
     """A copy of the chart, versioned and pinned to real registry digests — release.yml's own step.
 
-    Digests come from the `<comp>-latest` tags built by build.yml on main, so this pins the same
-    bytes a release cut from this commit would. The POINT is the digest form: `@sha256:...` is what
-    the checked-in chart never carries and what the shipped one always does.
+    Digests come from the `<comp>-latest` tags built by build.yml on MAIN. That is the right SHAPE
+    but not necessarily the right BYTES: release.yml builds every image from the tagged commit, and a
+    release branch is ahead of main, so `<comp>-latest` can be the previous code. The 0.2.6 run on
+    PR #123 tested main's api/engine (revision 46f04c7, without f12e627's saved controls or 1a199c4's
+    one-trust-cost-per-retried-refusal) and failed on exactly the behaviour those commits add. So the shape checks below judge the
+    stamped chart as-is, and the install then runs the candidate builds passed with --candidate-image.
+    The POINT here is the digest form: `@sha256:...` is what the checked-in chart never carries and
+    what the shipped one always does.
     """
     chart = workdir / "norviq"
     shutil.copytree(CHART, chart)
@@ -156,23 +161,58 @@ def check_stamped_shape(ctx: str, chart: Path) -> None:
 # ---------------------------------------------------------------------------------------------
 # stage 2 — install it the way automation does
 # ---------------------------------------------------------------------------------------------
-def install(ctx: str, chart: Path, webhook_image: str = "") -> bool:
+# Norviq's own components, each built from this tree by release.yml (via build.yml) at the tag.
+COMPONENTS = ("engine", "api", "ui", "webhook", "bootstrap")
+
+
+def parse_candidate_images(specs: Iterable[str]) -> dict[str, str]:
+    """`COMP=IMAGE` pairs -> {comp: image}. Refuses anything this script could not actually run.
+
+    Only the TAG reaches the chart (see candidate_overrides), so an image outside the chart's own
+    repository would be silently replaced by `<REPO>:<its tag>` — a different binary under the same
+    label. That is refused here rather than discovered as a confusing pass.
+    """
+    images: dict[str, str] = {}
+    for spec in specs:
+        comp, sep, image = spec.partition("=")
+        if not sep or comp not in COMPONENTS:
+            raise ValueError(f"--candidate-image {spec!r}: want COMP=IMAGE with COMP one of {', '.join(COMPONENTS)}")
+        repo, colon, tag = image.rpartition(":")
+        if not colon or repo != REPO or not tag or "@" in image:
+            raise ValueError(f"--candidate-image {spec!r}: the image must be tagged {REPO}:<tag> "
+                             "(the chart overrides only the tag) and must already be `kind load`ed")
+        if comp in images and images[comp] != image:
+            raise ValueError(f"--candidate-image: {comp} given twice ({images[comp]} and {image})")
+        images[comp] = image
+    return images
+
+
+def candidate_overrides(images: dict[str, str]) -> list[str]:
+    """`helm --set` flags that run the locally built candidate images instead of the pinned ones.
+
+    Only the TAG is overridden, so each candidate image must already be tagged under the chart's own
+    repository (build it as ghcr.io/norviq-dev/norviq-engine:<tag> and `kind load` it). Clearing the
+    digest is what lets the tag win; leaving it set keeps the pinned image and silently tests the WRONG
+    binary — the exact failure mode this script exists to prevent. pullPolicy must drop to
+    IfNotPresent as well: the chart ships `Always`, which makes the kubelet ignore the `kind load`ed
+    image and try to pull a tag that exists on no registry.
+    """
+    extra: list[str] = []
+    for comp in COMPONENTS:
+        if comp in images:
+            tag = images[comp].rpartition(":")[2]
+            extra += ["--set", f"images.{comp}.tag={tag}", "--set", f"images.{comp}.digest=",
+                      "--set", f"images.{comp}.pullPolicy=IfNotPresent"]
+    return extra
+
+
+def install(ctx: str, chart: Path, images: dict[str, str] | None = None) -> bool:
     """--wait --atomic, because that is what CI/GitOps use and what deadlocked before 0.1.6."""
     for ns in (NS, TENANT):
         kubectl(ctx, "create", "namespace", ns)
     kubectl(ctx, "label", "namespace", TENANT, "norviq-injection=enabled", "--overwrite")
 
-    extra: list[str] = []
-    if webhook_image:
-        # Only the TAG is overridden, so the candidate image must already be tagged under the chart's
-        # own repository (build it as ghcr.io/norviq-dev/norviq-engine:<tag> and `kind load` it).
-        # Clearing the digest is what lets the tag win; leaving it set keeps the pinned image and
-        # silently tests the WRONG binary — the exact failure mode this script exists to prevent.
-        # pullPolicy must drop to IfNotPresent as well: the chart ships `Always`, which makes the
-        # kubelet ignore the `kind load`ed image and try to pull a tag that exists on no registry.
-        tag = webhook_image.rpartition(":")[2]
-        extra = ["--set", f"images.webhook.tag={tag}", "--set", "images.webhook.digest=",
-                 "--set", "images.webhook.pullPolicy=IfNotPresent"]
+    extra = candidate_overrides(images or {})
 
     # Deliberately NO config.dbSslMode: the candidate chart derives it from the datastore in use, and a
     # gate that overrides it would never prove that a pure-defaults install can start. That is exactly
@@ -312,11 +352,13 @@ def check_enforcement(ctx: str) -> str:
         # …and it must actually stop the call once promoted, or the gate would pass an artifact that
         # can only ever observe.
         #
-        # A 404 here is NOT a failure. This script exercises the RELEASE ARTIFACT — images built from
-        # `<comp>-latest` on MAIN (see stamp() above) — so the API under test can legitimately predate
-        # an endpoint that exists on the branch proposing the change. `PUT /baseline/controls` arrived
-        # with the toggleable-controls work and is not on main yet, so it 404s here and would on any
-        # PR that adds an endpoint its own gate then calls. Failing on that would make this gate red
+        # A 404 here is NOT a failure. When the API is NOT passed as a --candidate-image (a manual run),
+        # the image under test is `<comp>-latest` from MAIN (see stamp() above), so it can legitimately
+        # predate an endpoint that exists on the branch proposing the change. verify-release.yml passes
+        # the PR's own API build, so there the router is always present and this is a real check.
+        # `PUT /baseline/controls` arrived with the toggleable-controls work and was not on main when
+        # this was written, so it 404'd on main's image and would on any PR that adds an endpoint its
+        # own gate then calls, when run without that PR's API. Failing on that would make this gate red
         # for every such change and teach people to ignore it.
         #
         # It is reported as a SKIP with the reason, not silently swallowed: the moment main carries
@@ -920,13 +962,9 @@ def snapshot(ctx: str) -> dict[str, str]:
     }
 
 
-def upgrade_to_candidate(ctx: str, chart: Path, webhook_image: str = "") -> bool:
+def upgrade_to_candidate(ctx: str, chart: Path, images: dict[str, str] | None = None) -> bool:
     """--reset-then-reuse-values: the command the README and both runbooks tell operators to use."""
-    extra: list[str] = []
-    if webhook_image:
-        tag = webhook_image.rpartition(":")[2]
-        extra = ["--set", f"images.webhook.tag={tag}", "--set", "images.webhook.digest=",
-                 "--set", "images.webhook.pullPolicy=IfNotPresent"]
+    extra = candidate_overrides(images or {})
 
     t0 = time.monotonic()
     res = helm(ctx, "upgrade", "norviq", str(chart), "-n", NS, "--reset-then-reuse-values",
@@ -936,7 +974,8 @@ def upgrade_to_candidate(ctx: str, chart: Path, webhook_image: str = "") -> bool
                  f"{int(time.monotonic() - t0)}s" if ok else (res.stderr or res.stdout)[-400:])
 
 
-def check_upgrade_preserved(ctx: str, chart: Path, before: dict[str, str]) -> None:
+def check_upgrade_preserved(ctx: str, chart: Path, before: dict[str, str],
+                            images: dict[str, str] | None = None) -> None:
     after = snapshot(ctx)
 
     # Rotating either of these strands a working install: see snapshot()'s note. Compared by value,
@@ -953,12 +992,16 @@ def check_upgrade_preserved(ctx: str, chart: Path, before: dict[str, str]) -> No
     # "Move all four image tags together" is a warning in getting-started because a partial upgrade
     # leaves the OLD policy enforcing while every version string reports the new one. Assert it
     # instead of warning about it: nothing may still be running an image the candidate does not pin.
+    # Rendered with the SAME candidate-image overrides the upgrade used, and tag refs counted as well as
+    # digests: a component running a locally built candidate is on a tag, and an old pod still on the
+    # previous release's digest must show up here either way.
+    ref = rf"{re.escape(REPO)}(?:@sha256:[0-9a-f]{{64}}|:[A-Za-z0-9._-]+)"
     rendered = run("helm", "template", "norviq", str(chart), "--set-json",
-                   f'policyQuotaNamespaces=["{TENANT}"]', "--set", "webhook.injection.enabled=true").stdout
-    expected = set(re.findall(rf"{re.escape(REPO)}@sha256:[0-9a-f]{{64}}", rendered))
-    running = set(re.findall(rf"{re.escape(REPO)}@sha256:[0-9a-f]{{64}}",
-                             kubectl(ctx, "get", "pods", "-n", NS, "-o",
-                                     "jsonpath={range .items[*]}{range .spec.containers[*]}{.image} {end}{end}").stdout))
+                   f'policyQuotaNamespaces=["{TENANT}"]', "--set", "webhook.injection.enabled=true",
+                   *candidate_overrides(images or {})).stdout
+    expected = set(re.findall(ref, rendered))
+    running = set(re.findall(ref, kubectl(ctx, "get", "pods", "-n", NS, "-o",
+                                          "jsonpath={range .items[*]}{range .spec.containers[*]}{.image} {end}{end}").stdout))
     stale = running - expected
     check("no pod is left on a pre-upgrade image", not stale, f"{sorted(stale)[:2]}")
 
@@ -972,10 +1015,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cluster", default="nrvq-verify")
     ap.add_argument("--version", default="", help="version to stamp (default: the repo's own)")
-    ap.add_argument("--webhook-image", default="",
-                    help="a locally built webhook image (already `kind load`ed) to run INSTEAD of the "
-                         "pinned one. The rest of the chart stays digest-pinned, so this tests a "
-                         "candidate webhook against the sidecar image a real release would inject.")
+    ap.add_argument("--candidate-image", action="append", default=[], metavar="COMP=IMAGE",
+                    help="a locally built image of one of Norviq's components (" + ", ".join(COMPONENTS) +
+                         "), tagged under " + REPO + " and already `kind load`ed, to run INSTEAD of the "
+                         "pinned one. Repeatable. The images a release ships are built from the tagged "
+                         "commit, not from main, so a release candidate is only verified when every "
+                         "component it changes is passed here; anything not passed stays on the "
+                         "digest-pinned `<comp>-latest` from main.")
+    ap.add_argument("--webhook-image", default="", help="shorthand for --candidate-image webhook=IMAGE")
     ap.add_argument("--upgrade-from", default="auto", metavar="VERSION",
                     help="Verify the UPGRADE path instead of a fresh install: install this published "
                          "version from OCI, seed state, then upgrade to the candidate. 'auto' (the "
@@ -985,6 +1032,13 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="leave the cluster up for debugging")
     ap.add_argument("--skip-create", action="store_true", help="reuse an existing cluster")
     args = ap.parse_args()
+
+    try:
+        images = parse_candidate_images(
+            [*args.candidate_image, *([f"webhook={args.webhook_image}"] if args.webhook_image else [])])
+    except ValueError as exc:
+        print(f"\nFAIL  {exc}", file=sys.stderr)
+        return 2
 
     for tool in ("kind", "helm", "kubectl", "docker"):
         if not shutil.which(tool):
@@ -1008,8 +1062,11 @@ def main() -> int:
 
     ctx = f"kind-{args.cluster}"
     print(f"\nverifying the RELEASE ARTIFACT for {version} in kind cluster {args.cluster}")
-    print(f"path: upgrade from the published {from_version}\n" if from_version
-          else "path: fresh install (--upgrade-from none)\n")
+    print(f"path: upgrade from the published {from_version}" if from_version
+          else "path: fresh install (--upgrade-from none)")
+    print("candidate images: " + (", ".join(f"{c}={images[c]}" for c in COMPONENTS if c in images) or "none")
+          + "; " + (", ".join(c for c in COMPONENTS if c not in images) or "nothing")
+          + " from the pinned <comp>-latest (main)\n")
 
     if not args.skip_create:
         run("kind", "delete", "cluster", "--name", args.cluster, timeout=300)
@@ -1037,16 +1094,16 @@ def main() -> int:
                     seed_bundled_store(ctx)
                     before = snapshot(ctx)
                     print(f"\nstage 2u — upgrade {from_version} -> {version}")
-                    started = upgrade_to_candidate(ctx, chart, args.webhook_image)
+                    started = upgrade_to_candidate(ctx, chart, images)
                     # Run whether or not the upgrade reported success: when it times out, these are
                     # the checks that say which component did not come back, and why.
                     check_store_after_upgrade(ctx, chart)
                     check_api_after_upgrade(ctx)
                     if started:
-                        check_upgrade_preserved(ctx, chart, before)
+                        check_upgrade_preserved(ctx, chart, before, images)
             else:
                 print("\nstage 2 — install it the way automation does")
-                started = install(ctx, chart, args.webhook_image)
+                started = install(ctx, chart, images)
 
             if started:
                 print("\nstage 3 — use it")

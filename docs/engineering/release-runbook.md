@@ -246,6 +246,10 @@ python3 scripts/check_release_versions.py "$VERSION"
 #    credentials and PVCs survived, and nothing is still running a pre-upgrade image. That is what
 #    existing users do; a fresh install is what new ones do, and the two break differently, so run
 #    both. CI runs them as a matrix.
+#    Run locally, it installs main's `<comp>-latest` images unless you build the candidate's own and
+#    pass each one: `docker build -t ghcr.io/norviq-dev/norviq-engine:api-verify -f Dockerfile.api .`,
+#    `kind load docker-image ... --name <cluster>`, then `--candidate-image api=<that ref>` (repeat for
+#    engine, ui, webhook, bootstrap). A release is built from the tag, so main's images are not it.
 python3 scripts/verify_release.py                      # upgrade path (newest published <= the chart)
 python3 scripts/verify_release.py --upgrade-from none  # fresh install
 # or, both in parallel on a runner:
