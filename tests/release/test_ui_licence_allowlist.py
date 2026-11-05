@@ -9,8 +9,11 @@ exception. The UI shipped one font package under OFL-1.1, and the d3 umbrella pa
 geometry library under the Unlicense; neither license is on the allowlist and nothing in CI noticed.
 
 This reads ui/package-lock.json, the tree `npm ci` installs in Dockerfile.ui, and checks every package
-that is not dev-only (dev-only packages build the bundle and are not shipped in it). A package with no
-recorded license fails: an unknown license is not an allowed one.
+that can reach the bundle: every package that is not dev-only, plus the dev-only packages the build
+compiles into its output anyway. Those are each package named in an @import of ui/src/index.css
+(tailwindcss, shadcn: their CSS is compiled into the shipped stylesheet) and the build-time emitters
+listed in scripts/ui_third_party_notices.py (BUILD_TIME_EMITTERS), so this test and the notices file
+cover the same set. A package with no recorded license fails: an unknown license is not an allowed one.
 
 Font files committed into the UI source tree are checked too: Vite copies ui/public into the bundle
 verbatim and imported assets are emitted alongside it, so a font file anywhere under ui/ ships in the
@@ -20,6 +23,7 @@ fails unless _FONT_LICENSES lists it with an allowlisted license.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -30,6 +34,13 @@ import pytest
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _UI = _ROOT / "ui"
 _LOCK = _UI / "package-lock.json"
+
+# The notices generator owns the definition of "reaches the bundle"; load it by path (scripts/ is not
+# a package) so the licence check and ui/THIRD_PARTY_NOTICES.txt cannot drift apart.
+_spec = importlib.util.spec_from_file_location("_ui_notices", _ROOT / "scripts" / "ui_third_party_notices.py")
+assert _spec and _spec.loader
+_notices = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_notices)
 
 _FONT_SUFFIXES = frozenset({".ttf", ".otf", ".ttc", ".woff", ".woff2", ".eot", ".pfb", ".pfa"})
 # Directories under ui/ that are not committed sources: installed packages (covered by the lockfile
@@ -119,25 +130,59 @@ def _satisfiable(expression: str) -> bool:
     return result and pos == len(tokens)
 
 
-def _shipped_packages() -> dict[str, dict]:
-    lock = json.loads(_LOCK.read_text())
+def _shipped_packages(ui: Path = _UI, lock_path: Path = _LOCK) -> dict[str, dict]:
+    lock = json.loads(lock_path.read_text())
     assert lock.get("lockfileVersion", 0) >= 2, "ui/package-lock.json must record per-package metadata"
-    return {
-        path: meta
-        for path, meta in lock["packages"].items()
-        if path and not meta.get("dev") and not meta.get("devOptional")
-    }
+    return _notices.bundle_packages(ui, lock["packages"])
+
+
+def _licence_offenders(shipped: dict[str, dict]) -> list[str]:
+    return sorted(
+        f"{path.removeprefix('node_modules/')}@{meta.get('version')}: {meta.get('license')}"
+        for path, meta in shipped.items()
+        if not _satisfiable(str(meta.get("license") or ""))
+    )
 
 
 def test_shipped_ui_packages_are_on_the_cncf_allowlist() -> None:
     shipped = _shipped_packages()
     assert shipped, "no non-dev packages found in ui/package-lock.json"
-    offenders = sorted(
-        f"{path.removeprefix('node_modules/')}@{meta.get('version')}: {meta.get('license')}"
-        for path, meta in shipped.items()
-        if not _satisfiable(str(meta.get("license") or ""))
+    offenders = _licence_offenders(shipped)
+    assert not offenders, "UI packages that reach the bundle outside the CNCF license allowlist:\n" + "\n".join(
+        offenders
     )
-    assert not offenders, "UI runtime packages outside the CNCF license allowlist:\n" + "\n".join(offenders)
+
+
+def test_dev_packages_compiled_into_the_bundle_are_checked() -> None:
+    """tailwindcss and shadcn are devDependencies, but index.css @imports them into the shipped CSS."""
+    shipped = _shipped_packages()
+    for name in ("tailwindcss", "shadcn", "tw-animate-css", *_notices.BUILD_TIME_EMITTERS):
+        assert f"node_modules/{name}" in shipped, f"{name} reaches the bundle but is not licence-checked"
+
+
+def test_a_disallowed_licence_on_a_bundled_dev_package_fails(tmp_path: Path) -> None:
+    """Control: the same lockfile with tailwindcss (dev: true) under a non-allowlisted licence."""
+    lock = json.loads(_LOCK.read_text())
+    assert lock["packages"]["node_modules/tailwindcss"].get("dev"), "control assumes tailwindcss is dev-only"
+    lock["packages"]["node_modules/tailwindcss"]["license"] = "OFL-1.1"
+    scratch = tmp_path / "package-lock.json"
+    scratch.write_text(json.dumps(lock))
+    offenders = _licence_offenders(_shipped_packages(_UI, scratch))
+    assert any(o.startswith("tailwindcss@") for o in offenders), offenders
+
+
+@pytest.mark.parametrize(
+    ("css", "expected"),
+    [
+        ('@import "tailwindcss";', ["tailwindcss"]),
+        ("@import 'shadcn/tailwind.css' layer(base);", ["shadcn"]),
+        ('@import url("@scope/pkg/x.css");', ["@scope/pkg"]),
+        ('@import "./local.css"; @import "@/styles/a.css"; /* @import "commented"; */', []),
+        ('@import "https://example.invalid/x.css";', []),
+    ],
+)
+def test_css_import_parsing(css: str, expected: list[str]) -> None:
+    assert _notices.css_import_packages(css) == expected
 
 
 def _font_offenders(root: Path, licenses: dict[str, str]) -> list[str]:

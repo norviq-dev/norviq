@@ -251,6 +251,7 @@ jobs:
           path: dist/norviq-${{ env.VERSION }}.tgz
           if-no-files-found: error
           retention-days: 7
+          overwrite: true      # a re-run of this job replaces the earlier attempt's file
 
       - name: Rehearsal summary
         if: needs.version.outputs.publish != 'true'
@@ -341,6 +342,7 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
           retention-days: 7
+          overwrite: true      # a re-run after a failed PyPI upload must not stop here on a 409
 
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
@@ -501,10 +503,13 @@ jobs:
       #
       # Immutable releases: once a Release is published with that setting on, assets can no longer be
       # added. So a new Release is created as a DRAFT, the assets go on, and only then is it
-      # published. If a Release already exists: a draft gets the assets and stays a draft (whoever
-      # made it publishes it); a published, mutable one gets the assets; a published, immutable one
-      # cannot take them, so the job fails with an explanation instead of a bare API error. Existing
-      # notes are left alone in every case.
+      # published. Every draft this workflow creates carries a fixed marker line (an HTML comment,
+      # invisible on the Release page) in its notes. If a Release already exists: a draft with the
+      # marker was made by an earlier attempt of this workflow, so it gets the assets and is
+      # published; a draft without the marker was made by hand, so it gets the assets and the job
+      # FAILS, so the unpublished Release cannot go unnoticed; a published, mutable one gets the
+      # assets; a published, immutable one cannot take them, so the job fails with an explanation
+      # instead of a bare API error. Existing notes are left alone in every case.
       - name: Attach the signed assets to the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -517,6 +522,8 @@ jobs:
           # Only a real "release not found" takes the create path. Any other failure of the view
           # (API or auth error, a gh too old to know a field) stops the job with gh's own message.
           view_err="${RUNNER_TEMP}/release-view.err"
+          # Fixed marker written into the notes of every draft this workflow creates.
+          marker='<!-- norviq-release-workflow: draft created by release.yml -->'
           if state="$(gh release view "$TAG" --json isDraft,isImmutable --jq '"\(.isDraft) \(.isImmutable)"' 2>"$view_err")"; then
             read -r is_draft is_immutable <<< "$state"
             if [ "$is_draft" != "true" ] && [ "$is_immutable" = "true" ]; then
@@ -525,10 +532,18 @@ jobs:
             fi
             gh release upload "$TAG" assets/* --clobber
             if [ "$is_draft" = "true" ]; then
-              echo "::notice::The Release for ${TAG} is a draft made before this run. Its assets are attached; publish it by hand."
+              body="$(gh release view "$TAG" --json body --jq .body)"
+              if grep -qF -- "$marker" <<< "$body"; then
+                echo "::notice::The Release for ${TAG} is a draft an earlier attempt of this workflow created; assets attached, publishing it now."
+                gh release edit "$TAG" --draft=false
+              else
+                echo "::error::The Release for ${TAG} is a draft that was made by hand, not by this workflow (its notes lack the workflow's marker line). The signed assets are attached, but it was NOT published: review it and publish it by hand."
+                exit 1
+              fi
             fi
           elif grep -qi 'release not found' "$view_err"; then
             cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          ${marker}
           Norviq ${VERSION}. Changes are listed in [CHANGELOG.md](https://github.com/${GH_REPO}/blob/${TAG}/CHANGELOG.md).
 
           Each file this workflow attached below has a keyless Sigstore bundle (\`<file>.sigstore.json\`). Verify one with:

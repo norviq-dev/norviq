@@ -30,9 +30,13 @@ push tag vX.Y.Z
 
 The GitHub Release jobs run after PyPI because nothing they do is irreversible: if one fails, re-run
 the failed jobs. If no GitHub Release exists for the tag, `github-release` creates it as a draft with
-short notes that point at CHANGELOG.md, attaches the assets, and then publishes it. If one already
-exists, it adds the assets and leaves the notes alone. A published Release with immutable releases on
-cannot take new assets, so in that case the job fails; see step 2b of "Cutting the release" below.
+short notes that point at CHANGELOG.md, attaches the assets, and then publishes it. Those notes carry
+a fixed marker line (an HTML comment), so a re-run that finds a draft this workflow created publishes
+it. If a Release already exists, the job adds the assets and leaves the notes alone. A draft made by
+hand (no marker) is never published by the job: it gets the assets and the job fails with an error
+saying so, so an unpublished Release cannot go unnoticed. A published Release with immutable releases
+on cannot take new assets, so in that case the job fails too; see step 2b of "Cutting the release"
+below.
 
 `chart` depends on `images` so the chart can never be published referencing images that do not
 exist. That ordering is only expressible between jobs of one workflow, which is why `build.yml` is
@@ -204,7 +208,7 @@ CI cannot do these — they need an account login.
 3. **Immutable releases.** Know whether the repository has immutable releases turned on
    (*Settings* → *General* → *Releases*). With it on, a Release published before `release.yml`
    finishes cannot take the signed assets and `github-release` fails; step 2b of "Cutting the
-   release" says how to avoid that. TODO(San): confirm whether immutable releases is on for
+   release" says how to avoid that. TODO(the maintainer): confirm whether immutable releases is on for
    norviq-dev/norviq.
 
 ## Cutting the release
@@ -251,9 +255,11 @@ gh workflow run verify-release.yml
 # 2b. GitHub Release: do NOT publish a vX.Y.Z Release by hand before release.yml finishes; its
 #     github-release job creates and publishes it with short notes pointing at CHANGELOG.md. To
 #     write the notes yourself (always, for a release with security fixes: see 1c), create the
-#     Release as a DRAFT for the tag; the job attaches the signed assets to the draft and leaves it
-#     for you to publish once the workflow is green. With immutable releases on, a Release
-#     published early cannot take the assets and the job fails.
+#     Release as a DRAFT for the tag; the job attaches the signed assets to the draft, leaves it
+#     unpublished and then fails on purpose with an error naming the hand-made draft. That red
+#     github-release job is expected: check every other job is green, then publish the draft.
+#     With immutable releases on, a Release published early cannot take the assets and the job
+#     fails.
 
 # 3. tag and push
 git tag -a "v$VERSION" -m "Norviq v$VERSION"
