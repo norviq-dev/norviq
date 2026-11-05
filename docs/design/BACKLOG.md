@@ -826,7 +826,7 @@ and signed release assets, Dependabot and read-only workflow tokens (`be06ad6`).
 * The maintainer signs the contribution agreement as an individual. Filing, the GitHub settings
   (§7.5, §7.13) and the fields that need the maintainer's own words are his.
 
-### 7.16 0.2.6 preparation (2026-10-28), local branch `prep/0.2.6`, unpushed
+### 7.16 0.2.6 preparation (2026-10-28) and release (2026-11-05)
 
 **State 2026-11-05 (final):** `prep/0.2.6` is at `7211672`, **159 commits on top of `cncf-readiness`
 (`b622399`)**: 26 from the maintainer's machine (through `f375420`), 114 more through the folded tip
@@ -837,13 +837,13 @@ licence work (the bundled web font and the d3 umbrella's dependency removed, `19
 `8787b59`, and the allowlist test, `06f5863`), the third-party notices file and its place in the
 console image (`6044c04`, `43f090b`), the lint-tooling advisory bumps (`c8d9245`), the image hardening
 (pip removed from the api and engine runtime images, `c678e68`; the webhook on distroless
-static-debian13, `7211672`), and the docs commits (`a121993`, `259b138`). **All 12 gates are green on
-`7211672`** (pytest 4770 passed). **Nothing is pushed, merged, tagged or
-cut**, and both version fields still say 0.2.5 (`pyproject.toml`, `Chart.yaml`, read 2026-11-05).
-**The version strings** in the install and upgrade docs that name chart 0.2.6 are one commit kept on the
-local branch `prep/0.2.6-version-docs`, not on prep, to be squashed with the maintainer's version bump:
-taken without the bump, `scripts/check_release_versions.py` reports the drift between those docs and
-the chart, as it should.
+static-debian13, `7211672`), and the docs commits (`a121993`, `259b138`). **All 12 gates are green on `7211672`** (pytest 4770 passed) and on the final prep tip `b5e42d0`
+(pytest 4778 passed; `96ec8a5` plus one test fix, the UI font check pruning installed trees at any
+depth). On kind, images built from `96ec8a5`: the full validate passed (L3 integration 68/4/0, attacks
+209/209, L4 190 passed, injection 18/18, probes 13/13, default deny 19/19, MCP re-verify 84/84), the
+upgrade from v0.2.5 and rollback passed 27/27, and a live chatbot run decided every case as expected.
+**Released as 0.2.6 (2026-11-05):** the release commit bumps `pyproject.toml`, `Chart.yaml` and the
+install and upgrade docs to 0.2.6 together, so `scripts/check_release_versions.py` agrees.
 
 * **Security fixes whose advisories publish with the release.** Nothing more about them is in this
   file until then.

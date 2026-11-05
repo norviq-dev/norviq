@@ -136,8 +136,10 @@ _OFF_SWITCHES = {
 
 
 def _unreleased_changelog() -> str:
+    """The newest CHANGELOG entry: `## [Unreleased]` while a version is being prepared, and the same
+    text under its dated `## [x.y.z]` heading once it is released."""
     text = (_ROOT / "CHANGELOG.md").read_text()
-    start = text.index("## [Unreleased]")
+    start = text.index("\n## [") + 1
     return text[start:text.index("\n## [", start + 1)]
 
 
