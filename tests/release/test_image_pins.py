@@ -106,8 +106,8 @@ def test_gate_refuses_a_stamped_chart_with_one_third_party_digest_missing(
     `.` in `1.19.1-static` as a path separator.
 
     The default render is gated beside ALL_OPTIONAL because neither alone carries every ref: with
-    redis.ha on, the single-instance store (Valkey) is not rendered, and the failover runs its own
-    redis.ha.image (Redis 7.4) rather than images.redis.
+    redis.ha on, the single-instance store is not rendered, and the failover runs its own redis.ha.image
+    (for its redis and sentinel pods) rather than images.redis. Both default to the same Valkey ref.
     """
     drop = tmp_path / "drop-one.yaml"
     drop.write_text(yaml.safe_dump({"global": {"thirdPartyImageDigests": {ref: None}}}))

@@ -35,7 +35,8 @@ the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --versio
 - **≥3 nodes** (so podAntiAffinity / topologySpread actually spread replicas).
 - **metrics-server** installed (HPA reads CPU/mem).
 - **CloudNativePG operator** installed (Postgres HA renders a `postgresql.cnpg.io/v1 Cluster`).
-- **A Redis HA operator** — `values-prod` renders a Spotahome `RedisFailover`. The chart also
+- **A Redis HA operator** — `values-prod` renders a Spotahome `RedisFailover` (`norviq-valkey-ha`,
+  Valkey 8.1 for the redis and sentinel pods; set by `redis.ha.image`). The chart also
   renders the **master Service** (`redis.ha.serviceName`) itself, selecting the operator's
   `redisfailovers-role: master` pod label; the operator provisions only a sentinel Service, so
   without that the HA hostname resolved to nothing. Failover-tested on a live cluster: master killed
@@ -60,7 +61,7 @@ the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --versio
 | engine replicas / PDB | 1 / off | HA floor 2 / minAvailable 1 + HPA + spread |
 | webhook | 2, injection **off** | HA floor 2 + PDB + HPA + spread + injection **on** |
 | Postgres | single StatefulSet | CloudNativePG `Cluster` (3) — operator required |
-| Redis | single StatefulSet | `RedisFailover` (Sentinel, 3) + a chart-rendered master Service — operator required |
+| Redis | single StatefulSet | `RedisFailover` on Valkey (Sentinel, 3) + a chart-rendered master Service — operator required |
 | DB / Redis password | shipped dev defaults | **blank — you must supply them** (see below) |
 | strong-secret guard / DB TLS | already on / already `require` | unchanged (on / `require`) |
 

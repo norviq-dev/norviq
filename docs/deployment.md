@@ -105,7 +105,7 @@ Companion doc: `docs/engineering/prod-deploy-runbook.md`; secrets/RBAC checklist
 
 **Prerequisites:** ≥3 nodes (so anti-affinity/spread actually spreads replicas), `metrics-server`
 (HPA reads CPU), the **CloudNativePG** operator (Postgres HA), and a **Redis HA** operator (the chart
-renders a Spotahome `RedisFailover` CR by default — swap `templates/redis-ha.yaml` +
+renders a Spotahome `RedisFailover` CR by default, running Valkey for both its redis and sentinel pods — swap `templates/redis-ha.yaml` +
 `redis.ha.serviceName` for a different stack).
 
 | Area | Chart default (`values.yaml`) | `values-prod.yaml` |
@@ -117,7 +117,7 @@ renders a Spotahome `RedisFailover` CR by default — swap `templates/redis-ha.y
 | `engine.replicas` | 1 | 2, + PDB + spread |
 | `webhook.replicas` / injection | 2 / off | 2 / on, + PDB + HPA + spread |
 | `postgresql.ha` | off (single StatefulSet) | on — CloudNativePG `Cluster` (3 instances), 20Gi |
-| `redis.ha` | off (single StatefulSet) | on — Spotahome `RedisFailover` (Sentinel, 3) |
+| `redis.ha` | off (single StatefulSet) | on — Spotahome `RedisFailover` (Sentinel, 3) running Valkey 8.1 |
 | rollout | surge (`maxSurge:1`/`maxUnavailable:0`) | same |
 | `config.requireStrongSecret` / `dbSslMode` | on / derived `require` (external/HA DB) | on / `require` (pinned) |
 | `images.*.pullPolicy` | `Always` | `IfNotPresent` (pin immutable tags) |

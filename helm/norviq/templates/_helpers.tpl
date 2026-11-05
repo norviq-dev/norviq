@@ -236,6 +236,21 @@ successful install into a permanent Init:0/2.
 {{- end -}}
 
 {{/*
+The RedisFailover's name, and with it the operator's `redisfailovers.databases.spotahome.com/name`
+pod label that the master Service and the agent egress policies select on.
+
+`norviq-valkey-ha`, not 0.2.5's `norviq-redis-ha`, because the failover moved from Redis 7.4 to
+Valkey 8.1 in 0.2.6. Under the old name the operator would have rolled Valkey pods into the running
+7.4 failover, onto volumes holding Redis 7.4's RDB-12 dumps and behind a 7.4 master. Valkey 8.1 loads
+neither: it exits with "Can't handle RDB format version 12" on the dump and on the full-sync stream.
+A new name is a new failover (StatefulSet `rfr-norviq-valkey-ha`, new volume claims), and helm deletes
+the old one. tests/helm/test_bundled_store_upgrade.py holds the name apart from 0.2.5's.
+*/}}
+{{- define "norviq.redisFailoverName" -}}
+norviq-valkey-ha
+{{- end -}}
+
+{{/*
 An EMPTY .host renders NO init container.
 
 The gate can only wait on an address it can name. With an external datastore configured the

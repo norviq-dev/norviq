@@ -123,14 +123,34 @@ because they should be installed.
   freeze or cap that came back with `norviq agent reset-trust <id> --score 1.0`, which also clears the
   agent's cap; to lift only a freeze and keep a cap, send that cap instead (`--score 0.5` clears the
   freeze and sets the cap to 0.5). Stores you run yourself (`redis.enabled=false`) are unaffected.
-- **HA (`redis.ha.enabled=true`, as in `values-prod.yaml`) stays on Redis 7.4.** The RedisFailover now
-  takes its own `redis.ha.image`, default `redis:7.4-alpine`, the same Redis 7.4 that 0.2.5's
-  `redis:7-alpine` ran, still under RSALv2/SSPLv1. Through 0.2.5 it took `images.redis`. Left on that,
-  this release would have rolled Valkey 8.1 into a running Redis 7.4 failover. Valkey loads neither the
-  RDB-12 dumps on the failover's volumes nor a full sync from its 7.4 master, and `helm --wait` does not
-  watch the operator's pods, so `helm upgrade` would have reported success while redundancy drained
-  away. Moving HA to Valkey is a separate, deliberate change: a renamed failover on fresh volumes. If you
-  overrode `images.redis` for HA, move that override to `redis.ha.image`.
+- **HA (`redis.ha.enabled=true`, as in `values-prod.yaml`) moves from Redis 7.4 to Valkey 8.1, as a
+  new failover that starts empty.** The RedisFailover's redis and sentinel pods now run
+  `redis.ha.image`, default `valkey/valkey:8.1-alpine` (BSD-3-Clause, digest-pinned). Through 0.2.5 the
+  redis pods ran `images.redis` (`redis:7-alpine`, by then Redis 7.4, RSALv2/SSPLv1) and the sentinels
+  ran the operator's own default image. The key keeps its `redis` name. Valkey cannot take over 0.2.5's
+  failover in place: Redis 7.4 writes RDB format 12, in its dumps and in the full sync it sends a
+  replica, and Valkey 8.1 reads format 11 at most, so it can neither load the old volumes nor replicate
+  from the old master (it exits with `Can't handle RDB format version 12`). `helm --wait` does not watch
+  the operator's pods, so a rolling swap would have reported success while redundancy drained away.
+  The failover is therefore renamed from `norviq-redis-ha` to `norviq-valkey-ha`: `helm upgrade`
+  creates it on new volumes (StatefulSet `rfr-norviq-valkey-ha`) and deletes the old RedisFailover.
+  The master Service keeps its name (`redis.ha.serviceName`, default `norviq-redis-ha`), so
+  `NRVQ_REDIS_URL` is unchanged; the Service has no endpoints until the operator has elected a Valkey
+  master, and the API's own retry covers that window. **The store starts empty**, with the same
+  consequences as the bundled store's upgrade above: trust history, behavioural profiles, sessions,
+  counters, caches and the logout denylist are reset, and freezes, trust caps and namespace posture
+  are absent from the store until an API pod starts against it. Do the same afterwards: when `helm
+  upgrade` has finished and the `rfr-norviq-valkey-ha` pods are Ready, run `kubectl -n <namespace>
+  rollout restart deployment/norviq-api` and look for `NRVQ-API-7034` and `NRVQ-API-7063`. Everything
+  in Postgres survives. **Unlike the bundled store, 0.2.5's data is not kept for a rollback.** The
+  Spotahome operator gives a failover's volume claims an owner reference to their RedisFailover unless
+  `keepAfterDeletion` is set, which 0.2.5's chart did not set, so deleting `norviq-redis-ha` lets
+  Kubernetes delete its claims, and their volumes then follow the storage class's reclaim policy. A
+  `helm rollback` to 0.2.5 brings back an empty Redis 7.4 failover (and deletes the Valkey one the same
+  way). If you want a copy of the old store, take it before the upgrade (`redis-cli --rdb` against the
+  master); only Redis 7.4 or later can read it. Pointing `redis.ha.image` back at a Redis image does not
+  avoid the new, empty failover: the name changes whatever it runs. If you overrode `images.redis` for
+  HA, move that override to `redis.ha.image`.
 - **OPA 1.21 rejects an empty collection literal that is read from, and a few other forms 1.19
   accepted.** OPA moves from 1.19.1 to 1.21.4 (see Security). Its type checker types a bare `{}`,
   `set()` or `[]` as having no members, so `names[x]`, `names[_]`, `not names[x]` or `xs[_]` over one is a

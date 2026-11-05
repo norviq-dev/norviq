@@ -336,7 +336,9 @@ blocks a merge: `main` has no branch protection and no rulesets, so no workflow 
 not block for the same reason. GOVERNANCE.md says when that changes.
 
 ### 7.3 The default Redis image is RSALv2/SSPLv1, on a floating tag, with no digest
-**Status:** licence half RESOLVED on `cncf-readiness` (`a822c7f`); the digest half open.
+**Status:** licence half RESOLVED on `cncf-readiness` (`a822c7f`) for the single store, and in 0.2.6
+for the HA failover too (redis and sentinel pods on Valkey). Digest half: every third-party image is
+now pinned through `global.thirdPartyImageDigests` and gated by `scripts/check_image_pins.py`.
 
 Ships `valkey/valkey:8.1-alpine` — BSD-3-Clause, LF fork, minor-pinned. Validated before pinning:
 the image symlinks `redis-server`/`redis-cli`, sentinel mode starts, and the full suite (3297) ran

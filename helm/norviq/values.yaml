@@ -41,6 +41,9 @@ global:
     # Hub return the same index digest. The /opa in its amd64 and arm64 images is a separate build of the
     # release binaries Dockerfile.api/engine verify: `go version -m` matches except for the build host.
     "openpolicyagent/opa:1.21.4-static": "sha256:47f93480b09e24c220ae75f1e9133585ba6d698059951668d35e6a4fc32ebc82"
+    # valkey — images.redis (the single-instance store) and redis.ha.image (the RedisFailover's redis
+    # and sentinel pods, rendered only with HA on) share this one ref. Re-checked 2026-11-04: Docker Hub
+    # and mirror.gcr.io return the same OCI index (Valkey 8.1.11; linux/amd64, arm64, arm/v7, ppc64le).
     "valkey/valkey:8.1-alpine": "sha256:2602ace2be6569bc2bbb06f873776516ab9089821525be34f4305c67eb9db02a"
     "postgres:16-alpine": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab"
     # nginx and curl — resolved 2026-11-02 (OCI index / manifest list; linux/amd64 and linux/arm64 among
@@ -51,11 +54,6 @@ global:
     "curlimages/curl:8.23.0": "sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93"
     # postgresql.ha.image — the CloudNativePG operand (PostgreSQL 16.15), rendered only with HA on.
     "ghcr.io/cloudnative-pg/postgresql:16": "sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a"
-    # redis.ha.image — the RedisFailover's redis (Redis 7.4.12), rendered only with HA on. Read as the
-    # Docker-Content-Digest of registry-1.docker.io/v2/library/redis/manifests/7.4-alpine (OCI index,
-    # 8 platforms incl. linux/amd64 and linux/arm64), and identical on mirror.gcr.io. `redis:7-alpine`,
-    # the tag 0.2.5 shipped, resolved to this same index on 2026-10-30.
-    "redis:7.4-alpine": "sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f"
 
 policyQuotaNamespaces: []
 
@@ -646,19 +644,21 @@ redis:
     # intended clients speak the Sentinel protocol; Norviq's client is a plain `redis://` URL. The
     # Service selects the operator's `redisfailovers-role: master` pod label, so it tracks the
     # current master and follows failover with no client changes. Failover-tested 2026-07-29: master
-    # killed, replica promoted, the Service endpoint moved and the API recovered on its own.
+    # killed, replica promoted, the Service endpoint moved and the API recovered on its own. That run
+    # was on Redis 7; on Valkey 8.1 the operator's replication, readiness and sentinel steps were rerun
+    # outside Kubernetes (2026-11-04), and the in-cluster failover still needs a run on a cluster.
     serviceName: norviq-redis-ha
-    # The RedisFailover's redis image, deliberately NOT images.redis. Through 0.2.5 both topologies ran
-    # images.redis (`redis:7-alpine`, by then Redis 7.4), and 0.2.6 moves images.redis to Valkey 8.1.
-    # Valkey 8.1 can neither load the RDB format 12 that Redis 7.4 left on the failover's volumes nor
-    # take a full sync from a Redis 7.4 master, and `helm upgrade --wait` does not watch the operator's
-    # pods. So the upgrade would report success while every pod the operator rolled failed to come
-    # back, losing redundancy one replica at a time. HA therefore stays on Redis 7.4 (RSALv2/SSPLv1,
-    # exactly what 0.2.5 ran). Moving it to Valkey is a separate, deliberate change: a renamed
-    # RedisFailover on fresh volumes. If you overrode images.redis for HA, set this instead. The
-    # sentinels are not covered by this value: the template sets no sentinel image, so they run the
-    # operator's own default.
-    image: "redis:7.4-alpine"
+    # The RedisFailover's image, for its redis AND sentinel pods: Valkey 8.1 (BSD-3-Clause). The key
+    # keeps its `redis` name; the store speaks the Redis protocol and the image ships `redis-server`
+    # and `redis-cli` as symlinks to the valkey binaries, which is what the operator's scripts call.
+    # Deliberately NOT images.redis, so a bump of the single store's engine never rolls into a running
+    # failover. Through 0.2.5 the failover ran Redis 7.4 (RSALv2/SSPLv1) under the name norviq-redis-ha.
+    # Valkey 8.1 can neither load the RDB format 12 that 7.4 left on those volumes nor take a full sync
+    # from a 7.4 master, and `helm upgrade --wait` does not watch the operator's pods. So 0.2.6 renders
+    # the failover under a NEW name, norviq-valkey-ha, on new volumes, and the upgrade starts the store
+    # empty (CHANGELOG, 0.2.6 upgrade impact). Changing the engine here again on a running failover
+    # needs the same care: check that the new image reads what the old one wrote, or rename.
+    image: "valkey/valkey:8.1-alpine"
   resources:
     requests:
       cpu: 100m

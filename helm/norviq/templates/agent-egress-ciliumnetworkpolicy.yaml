@@ -64,7 +64,7 @@ spec:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
             app.kubernetes.io/component: redis
-            redisfailovers.databases.spotahome.com/name: norviq-redis-ha
+            redisfailovers.databases.spotahome.com/name: {{ include "norviq.redisFailoverName" $root }}
         {{- else if $root.Values.redis.enabled }}
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
