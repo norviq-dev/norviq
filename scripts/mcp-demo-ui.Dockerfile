@@ -19,7 +19,7 @@
 # `certs` must be a directory containing `ca-bundle.crt`. On an unrestricted network any system CA
 # bundle works; behind an inspecting proxy, point it at that proxy's bundle.
 
-FROM --platform=$BUILDPLATFORM node:20-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:26-alpine AS builder
 WORKDIR /build
 COPY --from=certs ca-bundle.crt /etc/build-ca-bundle.crt
 # NODE_EXTRA_CA_CERTS covers node/npm; SSL_CERT_FILE covers anything else the build shells out to.
