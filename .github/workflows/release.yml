@@ -345,7 +345,7 @@ jobs:
           overwrite: true      # a re-run after a failed PyPI upload must not stop here on a 409
 
       - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
   # ---------------------------------------------------------------------------------------------
   # After PyPI, and only on a tag: attach the released files to the GitHub Release for the tag.
@@ -385,7 +385,7 @@ jobs:
 
       # The lockfiles it reads are uv.lock, ui/package-lock.json and webhook/go.sum, among others.
       - name: Generate SBOM of the tagged source (SPDX)
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
