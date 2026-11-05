@@ -5,7 +5,7 @@
 #   pip install -e ".[langchain,langgraph]"
 # (those extras are declared in pyproject.toml and pull langchain-core + langgraph).
 langchain-groq>=0.2.0
-fastapi>=0.111.0
+fastapi>=0.162.0
 uvicorn>=0.30.0
 # The official MCP client, used by mcp_tools.py to speak streamable-HTTP to the firewall sidecars.
 # Deliberately the protocol SDK and not langchain-mcp-adapters: that package flattens an `isError`
