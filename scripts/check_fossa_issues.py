@@ -8,11 +8,20 @@ or any well-formed object without that exact key produced an empty list, zero fi
 The diagnostic step forty lines earlier already parsed both spellings and a bare list; the gate did
 not, so the two could disagree and the gate would win. A scan that cannot tell "no issues" from
 "I did not find the issues" reports safety it never verified.
+
+The gate judges what ships. FOSSA re-resolves transitive Python dependencies server-side, so it can
+report a version that is not in the closure the images install (0.2.6: cryptography 46.0.5, urllib3
+2.6.3, idna 3.11, while the lock pins 50.0.0, 2.8.0 and 3.18). Given `--shipped <requirements file>`
+(the `uv export` closure fossa.yml generates), a pip vulnerability is gated only when its exact
+name+version is in that closure; any other is listed separately and does not fail the gate. Malware
+always fails, npm/go findings are gated as before, and a shipped file that is missing, empty or
+contains a line the parser cannot read fails the gate closed.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 # Documented in SECURITY.md, whose table must name exactly these ids (tests/test_check_fossa_issues.py
@@ -40,6 +49,57 @@ class UnrecognisedShape(ValueError):
     pass
 
 
+class UnreadableShipped(ValueError):
+    pass
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+_REQ = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==([^\s;]+)\s*(?:;.*)?$")
+
+
+def shipped_from(text: str) -> dict[str, set[str]]:
+    """{normalised name: {versions}} from a `uv export --no-hashes` requirements file. Comments,
+    blank lines and indented `# via` lines are skipped; any other line must be `name==version`."""
+    out: dict[str, set[str]] = {}
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _REQ.match(line)
+        if not m:
+            raise UnreadableShipped(f"line {n} is not a pinned `name==version` requirement: {raw!r}")
+        out.setdefault(_norm(m.group(1)), set()).add(m.group(2))
+    if not out:
+        raise UnreadableShipped("no pinned packages found")
+    return out
+
+
+def _pip_pkg(issue: dict) -> tuple[str, str] | None:
+    rev = issue.get("revisionId") or ""
+    if not rev.startswith("pip+") or "$" not in rev:
+        return None
+    name, _, version = rev[4:].rpartition("$")
+    return (_norm(name), version) if name and version else None
+
+
+def _not_shipped(issue: dict, shipped: dict[str, set[str]] | None) -> str | None:
+    """Why a vulnerability is outside the shipped closure, or None if it is gated."""
+    if shipped is None or (issue.get("type") or issue.get("Type")) != "vulnerability":
+        return None
+    pkg = _pip_pkg(issue)
+    if pkg is None:
+        return None
+    name, version = pkg
+    if version in shipped.get(name, ()):
+        return None
+    if name in shipped:
+        return f"FOSSA {version}, shipped {', '.join(sorted(shipped[name]))}"
+    return f"FOSSA {version}, package not shipped"
+
+
 def issues_from(payload: object) -> list[dict]:
     """Every shape the gate accepts. Anything else is an error, not an empty list."""
     if isinstance(payload, list):
@@ -60,32 +120,55 @@ def _accepted(issue: dict) -> str | None:
     return next((c for c in ACCEPTED if c in blob), None)
 
 
-def gate(payload: object) -> tuple[int, str]:
-    """(exit code, message)."""
+def gate(payload: object, shipped: dict[str, set[str]] | None = None) -> tuple[int, str]:
+    """(exit code, message). `shipped` None gates every pip finding, as before the closure check."""
     sec = [i for i in issues_from(payload) if (i.get("type") or i.get("Type")) in _SEC]
     accepted = [i for i in sec if _accepted(i)]
-    gated = [i for i in sec if not _accepted(i)]
+    rest = [i for i in sec if not _accepted(i)]
+    outside = [(i, _not_shipped(i, shipped)) for i in rest if _not_shipped(i, shipped)]
+    gated = [i for i in rest if not _not_shipped(i, shipped)]
     lines = []
     if accepted:
         lines.append(f"NOTE: {len(accepted)} accepted dependency exception(s) (documented in SECURITY.md):")
         lines += [f"  - {_accepted(i)}: {i.get('revisionId', '')}" for i in accepted]
+    if outside:
+        lines.append(f"NOTE: {len(outside)} finding(s) not in the shipped closure (FOSSA resolved these itself):")
+        lines += [f"  - {i.get('revisionId', '')} {i.get('cve') or ''} ({why})" for i, why in outside]
     if gated:
         lines.append(f"FOSSA security gate FAILED — {len(gated)} dependency vuln/malware issue(s):")
         lines += [f"  - {i.get('type') or i.get('Type')}: {i.get('revisionId', '')} {i.get('cve') or ''}" for i in gated]
         return 1, "\n".join(lines)
     lines.append(f"FOSSA security gate PASSED — 0 non-excepted dependency vuln/malware issues "
-                 f"({len(accepted)} documented exception(s); license/outdated are informational).")
+                 f"({len(accepted)} documented exception(s), {len(outside)} not in the shipped closure; "
+                 f"license/outdated are informational).")
     return 0, "\n".join(lines)
 
 
-def main(path: str = "fossa-issues.json") -> int:
+def main(*argv: str) -> int:
+    args = list(argv)
+    shipped_path = None
+    if "--shipped" in args:
+        k = args.index("--shipped")
+        if k + 1 >= len(args):
+            print("--shipped needs a requirements file")
+            return 1
+        shipped_path = args[k + 1]
+        del args[k:k + 2]
+    path = args[0] if args else "fossa-issues.json"
+    shipped = None
+    if shipped_path is not None:
+        try:
+            shipped = shipped_from(open(shipped_path).read())
+        except (OSError, ValueError) as exc:
+            print(f"could not read the shipped closure {shipped_path} — failing closed: {exc}")
+            return 1
     try:
         payload = json.load(open(path))
     except (OSError, ValueError) as exc:
         print(f"could not read {path}: {exc}")
         return 1
     try:
-        code, msg = gate(payload)
+        code, msg = gate(payload, shipped)
     except UnrecognisedShape as exc:
         print(f"FOSSA output has an unrecognised shape — refusing to treat it as zero issues: {exc}")
         return 1

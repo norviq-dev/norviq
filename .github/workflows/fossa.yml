@@ -131,4 +131,7 @@ jobs:
       - name: FOSSA security gate (fail on dependency vuln/malware)
         if: always()
         run: |
-          python3 scripts/check_fossa_issues.py fossa-issues.json
+          # --shipped: FOSSA re-resolves transitive pip dependencies server-side and can grade versions
+          # the images never install. A pip vulnerability fails only if its exact version is in the
+          # closure generated above; others are listed, not gated. Missing/unreadable file fails closed.
+          python3 scripts/check_fossa_issues.py fossa-issues.json --shipped requirements-runtime.txt
