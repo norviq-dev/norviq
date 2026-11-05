@@ -178,7 +178,7 @@ class HttpProxy:
 
         No retry loop of its own: unlike the pin store there is nothing to swap in on success — the
         firewall already holds the registry object, and `start_refresh` re-attempts the load on the
-        same interval whether or not the first one worked. A failure here is loud (NRVQ-MCP-5070) and
+        same interval whether or not the first one worked. A failure here is loud (NRVQ-MCP-5077) and
         recovers on the next tick.
         """
         self._servers.namespace = await self._attested_namespace()

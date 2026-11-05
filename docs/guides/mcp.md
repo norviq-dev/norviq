@@ -886,8 +886,8 @@ alias key withheld, `5092` a notification too large to read in full dropped, `50
 too large to read in full answered with an error, `5094` a demand for input too large to read in full
 withheld. Latency is recorded as
 `norviq_path_phase_ms{component="mcp"}` with phases `evaluate`, `call_total`, `gate_a_tools_list` and
-`response_guard` (`norviq/telemetry/metrics.py:156-168`). Of these, only `5079`–`5085` and `5087`–`5094` are
-listed in [Error Codes](../error-codes.md) so far.
+`response_guard` (`norviq/telemetry/metrics.py:156-168`). Every `NRVQ-MCP-5xxx` code, with its event key, is
+listed in [Error Codes](../error-codes.md#mcp).
 
 ---
 

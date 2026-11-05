@@ -24,12 +24,12 @@ individually described.
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
 | API | 107 | `norviq/api/main.py`, `norviq/api/routers/*` |
+| MCP | 64 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
 | WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/controller.go`, `webhook/injector.go` |
 | ENG | 54 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
-| MCP | 49 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
 | DB | 45 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
 | FLT | 39 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
-| SDK | 38 | `norviq/sdk/*` |
+| SDK | 39 | `norviq/sdk/*` |
 | REG | 25 | `norviq/engine/policy_loader.py` |
 | SDC | 30 | `norviq/sidecar/*` |
 | AUTH | 29 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py` |
@@ -42,7 +42,7 @@ individually described.
 | SIEM | 6 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **538** (including `*-DEBUG-*` traces). Counted 2026-11-02 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
+Total unique codes: **554** (including `*-DEBUG-*` traces). Counted 2026-11-04 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
 
 ## API
 
@@ -375,6 +375,80 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 | **NRVQ-SDC-3033** | `nrvq.sidecar.mode.embedded` — this workload evaluates **locally** with its own `RedisCache` + OPA + `PolicyLoader` instead of proxying to the central API. Expected on the `norviq-engine` Deployment, which pins `NRVQ_SIDECAR_MODE=embedded`, and on air-gapped/edge injected sidecars. Seeing it on a pod you expected to be a thin proxy means `NRVQ_SIDECAR_MODE` was overridden. | `norviq/sidecar/proxy.py` |
 | NRVQ-SDC-3045 / 3046 | Embedded engine startup could not reach a datastore: one attempt failed and is being retried (WARNING, `nrvq.startup.engine_cache_connect_retry` for Redis, `nrvq.sidecar.datastore_retry` with `store=postgres` for the policy warm) / the bounded backoff is **exhausted** and startup fails, so the pod restarts (ERROR, `…_failed` / `nrvq.sidecar.datastore_unreachable`). Same 1, 2, 4, 8 s schedule as the API (about 15 s per store). The Redis connect retries any error, like the API's; the Postgres warm retries only an unreachable store (refused, unresolvable, timed out, Postgres 57P03), so an auth failure or a bad row surfaces at once. | `norviq/sidecar/proxy.py`, `norviq/startup_retry.py` |
 
+## MCP
+
+Every `NRVQ-MCP-5xxx` code emitted by the MCP firewall proxy and the API's MCP routes. How the gates
+behave is in [Governing MCP traffic](guides/mcp.md). `NRVQ-REG-5xxx` is a different component that
+reuses the same numbers. The Source column names the files that emit the code; a file that only
+mentions it in a comment is not listed.
+
+| Code | Message (event key) | Source |
+|---|---|---|
+| NRVQ-MCP-5000 | `nrvq.mcp.proxy.started` (INFO: the stdio proxy started the MCP server process; `pid`, `pin_mode`) | `norviq/mcp/stdio.py` |
+| NRVQ-MCP-5001 | `nrvq.mcp.proxy.pump_failed` (ERROR: a stdio pump task failed, so the session ends) | `norviq/mcp/stdio.py` |
+| NRVQ-MCP-5002 | `nrvq.mcp.proxy.stopped` (INFO: the stdio proxy stopped; `stats`) | `norviq/mcp/stdio.py` |
+| NRVQ-MCP-5003 | `nrvq.mcp.client.undecodable_dropped` (WARNING: a client line that did not parse as JSON-RPC was dropped, not forwarded) | `norviq/mcp/stdio.py` |
+| NRVQ-MCP-5004 | `nrvq.mcp.server.undecodable_dropped` (WARNING: a server message that did not parse was dropped, not forwarded; `transport=http` on the HTTP proxy) | `norviq/mcp/stdio.py`, `norviq/mcp/http.py` |
+| NRVQ-MCP-5005 | `nrvq.mcp.oversized_message_dropped` (ERROR: a stdio line over the line limit was drained and dropped, never truncated) | `norviq/mcp/stdio.py` |
+| NRVQ-MCP-5006 | `nrvq.mcp.http.started` (INFO: the HTTP proxy is listening; `listen`, `upstream`) | `norviq/mcp/http.py` |
+| NRVQ-MCP-5010 | `nrvq.mcp.batch_refused` (WARNING: a JSON-RPC batch from the client was refused) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5011 | `nrvq.mcp.malformed_dropped` (WARNING: a server message that is not a request, notification or response was dropped) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5020 | `nrvq.mcp.gate_a.call_denied` (WARNING: a `tools/call` was refused because Gate A denied that tool at discovery; `pin_status`, `severity`) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5021 | `nrvq.mcp.gate_b.blocked` (WARNING: policy did not allow a `tools/call`; `decision`, `rule`) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5022 | `nrvq.mcp.gate_b.resource_blocked` (WARNING: policy did not allow a `resources/read`) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5023 | `nrvq.mcp.gate_b.sampling_blocked` (WARNING: policy did not allow a server's `sampling/createMessage` request) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5030 | `nrvq.mcp.catalog_changed` (INFO: the server announced a list change, so every cached tool entry was marked stale) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5031 | `nrvq.mcp.gate_a.stripped` (WARNING: the scan removed a tool from a `tools/list` result) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5032 | `nrvq.mcp.gate_a.sanitized` (WARNING: the scan replaced a tool's description and dropped its annotations) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5033 | `nrvq.mcp.gate_a.annotated` (INFO: a tool had scan findings below the strip and sanitise actions and was kept) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5034 | `nrvq.mcp.gate_a.prompt_flagged` (WARNING: a `prompts/get` result had scan findings) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5035 | `nrvq.mcp.output_dlp.redacted` (WARNING: output DLP redacted content blocks in a tool result) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5036 | `nrvq.mcp.response.injection_flagged` (WARNING: a tool response had injection findings) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5037 | `nrvq.mcp.denial_report_failed` (WARNING: reporting a proxy refusal to the control plane failed; the refusal stands) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5040 | `nrvq.mcp.pins.loaded` (INFO: the file pin store was loaded; `path`, `count`) | `norviq/mcp/pins.py` |
+| NRVQ-MCP-5041 | `nrvq.mcp.pin.first_seen` (INFO: a tool definition was pinned for the first time, as first seen or quarantined depending on the pin mode) | `norviq/mcp/pins.py`, `norviq/api/routers/mcp.py` |
+| NRVQ-MCP-5042 | `nrvq.mcp.pin.drift` (WARNING: a served tool definition differs from its approved pin) | `norviq/mcp/pins.py`, `norviq/api/routers/mcp.py` |
+| NRVQ-MCP-5043 | `nrvq.mcp.pin.approved` (INFO: a pin was approved) | `norviq/mcp/pins.py`, `norviq/api/routers/mcp.py` |
+| NRVQ-MCP-5044 | `nrvq.mcp.pin.revoked` (WARNING: an admin revoked a pin's approval) | `norviq/api/routers/mcp.py` |
+| NRVQ-MCP-5045 | `nrvq.mcp.server.forgotten` (WARNING: an admin removed a server's records through `DELETE /api/v1/mcp/servers/{namespace}/{server_id}`; `removed`, `decision_kept`) | `norviq/api/routers/mcp.py` |
+| NRVQ-MCP-5046 | `nrvq.mcp.http.pin_store_degraded`, `nrvq.mcp.pins.control_plane_unreachable` (ERROR: the control-plane pin store could not be loaded, so pins fall back to per-process TOFU and cross-pod drift detection is degraded; Gate B still evaluates every call) | `norviq/mcp/http.py`, `norviq/mcp/pins.py` |
+| NRVQ-MCP-5047 | `nrvq.mcp.http.pin_store_recovered`, `nrvq.mcp.pins.loaded_from_control_plane` (INFO: the control-plane pin store is installed and loaded) | `norviq/mcp/http.py`, `norviq/mcp/pins.py` |
+| NRVQ-MCP-5048 | `nrvq.mcp.pins.control_plane_recovered` (INFO: a load succeeded after the store was degraded); also `nrvq.mcp.pins.report_failed` (WARNING: reporting pin state to the control plane failed; the local decision is unaffected) | `norviq/mcp/pins.py` |
+| NRVQ-MCP-5060 | `nrvq.mcp.answer.denied` (WARNING: policy refused a client's answer to a server's request for input; the answer was not sent) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5061 | `nrvq.mcp.input_required.flagged` (WARNING: a server's demand for input had scan findings and was forwarded with an annotation) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5062 | `nrvq.mcp.output_dlp.structured_redacted` (WARNING: output DLP redacted values in structured tool output) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5063 | `nrvq.mcp.tool_header_denied` (WARNING: a `tools/call` whose arguments set outbound HTTP headers was refused, because `mcp_allow_tool_headers` is off); also `nrvq.mcp.content_guard.budget_exhausted` (WARNING: a response had more content than the content guard budget covers) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5064 | `nrvq.mcp.discover.flagged` (WARNING: an `initialize` or `server/discover` result had scan findings and was forwarded with an annotation) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5065 | `nrvq.mcp.http.pin_store_upgraded` (WARNING: the HTTP proxy was configured with the `memory` pin store and uses `control-plane` instead) | `norviq/mcp/http.py` |
+| NRVQ-MCP-5066 | `nrvq.mcp.gate_b.schema_violation` (WARNING: a `tools/call` did not match the tool's declared `inputSchema` and was refused) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5067 | `nrvq.mcp.gate_a.item_list_flagged` (WARNING: entries in a `resources/list`, `resources/templates/list` or `prompts/list` result had scan findings; `withheld`) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5068 | `nrvq.mcp.gate_a.server_blocked` (WARNING: the server is blocked in the registry, so its tools were withheld from `tools/list`); also `nrvq.mcp.gate_a.elicitation_flagged` (WARNING: a server elicitation had scan findings) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5069 | `nrvq.mcp.server.decision` (WARNING: an admin set a server decision through `POST /api/v1/mcp/servers/decision`); also `nrvq.mcp.notification_flagged` (WARNING: a server notification had scan findings) | `norviq/api/routers/mcp.py`, `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5070 | `nrvq.mcp.gate_a.schema_not_fully_enforceable` (WARNING, once at discovery: schema conformance is on and this tool's schema cannot be fully checked) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5071 | `nrvq.mcp.servers.loaded`, `nrvq.mcp.servers.control_plane_recovered` (INFO: the server registry was loaded from the control plane) | `norviq/mcp/servers.py` |
+| NRVQ-MCP-5072 | `nrvq.mcp.servers.unknown_status` (WARNING: the control plane sent a server status this proxy does not know; it is treated as `discovered`, not blocked) | `norviq/mcp/servers.py` |
+| NRVQ-MCP-5073 | `nrvq.mcp.http.namespace_unresolved` (WARNING: the HTTP proxy could not resolve its SPIFFE identity, so control-plane pins and server decisions are not namespace-scoped) | `norviq/mcp/http.py` |
+| NRVQ-MCP-5074 | `nrvq.mcp.registry.materialized` (INFO: the API recompiled the namespace's `__mcp__` module from the server registry; `registered`, `writable`) | `norviq/api/routers/mcp.py` |
+| NRVQ-MCP-5075 | `nrvq.mcp.registry.materialize_failed` (ERROR: that recompile failed; the decision is committed but the module is stale until the next write) | `norviq/api/routers/mcp.py` |
+| NRVQ-MCP-5076 | `nrvq.mcp.gate_a.server_decision_unavailable` (WARNING: the registry could not be read from the control plane, so this server's tools were served without a server-level decision; Gate B still evaluates every call) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5077 | `nrvq.mcp.servers.control_plane_unreachable` (ERROR: the server registry could not be loaded from the control plane and is marked degraded) | `norviq/mcp/servers.py` |
+| NRVQ-MCP-5078 | `nrvq.mcp.pins.store_degraded` (WARNING: the configured pin store kind could not be used, for example `file` without `NRVQ_MCP_PIN_PATH`, so pins are held in process) | `norviq/mcp/pins.py` |
+| NRVQ-MCP-5079 | `nrvq.mcp.gate_a.cold_listed` (INFO: a `tools/call` arrived before any `tools/list` was scanned and the proxy listed the server itself, through Gate A, before deciding it) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5080 | `nrvq.mcp.gate_a.cold_list_failed` (WARNING: that list failed or timed out, so the call was evaluated with no scanned definition and the baseline escalates it as `mcp_definition_never_scanned`; retried after 30s) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5081 | `nrvq.mcp.gate_a.cold_list_answer_dropped` (WARNING: an answer to that list arrived when nothing awaited it, late or a duplicate, and was dropped instead of reaching the client unscanned) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5082 | `nrvq.mcp.http.sse_lines_dropped` (WARNING: lines in a server SSE frame that were neither data nor a known SSE field were not forwarded) | `norviq/mcp/http.py` |
+| NRVQ-MCP-5083 | `nrvq.mcp.gate_a.cold_list_superseded` (INFO: a client `tools/list` completed while the proxy's own list was in flight, so the proxy's answer was discarded and the call decided from the client's listing) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5084 | `nrvq.mcp.server.unmatched_response_dropped` (WARNING, at most once a minute with a count of the drops in between: a server response was dropped because it answers no pending client request, answers one the proxy has not forwarded yet, arrived on a GET stream that resumes no request of the client, or is not a well-formed answer to it) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5085 | `nrvq.mcp.http.upstream_message_too_large` (WARNING: an upstream message on a client-facing HTTP path exceeded `NRVQ_MCP_HTTP_MAX_MESSAGE_BYTES`; the JSON route answers 502 with a JSON-RPC error, a stream ends) | `norviq/mcp/http.py` |
+| NRVQ-MCP-5087 | `nrvq.mcp.http.session_id_withheld` (WARNING: a response other than the one to `initialize` carried an `Mcp-Session-Id` different from the client's own; it was not passed to the client) | `norviq/mcp/http.py` |
+| NRVQ-MCP-5088 | `nrvq.mcp.http.sse_event_id_too_long` (WARNING: a server SSE event id longer than 256 bytes was removed from its frame and not remembered; the client cannot resume to that event) | `norviq/mcp/http.py` |
+| NRVQ-MCP-5089 | `nrvq.mcp.client.ambiguous_key_refused` (WARNING: a client message was refused because a key in it differs from a protocol field only by case or compatibility form) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5090 | `nrvq.mcp.http.post_back_dropped` (WARNING, at most once a minute: the refusal of a server request was not posted back upstream because 8 were already in flight) | `norviq/mcp/http.py` |
+| NRVQ-MCP-5091 | `nrvq.mcp.server.alias_key_refused` (WARNING: a server message — its envelope (`surface=envelope`, dropped), or a result, request or notification — carried a key that differs from a protocol field only by case or compatibility form; a tool result became a tool error, a resource or prompt result an error, a server request was refused, a notification dropped; list entries with such a key are withheld under the Gate A finding `mcp_a_alias_key`) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5092 | `nrvq.mcp.notification_withheld` (WARNING: a server notification was larger than the scan budget allows, so it could not be read in full and was dropped) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5093 | `nrvq.mcp.discover.withheld` (WARNING: an `initialize` or `server/discover` result was larger than the scan budget allows and was answered to the client with an error) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5094 | `nrvq.mcp.input_required.withheld` (WARNING: a demand for input was larger than the scan budget allows and became a tool error) | `norviq/mcp/firewall.py` |
+
 ## REG / GRP / AUD / RED / TEL / CLI / SDK / IDT
 
 | Component | Codes | Source |
@@ -388,15 +462,15 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 | CLI | NRVQ-CLI-8000..8004 | `norviq/cli/*` |
 | SDK | NRVQ-SDK-1000, 1002, 1010..1013, 1016 (`nrvq.sdk.evaluate.unencodable`, ERROR: the evaluate request could not be encoded in this process, or carried a non-finite number that would have reached the engine as null; the call is blocked whatever `sdk_fallback_mode` says, since this is not an engine outage), 1020..1022, 1030..1032 (langchain), 1040..1044 (langgraph), 1050..1053 (crewai), 1060..1063 (autogen), 1070..1073 (semantic-kernel). 1043/1073 = output-DLP redaction (opt-in); 1044/1053/1063 = the `protect()` fail-closed-by-default warning on `allow_unwrapped=True`. | `norviq/sdk/*` |
 | IDT | NRVQ-IDT-10000..10006 | `norviq/engine/identity.py` |
-| MCP | NRVQ-MCP-5079 (`nrvq.mcp.gate_a.cold_listed`, INFO: a `tools/call` arrived before any `tools/list` was scanned and the proxy listed the server itself, through Gate A, before deciding it), 5080 (`nrvq.mcp.gate_a.cold_list_failed`, WARNING: that list failed or timed out, so the call was evaluated with no scanned definition and the baseline escalates it as `mcp_definition_never_scanned`; retried after 30s), 5081 (`nrvq.mcp.gate_a.cold_list_answer_dropped`, WARNING: an answer to that list arrived when nothing awaited it, late or a duplicate, and was dropped instead of reaching the client unscanned), 5082 (`nrvq.mcp.http.sse_lines_dropped`, WARNING: lines in a server SSE frame that were neither data nor a known SSE field were not forwarded), 5083 (`nrvq.mcp.gate_a.cold_list_superseded`, INFO: a client `tools/list` completed while the proxy's own list was in flight, so the proxy's answer was discarded and the call decided from the client's listing), 5084 (`nrvq.mcp.server.unmatched_response_dropped`, WARNING, at most once a minute with a count of the drops in between: a server response was dropped because it answers no pending client request, answers one the proxy has not forwarded yet, arrived on a GET stream that resumes no request of the client, or is not a well-formed answer to it), 5085 (`nrvq.mcp.http.upstream_message_too_large`, WARNING: an upstream message on a client-facing HTTP path exceeded `NRVQ_MCP_HTTP_MAX_MESSAGE_BYTES`; the JSON route answers 502 with a JSON-RPC error, a stream ends), 5087 (`nrvq.mcp.http.session_id_withheld`, WARNING: a response other than the one to `initialize` carried an `Mcp-Session-Id` different from the client's own; it was not passed to the client), 5088 (`nrvq.mcp.http.sse_event_id_too_long`, WARNING: a server SSE event id longer than 256 bytes was removed from its frame and not remembered; the client cannot resume to that event), 5089 (`nrvq.mcp.client.ambiguous_key_refused`, WARNING: a client message was refused because a key in it differs from a protocol field only by case or compatibility form), 5090 (`nrvq.mcp.http.post_back_dropped`, WARNING, at most once a minute: the refusal of a server request was not posted back upstream because 8 were already in flight), 5091 (`nrvq.mcp.server.alias_key_refused`, WARNING: a server message — its envelope (`surface=envelope`, dropped), or a result, request or notification — carried a key that differs from a protocol field only by case or compatibility form; a tool result became a tool error, a resource or prompt result an error, a server request was refused, a notification dropped; list entries with such a key are withheld under the Gate A finding `mcp_a_alias_key`), 5092 (`nrvq.mcp.notification_withheld`, WARNING: a server notification was larger than the scan budget allows, so it could not be read in full and was dropped), 5093 (`nrvq.mcp.discover.withheld`, WARNING: an `initialize` or `server/discover` result was larger than the scan budget allows and was answered to the client with an error), 5094 (`nrvq.mcp.input_required.withheld`, WARNING: a demand for input was larger than the scan budget allows and became a tool error). The rest of the 5xxx range is described in [Governing MCP traffic](guides/mcp.md) §8 and not yet indexed here | `norviq/mcp/firewall.py` |
 | AUTH | NRVQ-AUTH-14000..14007, 14010..14029, 14031 (14024..14029 and 14031: durable logout revocation) | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py`, `norviq/api/main.py`, `norviq/api/session_revocation.py` |
 | FLT | NRVQ-FLT-15000..15005, 15009..15035, 15040..15042 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
 
 ## Full Code Index
 
 Every `NRVQ-*` literal present in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**` (test files
-excluded), grouped by component. Regenerate by grepping those trees — this list is the check that a
-newly added code got documented above.
+excluded), grouped by component. Regenerate by grepping those trees.
+`tests/test_error_codes_indexed.py` fails when a code in those trees is missing from this list, or
+when this list names a code the trees no longer carry.
 
 ```text
 NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7013,
@@ -441,7 +515,10 @@ NRVQ-MCP-5031, NRVQ-MCP-5032, NRVQ-MCP-5033, NRVQ-MCP-5034, NRVQ-MCP-5035, NRVQ-
 NRVQ-MCP-5040, NRVQ-MCP-5041, NRVQ-MCP-5042, NRVQ-MCP-5043, NRVQ-MCP-5044, NRVQ-MCP-5045, NRVQ-MCP-5046,
 NRVQ-MCP-5047, NRVQ-MCP-5048, NRVQ-MCP-5060, NRVQ-MCP-5061, NRVQ-MCP-5062, NRVQ-MCP-5063, NRVQ-MCP-5064,
 NRVQ-MCP-5065, NRVQ-MCP-5066, NRVQ-MCP-5067, NRVQ-MCP-5068, NRVQ-MCP-5069, NRVQ-MCP-5070, NRVQ-MCP-5071,
-NRVQ-MCP-5072, NRVQ-MCP-5073, NRVQ-MCP-5074, NRVQ-MCP-5075, NRVQ-MCP-5076, NRVQ-MCP-5077, NRVQ-MCP-5078
+NRVQ-MCP-5072, NRVQ-MCP-5073, NRVQ-MCP-5074, NRVQ-MCP-5075, NRVQ-MCP-5076, NRVQ-MCP-5077, NRVQ-MCP-5078,
+NRVQ-MCP-5079, NRVQ-MCP-5080, NRVQ-MCP-5081, NRVQ-MCP-5082, NRVQ-MCP-5083, NRVQ-MCP-5084, NRVQ-MCP-5085,
+NRVQ-MCP-5087, NRVQ-MCP-5088, NRVQ-MCP-5089, NRVQ-MCP-5090, NRVQ-MCP-5091, NRVQ-MCP-5092, NRVQ-MCP-5093,
+NRVQ-MCP-5094
 
 NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012,
 NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019,
@@ -459,11 +536,11 @@ NRVQ-FLT-15031, NRVQ-FLT-15032, NRVQ-FLT-15033, NRVQ-FLT-15034, NRVQ-FLT-15035, 
 NRVQ-FLT-15042, NRVQ-FLT-15043, NRVQ-FLT-15044, NRVQ-FLT-15045
 
 NRVQ-SDK-1000, NRVQ-SDK-1002, NRVQ-SDK-1010, NRVQ-SDK-1011, NRVQ-SDK-1012, NRVQ-SDK-1013, NRVQ-SDK-1014,
-NRVQ-SDK-1015, NRVQ-SDK-1020, NRVQ-SDK-1021, NRVQ-SDK-1022, NRVQ-SDK-1030, NRVQ-SDK-1031, NRVQ-SDK-1032,
-NRVQ-SDK-1040, NRVQ-SDK-1041, NRVQ-SDK-1042, NRVQ-SDK-1043, NRVQ-SDK-1044, NRVQ-SDK-1045, NRVQ-SDK-1050,
-NRVQ-SDK-1051, NRVQ-SDK-1052, NRVQ-SDK-1053, NRVQ-SDK-1060, NRVQ-SDK-1061, NRVQ-SDK-1062, NRVQ-SDK-1063,
-NRVQ-SDK-1064, NRVQ-SDK-1070, NRVQ-SDK-1071, NRVQ-SDK-1072, NRVQ-SDK-1073, NRVQ-SDK-1074, NRVQ-SDK-1080,
-NRVQ-SDK-1081, NRVQ-SDK-1082, NRVQ-SDK-1083
+NRVQ-SDK-1015, NRVQ-SDK-1016, NRVQ-SDK-1020, NRVQ-SDK-1021, NRVQ-SDK-1022, NRVQ-SDK-1030, NRVQ-SDK-1031,
+NRVQ-SDK-1032, NRVQ-SDK-1040, NRVQ-SDK-1041, NRVQ-SDK-1042, NRVQ-SDK-1043, NRVQ-SDK-1044, NRVQ-SDK-1045,
+NRVQ-SDK-1050, NRVQ-SDK-1051, NRVQ-SDK-1052, NRVQ-SDK-1053, NRVQ-SDK-1060, NRVQ-SDK-1061, NRVQ-SDK-1062,
+NRVQ-SDK-1063, NRVQ-SDK-1064, NRVQ-SDK-1070, NRVQ-SDK-1071, NRVQ-SDK-1072, NRVQ-SDK-1073, NRVQ-SDK-1074,
+NRVQ-SDK-1080, NRVQ-SDK-1081, NRVQ-SDK-1082, NRVQ-SDK-1083
 
 NRVQ-REG-5000, NRVQ-REG-5001, NRVQ-REG-5002, NRVQ-REG-5003, NRVQ-REG-5004, NRVQ-REG-5005, NRVQ-REG-5006,
 NRVQ-REG-5007, NRVQ-REG-5008, NRVQ-REG-5010, NRVQ-REG-5011, NRVQ-REG-5012, NRVQ-REG-5013, NRVQ-REG-5014,
