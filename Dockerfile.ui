@@ -14,7 +14,7 @@ RUN npm run build
 
 # The unprivileged nginx image runs as uid 101 (non-root) and binds :8080, so the console
 # container no longer runs as root and the pod can drop ALL Linux caps (no NET_BIND_SERVICE needed).
-FROM nginxinc/nginx-unprivileged:1.30-alpine
+FROM nginxinc/nginx-unprivileged:1.31-alpine
 # apk upgrade + the file COPY/chown steps need root; we drop back to uid 101 (the image default) at the end.
 USER root
 # Patch fixable OS-package CVEs in the base at build time (e.g. curl/libcurl HIGHs) so the shipped

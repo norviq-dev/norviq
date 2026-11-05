@@ -17,9 +17,9 @@
 # at any directory holding a CA bundle under that name (or symlink the system bundle); it exists
 # because the environment this was developed in re-terminates TLS at an egress proxy, and a build
 # that silently disables certificate verification instead would be worse than an extra flag.
-FROM openpolicyagent/opa:1.21.4-static AS opabin
+FROM openpolicyagent/opa:1.22.0-static AS opabin
 
-FROM python:3.12-slim AS builder
+FROM python:3.15-slim AS builder
 WORKDIR /build
 COPY --from=certs ca-bundle.crt /etc/build-ca-bundle.crt
 ENV PIP_CERT=/etc/build-ca-bundle.crt \
@@ -29,7 +29,7 @@ COPY pyproject.toml .
 COPY norviq/ norviq/
 RUN pip install --no-cache-dir --target=/deps '.[spiffe,mcp]' uvicorn
 
-FROM python:3.12-slim
+FROM python:3.15-slim
 WORKDIR /app
 COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
 

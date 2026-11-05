@@ -2,7 +2,7 @@
 # Copyright 2026 Norviq Contributors
 # Build on the runner's native arch and cross-compile to the target arch (TARGETOS/TARGETARCH
 # are provided by buildx) — avoids running the Go toolchain under slow QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 # Build-provenance stamp (broadcast by CI: build.yml build-args NRVQ_GIT_SHA=github.sha). The
