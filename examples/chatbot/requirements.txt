@@ -4,7 +4,7 @@
 # Demo-only dependencies. The Norviq SDK itself comes from this checkout — run from the repo root:
 #   pip install -e ".[langchain,langgraph]"
 # (those extras are declared in pyproject.toml and pull langchain-core + langgraph).
-langchain-groq>=0.2.0
+langchain-groq>=1.1.3
 fastapi>=0.111.0
 uvicorn>=0.30.0
 # The official MCP client, used by mcp_tools.py to speak streamable-HTTP to the firewall sidecars.
