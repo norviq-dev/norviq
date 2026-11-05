@@ -11,7 +11,7 @@
 # The floor and the cap match pyproject.toml's `mcp` extra deliberately: the firewall sidecar and
 # these servers must agree on the protocol revision, and a split between them would surface as a
 # transport error that reads like a policy failure.
-mcp>=1.30.0,<2
+mcp>=2.3.0,<3
 
 # starlette is already a transitive dependency of `mcp`, but servers.py imports Request/Response
 # directly for the /health and /_calls routes. Depending on it explicitly is the difference between
