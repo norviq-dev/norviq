@@ -12,7 +12,7 @@
 // loads never clip, labels >= 9px.
 
 import { useEffect, useImperativeHandle, useRef, forwardRef } from "react";
-import * as d3 from "d3";
+import * as d3 from "../../lib/d3";
 import { DECISION_COLORS, NODE_COLORS } from "../../lib/d3-helpers";
 import { lookalikeOf } from "../../lib/predicateSentence";
 import { SEVERITY_COLORS } from "./constants";

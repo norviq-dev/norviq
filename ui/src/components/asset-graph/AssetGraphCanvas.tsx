@@ -8,7 +8,7 @@
 // drag (dragging an agent moves its whole circle), zoom/fit, directed arrowheads, blocked ⚠ badges.
 
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
-import * as d3 from "d3";
+import * as d3 from "../../lib/d3";
 import { NODE_COLORS, RISK_COLORS } from "../../lib/d3-helpers";
 import { lookalikeOf } from "../../lib/predicateSentence";
 import type { FilterState, ViewEdge, ViewGroup, ViewModel, ViewNode } from "./model";
