@@ -189,8 +189,9 @@ def _font_offenders(root: Path, licenses: dict[str, str]) -> list[str]:
     offenders = []
     fonts = []
     for dirpath, dirnames, filenames in os.walk(root):
-        if Path(dirpath) == root:
-            dirnames[:] = [d for d in dirnames if d not in _NOT_SOURCES]
+        # Pruned at ANY depth: an installed tree (e.g. ui/tests/e2e/node_modules, which the Playwright
+        # harness installs) is judged by the lockfile check above, not as committed source.
+        dirnames[:] = [d for d in dirnames if d not in _NOT_SOURCES]
         fonts.extend(Path(dirpath) / f for f in filenames if Path(f).suffix.lower() in _FONT_SUFFIXES)
     for path in sorted(fonts):
         key = path.relative_to(root).as_posix()
@@ -240,3 +241,15 @@ def test_font_check_flags_unlisted_and_disallowed_fonts(tmp_path: Path) -> None:
 )
 def test_license_expression_check_fails_closed(expression: str, expected: bool) -> None:
     assert _satisfiable(expression) is expected
+
+
+def test_a_nested_installed_tree_is_not_read_as_source(tmp_path: Path) -> None:
+    """ui/tests/e2e/node_modules is installed by the Playwright harness and bundles a codicon font;
+    it is not shipped. A committed font next to it still fails."""
+    nested = tmp_path / "tests" / "e2e" / "node_modules" / "playwright-core"
+    nested.mkdir(parents=True)
+    (nested / "codicon.ttf").write_bytes(b"\x00\x01\x00\x00")
+    assert _font_offenders(tmp_path, {}) == []
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "brand.woff2").write_bytes(b"wOF2")
+    assert _font_offenders(tmp_path, {}) == ["src/brand.woff2: not listed in _FONT_LICENSES"]
