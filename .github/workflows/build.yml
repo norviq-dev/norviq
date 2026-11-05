@@ -72,7 +72,7 @@ jobs:
       # QEMU registers arm64 emulation so buildx can build the linux/arm64 variant on the amd64
       # runner. (The Go webhook cross-compiles natively via TARGETARCH and skips emulation; the
       # Python/UI images build under emulation, installing prebuilt aarch64 wheels/apk packages.)
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
@@ -116,7 +116,7 @@ jobs:
       # (patch-available) vulns gate. The YAML form is what lets an entry carry `paths`, so a CVE
       # accepted in a vendored third-party binary stays BLOCKING in the binaries we build ourselves.
       - name: trivy image scan (${{ matrix.component }}) — fail-closed
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           # Scan BY DIGEST, not by tag: the digest is exactly what was just built and what gets
           # signed and pinned, so the scan cannot race a concurrent push that moves the tag.
@@ -159,7 +159,7 @@ jobs:
       # Generate the SBOM with the same pinned action (the trivy CLI is not guaranteed to be on PATH
       # afterwards — trivy-action runs it in a container), then attest the file with cosign.
       - name: Generate SBOM (SPDX)
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}
           format: spdx-json
