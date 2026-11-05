@@ -787,7 +787,7 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
           </div>
           <div style={{ flex: 1, overflow: "auto", padding: "14px 16px" }}>
             <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", color: "#a0a0a0", textTransform: "uppercase", marginBottom: 8 }}>Generated policy</div>
-            <pre style={{ margin: 0, fontFamily: "ui-monospace, 'JetBrains Mono', monospace", fontSize: 11.5, lineHeight: 1.6, color: "#9fb0cc", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{rego}</pre>
+            <pre style={{ margin: 0, fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.6, color: "#9fb0cc", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{rego}</pre>
           </div>
         </div>
       </div>

@@ -1,10 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Norviq Contributors */
 
-/* SLIM-FONTS: self-hosted JetBrains Mono (was a fonts.googleapis.com @import serialized in front of all
-   CSS on every cold load). Bundled locally by Vite — no third-party font fetch, air-gap-safe. */
-@import "@fontsource/jetbrains-mono/400.css";
-@import "@fontsource/jetbrains-mono/500.css";
+/* Monospace text uses the platform's own monospace face (--font-mono below): no web font is bundled
+   or fetched, so the UI stays air-gap-safe and ships no third-party font files. */
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
@@ -71,7 +69,7 @@
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
   --transition: 150ms ease;
   --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --text-4xl: 2.5rem;
   --text-3xl: 2rem;
   --text-2xl: 1.5rem;

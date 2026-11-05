@@ -1298,7 +1298,7 @@ function TechniqueDetail({
           </span>
         </div>
       </div>
-      <div style={{ fontFamily: "ui-monospace, 'JetBrains Mono', monospace", fontSize: 12, color: MUTED, margin: "5px 0 14px" }}>
+      <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: MUTED, margin: "5px 0 14px" }}>
         {t.technique_id}
       </div>
       {t.description && <div style={{ fontSize: 13, color: "#a2a2aa", lineHeight: 1.6 }}>{t.description}</div>}

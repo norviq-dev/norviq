@@ -76,8 +76,8 @@ Pills use a hard-coded `border-radius: 4px`.
 ## 4. Typography
 
 - **Sans: Outfit**, self-hosted TTF, 9 weights (100–900) at `ui/public/fonts/`. Not an npm dep.
-- **Mono: JetBrains Mono** via `@fontsource/jetbrains-mono`, **only weights 400 and 500 are imported.**
-  Do not specify mono 600/700 — it will synthesise.
+- **Mono: the platform's monospace face** (`--font-mono`: `ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+  Consolas, "Liberation Mono", monospace`). No mono web font is bundled. Stick to weights 400 and 500.
 
 ⚠️ **The declared type scale is dead.** `--text-4xl … --text-xs` exist in `:root` but have **zero
 consumers**. Real sizes are hard-coded. The ones actually in use:

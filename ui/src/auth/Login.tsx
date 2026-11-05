@@ -454,7 +454,7 @@ export function Login() {
                     maxLength={512}
                     onChange={(e) => { setDevToken(e.target.value); setError(""); }} onKeyDown={enter(() => void signIn())}
                     placeholder="nrvq_dev_••••••••••••••••"
-                    style={{ height: 40, fontFamily: "ui-monospace, 'SF Mono', 'JetBrains Mono', monospace", fontSize: 12 }} />
+                    style={{ height: 40, fontFamily: "var(--font-mono)", fontSize: 12 }} />
                 </div>
               )}
 
