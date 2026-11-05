@@ -5,7 +5,7 @@
 # JS/CSS, so nothing about the output depends on the target arch — only the nginx runtime stage below
 # does. Without this, a cross-build (e.g. --platform linux/amd64 from an arm64 machine) runs the whole
 # node toolchain under QEMU emulation, which is 10-20x slower and times out the builder outright.
-FROM --platform=$BUILDPLATFORM node:20-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:26-alpine AS builder
 WORKDIR /build
 COPY ui/package*.json ./
 RUN npm ci
