@@ -43,8 +43,16 @@ g1() {
   stage "G1 · Hermetic gates"
   command -v opa >/dev/null || { unmet "G1: opa not on PATH — rego-backed tests would silently skip"; return; }
 
+  # The core suite needs Postgres and Redis exactly as CI gives them (.github/workflows/test.yml, job
+  # `pytest`): the DB-backed tests fail loudly when NRVQ_PG_URL is unset rather than skipping. Taken
+  # from the environment when set, else CI's values, which are the local test services (Postgres 16
+  # on 127.0.0.1:5433, Valkey on 127.0.0.1:6379). Never echoed: the URL carries a password.
+  local pg_url="${NRVQ_PG_URL:-postgresql://norviq:norviq_local_dev@127.0.0.1:5433/norviq?sslmode=disable}"
+  local redis_url="${NRVQ_REDIS_URL:-redis://127.0.0.1:6379/0}"
+
   local out passed
-  out="$("$PY" -m pytest "${REPO_ROOT}/tests" --ignore="${REPO_ROOT}/tests/integration" \
+  out="$(NRVQ_PG_URL="$pg_url" NRVQ_REDIS_URL="$redis_url" \
+        "$PY" -m pytest "${REPO_ROOT}/tests" --ignore="${REPO_ROOT}/tests/integration" \
         --ignore="${REPO_ROOT}/tests/attacks" -q 2>&1 | tail -3)"
   passed="$(echo "$out" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '[0-9]+')"
   if echo "$out" | grep -q "failed\|error"; then
