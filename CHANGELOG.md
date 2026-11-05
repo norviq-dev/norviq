@@ -327,7 +327,10 @@ detection limits: text split exactly between two words across fields with no whi
 directive wrapped onto a second line within one sentence, the reduced rule set for strings without
 whitespace, and paraphrase. The MCP guide lists both.
 Two security booleans no longer fall back to off when an
-overlay nulls them. The stdio MCP proxy warns when its pin store degrades. A failed boot warm of agent freezes and trust
+overlay nulls them. The stdio MCP proxy warns when its pin store degrades. The API and the
+embedded engine retry Postgres and Redis at startup, 5 attempts with 1, 2, 4 and 8 s between them, and then
+fail startup so the pod restarts; a refused Postgres connection used to end the API's startup at once, and the
+embedded engine retried neither store. A failed boot warm of agent freezes and trust
 caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a WARNING, and the count
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way
 before its ERROR, `NRVQ-API-7138`.
