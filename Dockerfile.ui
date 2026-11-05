@@ -31,6 +31,8 @@ RUN apk update && apk upgrade --no-cache && echo "os-patched @ ${NRVQ_GIT_SHA}"
 COPY --from=builder /build/dist /usr/share/nginx/html
 COPY ui/nginx.conf /etc/nginx/conf.d/default.conf
 COPY ui/docker-entrypoint.sh /docker-entrypoint.d/99-nrvq-config.sh
+# The console bundles third-party packages; their licence texts travel with the image (not served over HTTP).
+COPY ui/THIRD_PARTY_NOTICES.txt LICENSE NOTICE /usr/share/licenses/norviq-ui/
 # The entrypoint writes config.js (html dir) + fleet-proxy.conf (/etc/nginx) at runtime as uid 101, so
 # those paths must be group-writable and owned by the nginx group. Single-cluster default: an empty
 # fleet-proxy include so nginx starts with no fleet-api dependency.

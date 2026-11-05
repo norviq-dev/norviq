@@ -171,6 +171,14 @@ def test_def002_ui_dockerfile_stamps_provenance() -> None:
     assert "LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}" in src
 
 
+def test_ui_image_ships_the_third_party_notices() -> None:
+    """The console bundles third-party npm packages; their notices must travel inside the image."""
+    src = _dockerfile("Dockerfile.ui")
+    assert "COPY ui/THIRD_PARTY_NOTICES.txt LICENSE NOTICE /usr/share/licenses/norviq-ui/" in src
+    for path in ("ui/THIRD_PARTY_NOTICES.txt", "LICENSE", "NOTICE"):
+        assert (_REPO_ROOT / path).is_file(), f"{path} is copied into the ui image but missing from the repo"
+
+
 def test_def002_webhook_dockerfile_stamps_provenance() -> None:
     src = _dockerfile("webhook/Dockerfile")
     assert "ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}" in src
