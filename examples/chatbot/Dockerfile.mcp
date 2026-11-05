@@ -11,7 +11,7 @@
 # the demo needs to be untrusted -- the image would still work, and it would quietly stop
 # demonstrating that Norviq governs MCP servers it does not control. So: no norviq/, no pyproject,
 # no framework extras. Just the official MCP SDK and the three servers.
-FROM python:3.12-slim
+FROM python:3.15-slim
 LABEL org.opencontainers.image.licenses=Apache-2.0
 
 # Unbuffered so `kubectl logs` shows the start-up line (server id, listen address, tool names)
