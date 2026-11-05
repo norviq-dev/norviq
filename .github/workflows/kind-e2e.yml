@@ -72,7 +72,7 @@ jobs:
     # suite needs time rather than concurrency.
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
 
       - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6.0.0
         with:

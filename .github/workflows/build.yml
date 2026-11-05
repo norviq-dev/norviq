@@ -68,7 +68,7 @@ jobs:
             dockerfile: Dockerfile.bootstrap
             context: .
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # QEMU registers arm64 emulation so buildx can build the linux/arm64 variant on the amd64
       # runner. (The Go webhook cross-compiles natively via TARGETARCH and skips emulation; the
       # Python/UI images build under emulation, installing prebuilt aarch64 wheels/apk packages.)
