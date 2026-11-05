@@ -3,4 +3,4 @@
 
 exemptions:
   - check: cla
-    reason: "Norviq uses the Developer Certificate of Origin (a Signed-off-by line on every commit, see CONTRIBUTING.md) instead of a Contributor License Agreement."
+    reason: "Norviq uses the Developer Certificate of Origin instead of a Contributor License Agreement: contributions are signed off under the DCO (a Signed-off-by line) from the day the DCO check is enabled on the repository; see CONTRIBUTING.md."

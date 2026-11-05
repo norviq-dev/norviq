@@ -22,6 +22,6 @@ _None yet._
 
 ## Affiliation updates
 
-<!-- TODO(San): confirm the 30-day window below; it is a new commitment, not existing practice. -->
+<!-- TODO(the maintainer): confirm the 30-day window below; it is a new commitment, not existing practice. -->
 The Company/Organization column must be current. A maintainer whose employer or affiliation changes
 updates their row within 30 days of the change, by pull request.

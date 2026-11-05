@@ -9,7 +9,7 @@ Norviq is not a CNCF project, so the CNCF Code of Conduct Committee does not han
 today. If and when Norviq is accepted into the CNCF, reports can also go to the
 [CNCF Code of Conduct Committee](mailto:conduct@cncf.io), as the CNCF Code of Conduct describes.
 
-<!-- TODO(San): name a contact outside the project for reports that concern the maintainer, for use
+<!-- TODO(the maintainer): name a contact outside the project for reports that concern the maintainer, for use
      until a CNCF route applies. Until then such a report has no independent route. -->
 There is no contact outside the project yet for a report that concerns the maintainer.
 

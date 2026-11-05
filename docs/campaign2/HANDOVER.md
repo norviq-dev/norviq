@@ -15,7 +15,7 @@ pytest, all five framework-compat.
 
 1. **`Security Analysis`** — the FOSSA **GitHub App**, which reads the project's **UI ignore list**,
    NOT `ACCEPTED_CVES` in fossa.yml. Needs CVE-2024-6825 marked *Ignored* in the FOSSA console.
-   **San's action — a console change, not a repo one.** The `fossa` JOB is green.
+   **The maintainer's action — a console change, not a repo one.** The `fossa` JOB is green.
 2. **`vitest`** — one test of 1155 (`Dashboard.test.tsx`, the Monitor-mechanism one). Known harness
    debt with a 90s timeout and four ruled-out theories recorded in the test. Not a product defect.
 3. **`L3 + L4`** — **RESOLVED: a SEEDER defect, not a product bug.** Settled by querying the RUNNING
@@ -74,7 +74,7 @@ Remaining: C2-013, C2-016, Tier 4 triage, the three deliverables, and resuming t
 ## Where things stand
 
 **Branch:** `integrate/mcp-and-builder` — **PUSHED 2026-08-10** (`76cc477..095be99`, 59 commits).
-Version 0.2.0, **no tag at HEAD**. **Still NOT merged to main and NO version cut** — both need San.
+Version 0.2.0, **no tag at HEAD**. **Still NOT merged to main and NO version cut** — both need the maintainer.
 
 ### Pre-release gate, run before the push — 8/8 CLEAR
 
@@ -95,7 +95,7 @@ Version 0.2.0, **no tag at HEAD**. **Still NOT merged to main and NO version cut
 > named `SECRET`, no placeholder marker. It is **NOT an ancestor of HEAD**, so the push did not carry
 > it and CI (which scans the PR range only) will not see it. **Pushing `release/pre-ga-consolidated`
 > WOULD publish it.** The branch names suggest it was cleaned off the main line and left on backups.
-> San's call — do not push those branches, and consider rotating the value regardless.
+> The maintainer's call — do not push those branches, and consider rotating the value regardless.
 
 > **KNOWN DEBT — `Dashboard.test.tsx` "does NOT assert the Monitor mechanism…" needs a 90s per-test
 > timeout in CI.** NOT root-caused, and not a product defect. It needs >30s on a 2-core GitHub runner
@@ -243,7 +243,7 @@ directly.
       would pass. Five rego tests pin both directions; verified the two prose tests FAIL against the
       old list. `opa test --v0-compatible` 17/17.
       > **STILL OWED — re-measure the FP baseline LIVE.** The AKS cluster runs the pre-fix image, so
-      > the 2.5%-on-prose figure has not been re-taken. Needs a rebuild+deploy → **ask San first**.
+      > the 2.5%-on-prose figure has not been re-taken. Needs a rebuild+deploy → **ask the maintainer first**.
       > Expected: the base64 FP curve collapses to ~0 and `deny_shell_execution` stops firing on
       > prose. Repro: 80 `/evaluate` calls with `{"note": "benign call N"}`; previously tripped at
       > n=18 and n=58 (see the `/evaluate` request shape below — `agent_identity.namespace` is
@@ -374,7 +374,7 @@ Per-agent journal:
 
 ---
 
-## SECURITY — outstanding, San's action
+## SECURITY — outstanding, the maintainer's action
 
 - **Postgres/Redis rotation is NOT a release blocker.** Corrected 2026-08-10 after reading
   `helm/norviq/templates/secret.yaml`: with `postgresql.password`/`redis.password` empty (the default)
@@ -414,8 +414,8 @@ Per-agent journal:
 - **Console auth:** seed `localStorage.nrvq_token` rather than typing into the login form.
 - **Secrets:** `GROQ_API_KEY` in `.secrets/groq.env` (gitignored, chmod 600). `examples/chatbot/.env`
   holds a real Groq key + NRVQ token; gitignored (`.gitignore:26`) and dockerignored.
-- **Test images:** use the `norviq-engine-dev` package. Ask before any build/push/deploy — San often
-  has uncommitted changes in flight; a clean tree is not proof he is done.
+- **Test images:** use the `norviq-engine-dev` package. Ask before any build/push/deploy — the maintainer often
+  has uncommitted changes in flight; a clean tree is not proof they are done.
 
 ## `/evaluate` request shape (cost an hour to rediscover)
 
@@ -666,7 +666,7 @@ adapters), then §4's secure-by-default items, then MEDIUM.
 > 100%). `docker system df` hangs and the full pytest run times out from thrashing — targeted runs
 > still pass in under a second, so this is the machine, not the changes. Freeing real space means
 > removing Docker images (which include the kind cluster and the locally loaded `norviq/norviq-engine`
-> images), so that is San's call, not something to do unilaterally.
+> images), so that is the maintainer's call, not something to do unilaterally.
 
 ### Gates as of this entry
 
@@ -720,7 +720,7 @@ only** (`pip cache purge`; the 11 GB `~/.cache/uv` was lock-held and left alone)
 no user data. Docker never recovered and is still hung, which means **Redis is down**, which means
 `tests/sidecar/` and other Redis-backed tests error on connection refused.
 **Triaged, not assumed:** those same tests fail identically on a **clean tree with every change
-stashed**, so they are environmental. Restarting Docker (and with it the kind cluster) is San's call.
+stashed**, so they are environmental. Restarting Docker (and with it the kind cluster) is the maintainer's call.
 
 ### Correction — one post-bump failure was mine, not the environment (`c237232`)
 
@@ -744,7 +744,7 @@ filed as environmental. Capture the whole run and group by file before making th
 
 ## 2026-08-13 (cont.) — MEDIUM findings, all on `fix/v020-eval-backlog`
 
-San asked for one branch. The six HIGH branches were stacked, so `fix/v020-eval-backlog` branches off
+The maintainer asked for one branch. The six HIGH branches were stacked, so `fix/v020-eval-backlog` branches off
 `fix/f-001-bump-opa-1.19.0` and therefore contains **everything**.
 
 - **F-027** (`48e0336`) — one concept, **four** homes, and they disagreed: values.yaml / config.py /

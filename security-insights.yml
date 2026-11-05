@@ -58,7 +58,7 @@ repository:
   status: active
   bug-fixes-only: false
   accepts-change-request: true
-  accepts-automated-change-request: false
+  accepts-automated-change-request: true   # Dependabot version and security updates, .github/dependabot.yml
   no-third-party-packages: false
   core-team:
     - name: Santosh Kumar Puppala

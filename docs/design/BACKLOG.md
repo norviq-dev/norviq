@@ -6,7 +6,7 @@ down as a finding is how a wrong fix ships — most of this file exists because 
 several times in the cycle that produced it.
 
 Status vocabulary: **verified** = reproduced against the artefact or source by hand, with a control
-where a clean result was possible. **reported** = an agent or a scan claimed it; nobody has
+where a clean result was possible. **reported** = a review or a scan claimed it; nobody has
 reproduced it. **landed** = fixed on `main`, waiting on a release. **on prep** = committed on the local
 `prep/0.2.6` branch, which is unpushed: not on `main`, not on any remote, reaches nobody until the cut.
 A "control" below means the check fails with the fix reverted and passes with it.
@@ -114,7 +114,7 @@ passes the full CI-equivalent gates on its own (2026-11-02).
 
 Original entry: open, head `e8b3886`, approved by the maintainer's comments on 2026-09-01 and held so
 the docs change in it does not describe a fix no released version has. **The only third-party human
-contribution the repo has.** Reviewed by this session on the merits: the fix is correct, the
+contribution the repo has.** Reviewed on the merits in the review: the fix is correct, the
 subprocess test is the right shape (`CliRunner` never executes `main()`), and reverting the one-line
 fix makes the test fail — it can fail, for the right reason.
 
@@ -350,7 +350,7 @@ warning.
 ## 5. Operational
 
 ### 5.1 Rotate the dev JWT in `ui/.env.local`
-**Status:** open, owner: San (F in §7.23). Exposed to a terminal during the vitest investigation.
+**Status:** open, owner: the maintainer (F in §7.23). Exposed to a terminal during the vitest investigation.
 Gitignored, so it was never committed, but it is a live token until rotated. Note for the re-mint:
 `ui/.env.local.example`'s recipe mints a token with no `exp`, which the API refuses, signed with the
 placeholder secret `requireStrongSecret` rejects (read 2026-10-30).
@@ -430,7 +430,7 @@ decisions (5 s TTL).
 
 ## 7. Opened during the CNCF readiness pass (2026-09-02)
 
-Every item below was reproduced against the tree or the live API by this session; the audit that
+Every item below was reproduced against the tree or the live API during the review; the audit that
 proposed most of them had executed nothing. Where the audit was wrong, §8 says so. Items 7.17 onward
 were opened during the 0.2.6 preparation (2026-10-28 to 2026-11-05).
 
@@ -598,10 +598,10 @@ lines below the symbol they presumably meant. `:14` cited `pyproject.toml:67-68`
 `:608` cited `config.py:393` (actual 454, and 393 is a comment about body size). Nothing in CI kept a
 line number fresh; the anchor test is what does now.
 
-### 7.8 Two of the maintainer's worktrees were deleted by this session
+### 7.8 Two of the maintainer's worktrees were deleted during the review
 **Status:** recorded. `../tmp/prega-92ceec1` (`release/pre-ga-consolidated`) and
 `../tmp/wt-pre-ga-remediation` (`fix/catalog-hierarchy-batch2`) were removed by an over-broad
-cleanup filter. Both branches are intact at `92ceec1`, last commit 2026-07-08. Any uncommitted work
+cleanup filter. Both branches are intact at `92ceec1` on the maintainer's machine, last commit 2026-07-08. Any uncommitted work
 in those directories is gone; `git worktree add ../tmp/<name> <branch>` restores the directory.
 
 ### 7.9 Steps not yet done from the CNCF audit
@@ -788,8 +788,8 @@ inbound code contributions "shall be … accompanied by a Developer Certificate 
 it (no DCO app; the only workflow hit for "dco" is the substring in "hardcoded") and **0 of 540 commits
 on `main` have a `Signed-off-by`**. The sentence is a stated rule that neither CI nor history follows.
 Options: start signing off now and add a check once `cncf-readiness` lands (commits before the section
-are exempt, as it says), or word it as a request until then. Adding San's sign-off to commits on his
-behalf is his certification to make, not the tooling's — not done.
+are exempt, as it says), or word it as a request until then. Adding the maintainer's sign-off to commits on
+their behalf is the maintainer's certification to make, not the tooling's — not done.
 
 ### 7.14 PR #109's CI never ran; the approvals expired
 
@@ -828,11 +828,17 @@ and signed release assets, Dependabot and read-only workflow tokens (`be06ad6`).
 
 ### 7.16 0.2.6 preparation (2026-10-28), local branch `prep/0.2.6`, unpushed
 
-**State 2026-11-05:** `prep/0.2.6` is at `cb5f14f`, **148 commits on top of `cncf-readiness`
+**State 2026-11-05 (final):** `prep/0.2.6` is at `7211672`, **159 commits on top of `cncf-readiness`
 (`b622399`)**: 26 from the maintainer's machine (through `f375420`), 114 more through the folded tip
-`a72bebc` (116 before the fold), `9477a47`, and 7 integrated on 2026-11-04/05 (`58f04ad` through
+`a72bebc` (116 before the fold), `9477a47`, 7 integrated on 2026-11-04/05 (`58f04ad` through
 `cb5f14f`: the Gate A test and ceiling, exit-state G1, HA on Valkey, the governance and security-policy
-files, release signing and Dependabot, the error-code index). **Nothing is pushed, merged, tagged or
+files, release signing and Dependabot, the error-code index), and 11 more through `7211672`: the UI
+licence work (the bundled web font and the d3 umbrella's dependency removed, `192d731`, `231d3be`,
+`8787b59`, and the allowlist test, `06f5863`), the third-party notices file and its place in the
+console image (`6044c04`, `43f090b`), the lint-tooling advisory bumps (`c8d9245`), the image hardening
+(pip removed from the api and engine runtime images, `c678e68`; the webhook on distroless
+static-debian13, `7211672`), and the docs commits (`a121993`, `259b138`). **All 12 gates are green on
+`7211672`** (pytest 4770 passed). **Nothing is pushed, merged, tagged or
 cut**, and both version fields still say 0.2.5 (`pyproject.toml`, `Chart.yaml`, read 2026-11-05).
 **The version strings** in the install and upgrade docs that name chart 0.2.6 are one commit kept on the
 local branch `prep/0.2.6-version-docs`, not on prep, to be squashed with the maintainer's version bump:
@@ -937,8 +943,12 @@ confirmed as shipped (A), and the `docs/error-codes.md` recount (§1.2, now held
    on the exact final SHA, run alone, after the last code change.
 5. Sign the DCO remediation commit (C), install the DCO App as a required check (D), rotate the dev JWT
    (F), the repository toggles and #109's CI and merge order (G, §1.1b).
-6. The maintainer's review of the branch, the advisories, then push, version bump (squashed with
-   `prep/0.2.6-version-docs`) and cut — each only on his explicit go-ahead.
+6. The maintainer's review of the branch.
+7. Enable GitHub private vulnerability reporting on the repository: `SECURITY.md` names it as the
+   preferred reporting channel, so it must be on before the branch is public.
+8. Publish the security advisories.
+9. Then push, version bump (squashed with `prep/0.2.6-version-docs`) and cut — each only on the
+   maintainer's explicit go-ahead.
 
 ### 7.17 FOSSA had not scanned Python since 2026-08-19; dependency advisories cleared except three low
 
@@ -1265,11 +1275,13 @@ with the reason and re-pinned when upstream rebuilds.
   static image scans the same.
 * **npm dev tooling:** 14 advisories (2 low, 12 moderate) in the console's dev tree — the eslint family
   (`@eslint/config-array`, `minimatch`), the typescript-eslint family, and the shadcn CLI's dependencies
-  (`@shadcn/registry`, `deepmerge`, `ts-morph`). None of it ships in the bundle. **To be bumped.**
+  (`@shadcn/registry`, `deepmerge`, `ts-morph`). None of these advisory packages ships in the bundle
+  (shadcn's own CSS and tailwindcss do, and are licence-checked and in the notices file). **Bumped
+  (`c8d9245`):** 3 low remain, in `deepmerge` through the shadcn CLI, which has no fixed release.
 
 ### 7.29 Concurrent full-suite runs on one host interfere through OPA's fixed port
 
-**Status:** open, owner: the agent. Not fixed. Found while gating several worktrees on one host; the
+**Status:** open, owner: the maintainer. Not fixed. Found while gating several worktrees on one host; the
 cause read in the code, not control-tested. The OPA address the tests use defaults to `127.0.0.1:8181`
 (`opa_addr` in `norviq/config.py`), and the OPA-backed tests spawn a managed OPA there
 (`norviq/engine/opa_client.py`). A second full-suite run on the same host cannot bind the port, so its
