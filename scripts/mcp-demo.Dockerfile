@@ -17,7 +17,7 @@
 # at any directory holding a CA bundle under that name (or symlink the system bundle); it exists
 # because the environment this was developed in re-terminates TLS at an egress proxy, and a build
 # that silently disables certificate verification instead would be worse than an extra flag.
-FROM openpolicyagent/opa:1.19.0-static AS opabin
+FROM openpolicyagent/opa:1.21.4-static AS opabin
 
 FROM python:3.12-slim AS builder
 WORKDIR /build
@@ -42,7 +42,8 @@ ARG NRVQ_GIT_SHA=unknown
 ARG NRVQ_TREE_DIGEST=unknown
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
 ENV NRVQ_BUILD_TREE_DIGEST=${NRVQ_TREE_DIGEST}
-LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA} \
+      org.opencontainers.image.licenses=Apache-2.0
 
 # The OPA binary is copied from the pinned OPA image rather than downloaded, so the build needs no
 # egress to openpolicyagent.org. Same version the chart's sidecar runs.

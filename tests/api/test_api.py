@@ -18,6 +18,7 @@ from sqlalchemy import text
 
 from norviq.api.db.session import create_tables, ensure_schema_compatibility, get_session
 from norviq.api.main import create_app
+from norviq.api.routers.agents import get_admin_db
 from norviq.config import settings
 from norviq.engine.policy_loader import PolicyLoader
 from norviq.sdk.core.trust import TrustScore
@@ -36,6 +37,32 @@ def _override_session(client: "TestClient", session_obj: object) -> None:
         yield session_obj
 
     client.app.dependency_overrides[get_session] = _gen
+    # Admin trust writes (PUT /agents/{id}/trust) hold the agent's lock on a connection of their own.
+    client.app.dependency_overrides[get_admin_db] = lambda: _FakeAdminDb()
+
+
+class _FakeAdminConn:
+    """The admin-write connection: the lock statements answer, there is no registry row, writes succeed."""
+
+    async def execute(self, _stmt, _params=None):
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: None), scalar=lambda: True, rowcount=1)
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def invalidate(self) -> None:
+        return None
+
+
+class _FakeAdminDb:
+    async def connect(self):
+        return _FakeAdminConn()
 
 
 class FakeCache:
@@ -123,6 +150,39 @@ class FakeCache:
         """Remove the admin trust cap."""
         await self.delete(f"agent_trust_override:{spiffe_id}")
 
+    async def claim_admin_trust_owner(self, spiffe_id: str, token, ttl_ms: int | None = None) -> str:
+        """RedisCache's admin-writer fence, over the generic keys (no ordering: one writer at a time here)."""
+        token = "1" if token is None else str(token)
+        await self.set(f"agent_trust_owner:{spiffe_id}", token)
+        return token
+
+    async def apply_admin_trust_control_if_owner(
+        self, spiffe_id: str, token: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
+    ) -> int:
+        """The fenced write: applies only while ``token`` owns the agent (1), else 0 / -1 (no owner)."""
+        owner = await self.get(f"agent_trust_owner:{spiffe_id}")
+        if owner is None:
+            return -1
+        if owner != str(token):
+            return 0
+        await self.apply_admin_trust_control(spiffe_id, frozen=frozen, cap=cap, display=display)
+        return 1
+
+    async def apply_admin_trust_control(
+        self, spiffe_id: str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
+    ) -> None:
+        """RedisCache's one-MULTI admin control write, over the same generic keys."""
+        if frozen:
+            await self.set(f"agent_frozen:{spiffe_id}", "1")
+        else:
+            await self.delete(f"agent_frozen:{spiffe_id}")
+        if cap is not None:
+            await self.set_trust_override(spiffe_id, cap)
+        else:
+            await self.clear_trust_override(spiffe_id)
+        if display is not None:
+            await self.set_trust(spiffe_id, display)
+
 
 class FakeEvaluator:
     """Policy evaluator stub."""
@@ -148,7 +208,7 @@ class FakeSession:
     def __init__(self, rows: list[SimpleNamespace]) -> None:
         self.rows = rows
 
-    async def execute(self, stmt):
+    async def execute(self, stmt, params=None):
         """Return canned scalar and grouped results."""
         sql = str(stmt)
         # audit_stats' real-traffic-only aggregation groups by framework/agent_class/rule_id too and reads the
@@ -171,6 +231,7 @@ class FakeSession:
             return SimpleNamespace(scalar=lambda: len(self.rows))
         return SimpleNamespace(
             scalars=lambda: SimpleNamespace(all=lambda: self.rows),
+            mappings=lambda: SimpleNamespace(first=lambda: None, all=lambda: []),
         )
 
     async def scalar(self, stmt):
@@ -190,6 +251,10 @@ class FakeSession:
         from execute(stmt).scalars() — the dry-run replay path calls this directly, see policies.py
         _replay_recent)."""
         return SimpleNamespace(all=lambda: self.rows)
+
+    async def commit(self) -> None:
+        """No-op commit. PUT /agents/{id}/trust commits its durable write and answers 503 when that fails;
+        before it did, a double without commit() passed only because the failure was swallowed."""
 
     async def close(self) -> None:
         """No-op close."""

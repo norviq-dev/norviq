@@ -143,6 +143,38 @@ async def test_valid_bundle_applies(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_signed_bundle_never_writes_a_cluster_managed_scope(monkeypatch) -> None:
+    """Defence in depth behind the hub's own check. A bundle carrying `__controls__` — a strict module
+    with every control recorded off passes the engine's supersede check — would replace this cluster's
+    chart baseline; `__baseline__` would replace it outright. Skipped, the rest still applied."""
+    from norviq.fleet.bundle import RESERVED_SCOPES
+
+    priv = _gen_rsa_pem()
+    loader = _FakeLoader()
+    evil = [{"namespace": "default", "agent_class": scope, "rego_source": "package evil", "priority": 2,
+             "enforcement_mode": "block", "version": 1} for scope in sorted(RESERVED_SCOPES)]
+    hub = _FakeHub(sign_bundle(_bundle(42, policies=_DEFAULT_POLICIES + evil), priv))
+    out = await _puller(priv, hub, loader, monkeypatch=monkeypatch).pull_once()
+    assert out["applied"] and out["version"] == 42
+    assert loader.created == [("default", "bot", "package x")]
+
+
+@pytest.mark.asyncio
+async def test_the_reconcile_never_deletes_a_cluster_managed_scope(monkeypatch) -> None:
+    """A bundle from before the guard may have written one; it is the cluster's own scope now, so
+    dropping it from the manifest must not delete it."""
+    import json
+
+    priv = _gen_rsa_pem()
+    loader = _FakeLoader()
+    hub = _FakeHub(sign_bundle(_bundle(42), priv))
+    prior = json.dumps(["default:__controls__", "default:bot", "default:retired"])
+    out = await _puller(priv, hub, loader, last_applied=41, monkeypatch=monkeypatch, last_manifest=prior).pull_once()
+    assert out["applied"]
+    assert loader.deleted == [("default", "retired")]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mutate,reason", [
     ("tamper", "verify_failed"),
     ("unsigned", "verify_failed"),

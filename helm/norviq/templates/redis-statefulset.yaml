@@ -24,8 +24,9 @@ spec:
           # Partial hardening only. These bundled single-node datastores are a dev convenience —
           # values-prod.yaml replaces them with the operator-managed HA variants (asserted by
           # test_prod_profile_drops_the_unhardened_bundled_datastores). runAsNonRoot / drop-ALL are
-          # deliberately NOT set: the official postgres/redis entrypoints start as root to chown the
-          # data dir and then drop privileges, so forcing them breaks startup. These two controls are
+          # deliberately NOT set. The `command` below replaces the image entrypoint, and the entrypoint
+          # is the only step that drops to uid 999, so the server runs as root for its whole life and
+          # owns what it writes on the volume. Forcing non-root breaks that. These two controls are
           # free and do not.
           securityContext:
             allowPrivilegeEscalation: false
@@ -46,8 +47,20 @@ spec:
           resources:
             {{- toYaml .Values.redis.resources | nindent 12 }}
           volumeMounts:
+            # The server keeps its data in a SUBDIRECTORY of the claim, never at the root. 0.2.5 ran
+            # redis:7-alpine (by then Redis 7.4, which writes RDB format 12) on this same claim, and
+            # Valkey 8.1 reads format 11 at most. Mounted at the root, Valkey loaded 0.2.5's dump.rdb
+            # and exited with "Can't handle RDB format version 12". The upgrade then timed out with
+            # api/engine stuck on wait-for-redis (measured on kind, Kubernetes 1.34, 2026-10-30).
+            # In its own directory Valkey starts empty, and 0.2.5's files stay at the root, untouched,
+            # so `helm rollback` to 0.2.5 still finds them.
+            # Ownership: the kubelet creates this directory as root, with the volume root's mode. That
+            # is 0777 on kind's local-path and setgid plus the group on fsGroup-managed volumes. The
+            # server runs as root (see securityContext above), so it can write here on either.
+            # tests/helm/test_bundled_store_upgrade.py holds both properties.
             - name: redis-data
               mountPath: /data
+              subPath: valkey
       volumes:
         - name: redis-data
           persistentVolumeClaim:

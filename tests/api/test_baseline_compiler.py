@@ -243,3 +243,204 @@ def test_the_wire_format_carries_it():
     rows = {r["id"]: r for r in baseline.describe("strict")}
     assert rows["mcp_definition_drift"]["enforced_as"] == "escalate"
     assert all(r["enforced_as"] in ("block", "escalate", "audit") for r in rows.values())
+
+
+# --- covers(): when a namespace's saved controls may supersede the chart's baseline --------------------
+#
+# The engine lets `<ns>:__controls__` replace the chart's `<ns>:__baseline__` only when this says the
+# controls settle every control the chart registers. A false `True` drops a control nobody switched
+# off; a false `False` leaves the console's switch unable to relax anything, which is the defect the
+# supersede exists to fix. Both directions are pinned.
+
+_CHART = baseline.preset_source(PRESET)
+
+
+def _without_off_marker(compiled: str) -> str:
+    """A module as compiled before CONTROLS_OFF existed."""
+    return "\n".join(line for line in compiled.splitlines() if not line.startswith(baseline.CONTROLS_OFF)) + "\n"
+
+
+def test_the_compiled_region_records_the_controls_switched_off() -> None:
+    """`off` emits no head, so without the marker a missing control is ambiguous: switched off, or
+    unknown to the compiler."""
+    _, region, _ = baseline._split_region(
+        baseline.compile(PRESET, {"deny_shell_execution": "off", "pii_detection": "off"})
+    )
+    assert baseline._off_ids(region) == {"deny_shell_execution", "pii_detection"}
+    _, region, _ = baseline._split_region(baseline.compile(PRESET, {}))
+    assert baseline.CONTROLS_OFF in region and baseline._off_ids(region) == frozenset()
+
+
+def test_saved_controls_cover_the_charts_own_preset_at_any_effects() -> None:
+    ids = baseline.control_ids(PRESET)
+    for effects in ({}, {"deny_shell_execution": "off"}, {cid: "deny" for cid in ids},
+                    {cid: "monitor" for cid in ids}, {cid: "off" for cid in ids}):
+        assert baseline.covers(baseline.compile(PRESET, effects), _CHART), effects
+
+
+def test_a_baseline_from_another_preset_or_its_own_rego_is_not_covered() -> None:
+    moderate = (baseline._preset_dir() / "moderate.rego").read_text(encoding="utf-8")  # type: ignore[operator]
+    custom = 'package norviq.custom\ndefault decision = "block"\nrule_id = "custom_baseline"'
+    compiled = baseline.compile(PRESET, {})
+    assert not baseline.covers(compiled, moderate)
+    assert not baseline.covers(compiled, custom)
+
+
+def test_a_chart_control_or_arm_the_compiler_never_saw_is_not_covered() -> None:
+    """A chart on a newer preset than the one the controls were compiled from: one more control, or
+    one more arm on an existing one. Superseding would drop it without anyone choosing that."""
+    end = baseline.CONTROLS_END
+    extra_control = _CHART.replace(end, 'blocks["chart_only_control"] { input.tool_name == "x" }\n' + end)
+    extra_arm = _CHART.replace(end, 'blocks["pii_detection"] { input.tool_name == "x" }\n' + end)
+    compiled = baseline.compile(PRESET, {"deny_shell_execution": "off"})
+    assert not baseline.covers(compiled, extra_control)
+    assert not baseline.covers(compiled, extra_arm)
+
+
+def test_an_extra_head_under_a_control_goes_with_it_when_that_control_is_off() -> None:
+    """By design, and documented (CHANGELOG, concepts.md, covers()): a head added to the chart's region
+    under an EXISTING control id is part of that control. Off removes every head under the id, so the
+    re-render drops it too and the chart is superseded; at Monitor or Enforce the module lacks the head
+    and the chart stays a floor. This pins what the prose says, in both directions."""
+    pii = 'blocks["pii_detection"] { pii_detected }'
+    chart = _CHART.replace(pii, pii + '\nblocks["pii_detection"] { input.tool_name == "send_newsletter" }', 1)
+    assert chart != _CHART, "fixture: anchor moved"
+    assert baseline.covers(baseline.compile(PRESET, {"pii_detection": "off"}), chart)
+    for effect in ("monitor", "deny"):
+        assert not baseline.covers(baseline.compile(PRESET, {"pii_detection": effect}), chart), effect
+
+
+def test_a_different_module_outside_the_region_is_not_covered() -> None:
+    """Controls compiled by a release whose preset differs from the chart's, above the region (the
+    detectors) or below it (the resolver)."""
+    compiled = baseline.compile(PRESET, {})
+    _, region, _ = baseline._split_region(_CHART)
+    above = _CHART.replace(baseline.CONTROLS_BEGIN, "# a detector changed\n" + baseline.CONTROLS_BEGIN, 1)
+    below = _CHART.replace("\nblock_fired { blocks[_] }", "\n# the resolver changed\nblock_fired { blocks[_] }", 1)
+    for newer in (above, below):
+        assert newer != _CHART and baseline._split_region(newer)[1] == region, "fixture: anchor moved"
+        assert not baseline.covers(compiled, newer)
+
+
+def test_a_module_compiled_before_the_off_marker_never_covers() -> None:
+    """f373aa1 let one with nothing switched off supersede, and strict.rego is byte-identical to
+    v0.2.5's, so every v0.2.5 module with no Off control replaced the chart's baseline un-re-saved,
+    carrying v0.2.5's Monitor defaults. It now has to be exactly this compiler's output; the API
+    re-renders saved controls at startup (baseline_router.rematerialize_controls)."""
+    monitored = baseline.compile(PRESET, {"deny_shell_execution": "monitor"})
+    switched_off = baseline.compile(PRESET, {"deny_shell_execution": "off"})
+    assert not baseline.covers(_without_off_marker(monitored), _CHART)
+    assert not baseline.covers(_without_off_marker(switched_off), _CHART)
+
+
+def test_a_module_the_v025_compiler_wrote_never_covers() -> None:
+    """The real v0.2.5 compiler, loaded from the tag, and the stand-in the engine tests use for it.
+
+    Skipped where the tag is not fetched (a shallow CI clone): the stand-in assertion is the one that
+    matters there, and it is checked against the real output here wherever the tag is present."""
+    import importlib.util
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    try:
+        src = subprocess.run(["git", "show", "v0.2.5:norviq/api/baseline.py"], capture_output=True, text=True,
+                             check=True, cwd=Path(__file__).resolve().parents[2]).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("v0.2.5 is not reachable in this checkout")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "baseline_v025.py"
+        path.write_text(src, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("baseline_v025", path)
+        v025 = importlib.util.module_from_spec(spec)
+        sys.modules["baseline_v025"] = v025
+        try:
+            spec.loader.exec_module(v025)  # type: ignore[union-attr]
+            for effects in ({"llm05_supply_chain": "monitor"}, {"deny_shell_execution": "off"}):
+                old = v025.compile(PRESET, effects)
+                assert not baseline.covers(old, _CHART), effects
+                full = v025.normalize_effects(PRESET, effects)
+                assert old == _without_off_marker(baseline.compile(PRESET, full)), "the stand-in drifted"
+        finally:
+            sys.modules.pop("baseline_v025", None)
+
+
+def test_an_untouched_control_does_what_the_charts_baseline_does() -> None:
+    """The chart's baseline IS the preset file, so the module compiled at the shipped defaults must
+    register exactly the preset's own heads — same set, same control, same guard.
+
+    The defaults were a table that disagreed with the preset (three block-authored controls at
+    monitor), and once saved controls replace the chart's baseline any save relaxed those three.
+    Defaults are now read from the preset's authoring; this pins the property, not the mechanism."""
+    _, region, _ = baseline._split_region(baseline.compile(PRESET, {}))
+    compiled = {(h.set_name, h.control_id, h.guard) for h in baseline.parse_heads(region)}
+    authored = {(h.set_name, h.control_id, h.guard) for h in baseline.controls_for(PRESET)}
+    assert compiled == authored
+    defaults = baseline.default_effects(PRESET)
+    assert defaults["strict_default_block"] == defaults["llm02_data_leakage"] == "deny"
+    assert defaults["base64_decoded_threat"] == "deny"
+    assert [cid for cid, eff in defaults.items() if eff == "monitor"] == ["scope_violation_dangerous_tool"]
+
+
+def test_unreadable_input_is_not_covered_rather_than_an_error() -> None:
+    assert not baseline.covers("", _CHART)
+    assert not baseline.covers(baseline.compile(PRESET, {}), "")
+
+
+# Lines in a chart's CONTROLS region that the parser used to misread. Each is a real rule to OPA (the
+# engine tests run them), and each was dropped by the re-render while `covers()` held, so a save
+# stopped the rule enforcing without anyone switching it off.
+_SHELL_HEAD = 'blocks["deny_shell_execution"] { shell_injection_detected }'
+_PII_HEAD = 'blocks["pii_detection"] { pii_detected }'
+_NEWSLETTER = 'input.tool_name == "send_newsletter"'
+#: Rego lets one head carry several bodies; these begin like the compiler's never-fires placeholder.
+PLACEHOLDER_LOOKALIKES = {
+    "placeholder, then a second body": _CHART.replace(_SHELL_HEAD, _SHELL_HEAD + '\nblocks[id] { false; id := "__never__" } '
+                                                     f'{{ {_NEWSLETTER}; id := "no_newsletter" }}', 1),
+    "placeholder-shaped first body": _CHART.replace(_SHELL_HEAD, _SHELL_HEAD + '\nblocks[id] {false; id := 1} '
+                                                    f'{{ {_NEWSLETTER}; id := "no_newsletter" }}', 1),
+}
+#: `_HEAD_RE`'s guard is greedy, so these read as one pii_detection head.
+HEADS_CARRYING_A_SECOND_RULE = {
+    "second head on the line": _CHART.replace(_PII_HEAD, f'{_PII_HEAD} blocks["no_newsletter"] {{ {_NEWSLETTER} }}', 1),
+    "second body on the line": _CHART.replace(_PII_HEAD, f"{_PII_HEAD} {{ {_NEWSLETTER} }}", 1),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PLACEHOLDER_LOOKALIKES))
+def test_a_line_that_only_begins_like_the_placeholder_is_not_covered(name: str) -> None:
+    """The placeholder was recognised by its first characters, so these were skipped as generated,
+    `_render` dropped them, and a module compiled with nothing changed covered the chart."""
+    chart = PLACEHOLDER_LOOKALIKES[name]
+    assert chart != _CHART, "fixture: anchor moved"
+    with pytest.raises(ValueError, match="unparsable line"):
+        baseline.parse_heads(baseline._split_region(chart)[1])
+    for effects in ({}, {"pii_detection": "off"}):
+        assert not baseline.covers(baseline.compile(PRESET, effects), chart), effects
+
+
+@pytest.mark.parametrize("name", sorted(HEADS_CARRYING_A_SECOND_RULE))
+def test_a_head_line_carrying_a_second_rule_is_not_covered(name: str) -> None:
+    """With pii_detection Off the re-render dropped the whole line, the second rule with it."""
+    chart = HEADS_CARRYING_A_SECOND_RULE[name]
+    assert chart != _CHART, "fixture: anchor moved"
+    with pytest.raises(ValueError, match="unparsable line"):
+        baseline.parse_heads(baseline._split_region(chart)[1])
+    for effects in ({}, {"pii_detection": "off"}, {"pii_detection": "monitor"}):
+        assert not baseline.covers(baseline.compile(PRESET, effects), chart), effects
+
+
+def test_the_compilers_own_placeholders_still_read_back() -> None:
+    """The other direction: the exact lines `_render` writes are skipped, so an all-Monitor or all-Off
+    module (one or three placeholders) still parses and covers, and a guard with braces inside a
+    string or an object literal is still one body."""
+    ids = baseline.control_ids(PRESET)
+    for effect in ("monitor", "off"):
+        compiled = baseline.compile(PRESET, {cid: effect for cid in ids})
+        region = baseline._split_region(compiled)[1]
+        assert any(line in baseline._NEVER_FIRES_LINES for line in region.splitlines()), effect
+        baseline.parse_heads(region)
+        assert baseline.covers(compiled, _CHART), effect
+    for guard in (' input.x == {"a": 1} ', ' input.x == "}" ', " `{` == input.x "):
+        assert baseline._one_body(guard), guard

@@ -84,14 +84,16 @@ def test_monitor_softens_operational_blocks(operational):
 
 
 def test_exempt_set_contents():
-    """Two rules, and each earns its place for a different reason than 'it is a block'.
+    """Three rules, and each earns its place for a different reason than 'it is a block'.
 
     `trust_frozen` is an operator's incident-response kill switch and must outrank posture.
+    `invalid_spiffe_identity` is an identity-integrity failure: the caller's id is one no admin control can
+    be applied to, so softening it would let an unfreezable caller run (review round 6).
     `rate_limit_exceeded` protects the customer's own backend — "do not block on policy" is not a
     request for unbounded call volume.
     """
-    assert _BASE_POSTURE_EXEMPT_RULES == {"trust_frozen"}
-    assert _posture_exempt_rules() == {"trust_frozen", "rate_limit_exceeded"}  # default config
+    assert _BASE_POSTURE_EXEMPT_RULES == {"trust_frozen", "invalid_spiffe_identity"}
+    assert _posture_exempt_rules() == {"trust_frozen", "invalid_spiffe_identity", "rate_limit_exceeded"}  # default
     for gone in ("policy_load_pending", "evaluator_error", "evaluator_invalid_payload"):
         assert gone not in _posture_exempt_rules(), f"{gone} must soften — monitor mode must not drop traffic"
 
@@ -99,7 +101,7 @@ def test_exempt_set_contents():
 def test_rate_limit_can_be_made_to_soften_too(monkeypatch):
     """For operators who want monitor mode to mean literally nothing is ever refused."""
     monkeypatch.setattr(settings, "monitor_exempt_rate_limit", False, raising=False)
-    assert _posture_exempt_rules() == {"trust_frozen"}
+    assert _posture_exempt_rules() == {"trust_frozen", "invalid_spiffe_identity"}
     ev = _ev()
     out = ev._apply_posture(_dec("block", "rate_limit_exceeded"), {"monitor": True}, "evt")
     assert out.decision == "audit"
@@ -241,7 +243,7 @@ def _event():
     )
 
 
-@pytest.mark.parametrize("rule_id", ["evaluator_timeout", "evaluator_fallback", "invalid_spiffe_identity"])
+@pytest.mark.parametrize("rule_id", ["evaluator_timeout", "evaluator_fallback"])
 async def test_failure_path_decisions_soften_under_monitor(rule_id: str) -> None:
     ev = OPAEvaluator(_StubCache("audit"))  # type: ignore[arg-type]
     out = await ev._soften_failure_for_posture(_dec("block", rule_id), _event())
@@ -255,6 +257,15 @@ async def test_failure_path_decisions_stay_hard_without_monitor(rule_id: str) ->
     ev = OPAEvaluator(_StubCache(None))  # type: ignore[arg-type]
     out = await ev._soften_failure_for_posture(_dec("block", rule_id), _event())
     assert out.decision == "block" and out.rule_id == rule_id
+
+
+async def test_an_invalid_identity_stays_hard_under_monitor() -> None:
+    """invalid_spiffe_identity is an identity-integrity failure, not a policy outcome: the caller's id is one
+    no admin control can be applied to (norviq/engine/identity.py). Softened to allow+audit in a monitor
+    namespace, such a caller ran unfreezable (review round 6). It is exempt, like trust_frozen."""
+    ev = OPAEvaluator(_StubCache("audit"))  # type: ignore[arg-type]
+    out = await ev._soften_failure_for_posture(_dec("block", "invalid_spiffe_identity"), _event())
+    assert (out.decision, out.rule_id) == ("block", "invalid_spiffe_identity")
 
 
 async def test_unreadable_posture_keeps_the_hard_verdict() -> None:

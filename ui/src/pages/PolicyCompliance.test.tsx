@@ -18,7 +18,9 @@ import { PolicyCompliance, ruleIdsIn } from "./PolicyCompliance";
 
 vi.mock("../store/AppContext", async () => {
   const actual = await vi.importActual<typeof import("../store/AppContext")>("../store/AppContext");
-  return { ...actual, useApp: () => ({ namespace: "chatbot-prod", activeSection: "security" }) };
+  // timeRange is part of the real context (the page's range comes from the global header selector);
+  // leaving it out rendered every evidence link as `range=undefined`.
+  return { ...actual, useApp: () => ({ namespace: "chatbot-prod", activeSection: "security", timeRange: "7d" }) };
 });
 
 const EGRESS_REGO = `package norviq.custom.egress
@@ -201,10 +203,12 @@ describe("refusing to overclaim", () => {
     // the `scanned` field exists to prevent, and it is the reading an auditor would act on.
     mockAll({ principals: [], scanned: 0 });
     renderPage();
-    const overall = await screen.findByTestId("pc-overall");
+    // pc-overall exists from the first render, while every fetch is still pending; wait for the
+    // policy rows themselves to settle before reading their state.
+    await waitFor(() => expect(screen.getByTestId("pc-state-r2-support").textContent).toBe("Not evaluated"));
+    const overall = screen.getByTestId("pc-overall");
     expect(overall).toHaveAttribute("data-pct", "unknown");
     expect(overall.textContent).toContain("—");
-    expect(screen.getByTestId("pc-state-r2-support").textContent).toBe("Not evaluated");
   });
 });
 
@@ -240,8 +244,10 @@ describe("remediation", () => {
   it("says nothing to remediate only when policies exist and all are clean", async () => {
     mockAll({ controls: [] });
     renderPage();
-    const empty = await screen.findByTestId("pc-remediation-empty");
-    expect(empty.textContent).toContain("every policy is compliant");
+    // The empty panel renders mid-load too (as "not fully known yet"), so wait for its settled text.
+    await waitFor(() =>
+      expect(screen.getByTestId("pc-remediation-empty").textContent).toContain("every policy is compliant")
+    );
   });
 
   it("never issues an all-clear while any policy's state is unknown", async () => {
@@ -287,8 +293,10 @@ describe("remediation", () => {
   it("does not claim 'all compliant' when nothing has been evaluated", async () => {
     mockAll({ principals: [], scanned: 0 });
     renderPage();
-    const empty = await screen.findByTestId("pc-remediation-empty");
-    expect(empty.textContent).toContain("nothing has been evaluated");
+    await waitFor(() =>
+      expect(screen.getByTestId("pc-remediation-empty").textContent).toContain("nothing has been evaluated")
+    );
+    const empty = screen.getByTestId("pc-remediation-empty");
     expect(empty.textContent).not.toContain("every policy is compliant");
   });
 });
@@ -360,11 +368,15 @@ describe("evidence is a redirect, not a second Audit Log", () => {
     // separates redteam traffic. Land the operator ON the evidence instead of on a search box.
     mockAll({ controls: [control("customer_data_to_untrusted_recipient", ["r2-support"])] });
     renderPage();
-    const all = await screen.findByTestId("pc-evidence-all");
-    expect(all.getAttribute("href")).toContain("/audit?ns=chatbot-prod");
+    // pc-evidence-all renders on the FIRST paint, before any fetch settles, so finding it says nothing
+    // about whether the policy rows have loaded. Wait for the row we are about to click; reading it
+    // synchronously raced the policy-list + rego fetches and lost on a slower CI runner.
+    const row = await screen.findByTestId("pc-row-r2-support");
+    const all = screen.getByTestId("pc-evidence-all");
+    expect(all.getAttribute("href")).toContain("/audit?ns=chatbot-prod&range=7d");
     expect(screen.queryByTestId("pc-evidence-class")).toBeNull();
 
-    await userEvent.click(screen.getByTestId("pc-row-r2-support"));
+    await userEvent.click(row);
     const cls = await screen.findByTestId("pc-evidence-class");
     expect(cls.getAttribute("href")).toContain("agent=r2-support");
     const rule = screen.getByTestId("pc-evidence-rule-customer_data_to_untrusted_recipient");

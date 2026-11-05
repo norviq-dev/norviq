@@ -88,17 +88,40 @@ class PrecisionReport:
         return "\n".join(lines)
 
 
+def _input_for(case: BenignDefinition) -> dict:
+    """The input document the ENGINE would build for this call, from the engine's own builder.
+
+    This used to be a hand-written dict with `"derived": {}` and no `tool_params_normalized`,
+    `tool_name_normalized` or `agent.spiffe_id`, so a preset arm reading any of those could not fire
+    here. Measured when this was changed (2026-10-28): over the 36 corpus cases and eight further
+    probes, NO decision differed between the two inputs — the strict preset carries its own copies of
+    that logic — so the 0% held. It held by the luck of that duplication, though, not by construction:
+    the measurement that decides whether a control ships at deny has to see what production sees, so it
+    now calls OPAEvaluator._build_input, the builder the engine itself uses.
+    """
+    from norviq.engine.evaluator import OPAEvaluator
+    from norviq.engine.trust.models import TrustResult
+    from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+    event = ToolCallEvent(
+        tool_name=case.tool_name,
+        tool_params=case.tool_params,
+        agent_identity=AgentIdentity(spiffe_id="spiffe://norviq/ns/default/sa/benign-corpus",
+                                     namespace="default", agent_class=case.agent_class),
+        call_depth=case.call_depth,
+        mcp=case.mcp_context or {},
+    )
+    # A healthy, established agent: the corpus measures what the DETECTORS do to legitimate calls,
+    # not what a degraded trust score does on top of them.
+    trust = TrustResult(score=0.9, category="High", signals={}, weights={}, dominant_signal="",
+                        recommendation="allow")
+    builder = OPAEvaluator.__new__(OPAEvaluator)  # the input builders are pure: no cache, no OPA
+    return builder._build_input(event, trust)
+
+
 def _eval(module: Path, query: str, case: BenignDefinition) -> str:
     """One `opa eval` against the compiled module, returning the raw scalar."""
-    payload = {
-        "tool_name": case.tool_name,
-        "tool_params": case.tool_params,
-        "agent": {"namespace": "default", "agent_class": case.agent_class},
-        "call_depth": case.call_depth,
-        "derived": {},
-    }
-    if case.mcp_context:
-        payload["mcp"] = case.mcp_context
+    payload = _input_for(case)
     out = subprocess.run(  # noqa: S603 - fixed argv, opa resolved from PATH
         ["opa", "eval", "--v0-compatible", "-d", str(module), "-I", "--format", "raw", query],
         input=json.dumps(payload), capture_output=True, text=True, check=False,

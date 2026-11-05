@@ -26,6 +26,10 @@ on:
         required: false
         default: ""
 
+# Read-only by default. Jobs that need more ask for it in their own `permissions:` block.
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: false
@@ -89,12 +93,16 @@ jobs:
           provenance: false
           build-args: |
             NRVQ_GIT_SHA=${{ github.sha }}
-          # Exactly two tags in either mode. A RELEASE build (version set) publishes the immutable
-          # `<component>-<version>` that the released chart pins, and deliberately does NOT move
-          # `-latest`: tagging an older commit would otherwise drag `latest` backwards for everyone.
+          # ONLY the immutable per-commit tag here. The tag people actually pull — `-latest`, or
+          # `<component>-<version>` on a release — is added by the last step of this job, after the
+          # scan and the signature, to the same digest.
+          #
+          # It used to be pushed here, in the same call. So when trivy failed below, signing was
+          # skipped but the public tag had already moved: a checkout's chart (`-latest`,
+          # pullPolicy Always) got an unscanned, unsigned image. Observed on engine-latest and
+          # api-latest, which carried no signature artefacts while webhook-latest did.
           tags: |
             ${{ env.REPOSITORY }}:${{ matrix.component }}-${{ github.sha }}
-            ${{ inputs.version == '' && format('{0}:{1}-latest', env.REPOSITORY, matrix.component) || format('{0}:{1}-{2}', env.REPOSITORY, matrix.component, inputs.version) }}
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
@@ -175,3 +183,24 @@ jobs:
           done
           echo "::error::cosign attest failed after 5 attempts — image is signed but has no SBOM attestation"
           exit 1
+
+      # Promote the scanned, signed digest to its public tag. A RELEASE build (version set) publishes the
+      # immutable `<component>-<version>` the released chart pins, and deliberately does NOT move
+      # `-latest`: tagging an older commit would otherwise drag `latest` backwards for everyone.
+      #
+      # `imagetools create` from a single source by digest re-points the tag WITHOUT rewriting the
+      # index, so the tag resolves to exactly the digest that was scanned and signed. Measured before
+      # relying on it: on a local registry the retagged index digest equalled the source's, and the
+      # same retag with one added annotation did not — so the equality check is able to fail.
+      - name: Promote the scanned, signed digest to its public tag
+        env:
+          PUBLIC_TAG: ${{ inputs.version == '' && format('{0}-latest', matrix.component) || format('{0}-{1}', matrix.component, inputs.version) }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create --tag "${REPOSITORY}:${PUBLIC_TAG}" "${REPOSITORY}@${DIGEST}"
+          got=$(docker buildx imagetools inspect "${REPOSITORY}:${PUBLIC_TAG}" --format '{{json .Manifest}}' \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          if [ "$got" != "$DIGEST" ]; then
+            echo "::error::${PUBLIC_TAG} resolves to ${got}, not the scanned and signed ${DIGEST}"; exit 1
+          fi
+          echo "${REPOSITORY}:${PUBLIC_TAG} -> ${DIGEST}"

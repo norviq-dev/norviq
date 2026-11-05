@@ -101,10 +101,16 @@ def test_values_comments_survive_stamping(stamped: Path) -> None:
 
 
 def test_unstamped_chart_still_uses_readable_tags() -> None:
-    """Developing from a checkout must keep working — digest is empty, tag wins."""
+    """Developing from a checkout must keep working — digest is empty, tag wins.
+
+    Scoped to Norviq's own images. This asserted `"@sha256:" not in rendered` for the whole render,
+    which held only while no third-party image was pinned; they now are, in values.yaml, on purpose
+    (tests/release/test_image_pins.py). What this test protects is the FIRST-PARTY behaviour: a
+    checkout must run the `-latest` images it just built, not a digest stamped for some release.
+    """
     rendered = _render(ROOT / "helm" / "norviq")
     assert "ghcr.io/norviq-dev/norviq-engine:engine-latest" in rendered
-    assert "@sha256:" not in rendered
+    assert "ghcr.io/norviq-dev/norviq-engine@sha256:" not in rendered
 
 
 @pytest.mark.parametrize("bad", ["not-a-digest", "sha256:tooshort", ""])

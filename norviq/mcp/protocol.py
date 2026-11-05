@@ -18,6 +18,8 @@ streamable-HTTP driver reuses the same message helpers over a different frame.
 from __future__ import annotations
 
 import json
+import math
+import unicodedata
 from typing import Any
 
 # --- methods the firewall reasons about --------------------------------------------------------
@@ -47,6 +49,7 @@ M_SUBSCRIPTIONS_LISTEN = "subscriptions/listen"
 M_RESOURCES_TEMPLATES = "resources/templates/list"
 M_ELICITATION_CREATE = "elicitation/create"
 M_ROOTS_LIST = "roots/list"
+M_PING = "ping"
 
 RESULT_TYPE = "resultType"
 RESULT_COMPLETE = "complete"
@@ -103,10 +106,12 @@ E_UNSUPPORTED_PROTOCOL_VERSION = -32022
 class JsonRpcMessage:
     """One JSON-RPC 2.0 message, kept alongside the EXACT bytes it was decoded from.
 
-    Holding ``raw`` is the point: an allowed message is re-emitted from the original bytes rather
-    than re-serialised from ``data``. That is both a fidelity guarantee (key order, number
-    formatting, and any field this proxy does not model survive the hop unchanged) and the single
-    largest hot-path saving — a forwarded ``tools/call`` costs one parse, never a parse plus a dump.
+    An allowed message is re-emitted from ``raw``, the original bytes, rather than re-serialised from
+    ``data``: key order, number literals and fields this proxy does not model survive the hop, and a
+    forwarded ``tools/call`` costs one parse, not a parse and a dump. That is safe only because
+    `decode` refuses what peers could read differently from ``data`` — duplicate keys, keys that
+    collide under case folding, non-JSON numbers — and the firewall refuses keys that alias a
+    protocol member (`_envelope_alias`, `_message_alias`).
     """
 
     __slots__ = ("data", "raw")
@@ -134,7 +139,15 @@ class JsonRpcMessage:
 
     @property
     def method(self) -> str:
-        return self.data.get("method", "") if isinstance(self.data, dict) else ""
+        # Only a STRING is a method. A non-string `method` (1, true, ["x"], {}) used to be returned
+        # as is, so it was truthy and the message read as a request — forwarded verbatim — while the
+        # Python SDK, whose JSONRPCRequest needs `method: str`, read the same message as a response.
+        value = self.data.get("method", "") if isinstance(self.data, dict) else ""
+        return value if isinstance(value, str) else ""
+
+    @property
+    def _carries_answer(self) -> bool:
+        return isinstance(self.data, dict) and ("result" in self.data or "error" in self.data)
 
     @property
     def id(self) -> Any:
@@ -144,17 +157,30 @@ class JsonRpcMessage:
     def has_id(self) -> bool:
         return isinstance(self.data, dict) and "id" in self.data and self.data["id"] is not None
 
+    # CLASSIFICATION, FAIL CLOSED. Each shape is accepted only where every reference SDK agrees on
+    # it, and a message the SDKs would read differently is none of the three (malformed, dropped by
+    # the caller). The SDKs disagree exactly on messages that mix the shapes:
+    #   * TypeScript SDK 1.32 (`types.js`): JSONRPCRequest/Notification/ResultResponse/ErrorResponse
+    #     schemas are all `.strict()`, so a message carrying `method` AND `result`/`error` matches
+    #     none of them and is rejected.
+    #   * Python SDK 1.30 (`types.py`): `JSONRPCMessage` is a union of models that allow extra
+    #     fields. `{"id":3,"method":"x","result":{}}` validates as a JSONRPCRequest,
+    #     `{"id":3,"method":"x","error":{...}}` as a JSONRPCError, and a non-string `method` with a
+    #     `result` as a JSONRPCResponse — which resolves the pending request 3.
+    # So: a request/notification has a STRING method and no result/error; a response has an id, a
+    # result or an error, and no `method` key at all. Anything else is malformed.
     @property
     def is_request(self) -> bool:
-        return bool(self.method) and self.has_id
+        return bool(self.method) and self.has_id and not self._carries_answer
 
     @property
     def is_notification(self) -> bool:
-        return bool(self.method) and not self.has_id
+        return bool(self.method) and not self.has_id and not self._carries_answer
 
     @property
     def is_response(self) -> bool:
-        return isinstance(self.data, dict) and not self.method and "id" in self.data
+        return (isinstance(self.data, dict) and "method" not in self.data and "id" in self.data
+                and self._carries_answer)
 
     @property
     def params(self) -> dict:
@@ -252,9 +278,85 @@ def decode(line: bytes) -> JsonRpcMessage | None:
     if not stripped:
         return None
     try:
-        return JsonRpcMessage(json.loads(stripped), stripped)
-    except (ValueError, UnicodeDecodeError):
+        # Every float is checked: a pre-filter on the bytes cannot tell `9`*250 + `e99` (inf) from an
+        # ordinary number without doing the conversion, and inf reaches policy as null.
+        data = json.loads(stripped, object_pairs_hook=_unique_keys, parse_float=_finite_float,
+                          parse_constant=_no_constant)
+        # Counting brackets is C-speed and bounds the depth from above; only a message with more than
+        # MAX_DEPTH of them is walked.
+        if stripped.count(b"[") + stripped.count(b"{") > MAX_DEPTH and _deeper_than(data, MAX_DEPTH):
+            return None
+        return JsonRpcMessage(data, stripped)
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
+
+
+# Deepest object/array nesting a message may have. Downstream code walks these trees (scanners,
+# maskers, policy evaluation), and the SDK's request serialiser fails at ~255 levels; that failure
+# used to reach the outage fallback. MCP messages are shallow — a tool schema or a structured result
+# rarely nests past a few dozen levels — so 128 leaves room and refuses only the pathological.
+MAX_DEPTH = 128
+
+
+def _deeper_than(data: Any, limit: int) -> bool:
+    """Whether `data` nests deeper than `limit`. Level by level, so each level is one comprehension
+    over that level's containers rather than a Python-level push and pop per node."""
+    level = [data] if isinstance(data, (dict, list)) else []
+    depth = 0
+    while level:
+        depth += 1
+        if depth > limit:
+            return True
+        level = [child
+                 for node in level
+                 for child in (node.values() if isinstance(node, dict) else node)
+                 if isinstance(child, (dict, list))]
+    return False
+
+
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        # `1e400` overflows to inf. JSON has no non-finite numbers, and peers disagree on them.
+        raise ValueError("non-finite number")
+    return value
+
+
+def _no_constant(name: str) -> Any:
+    """`NaN`, `Infinity` and `-Infinity` are not JSON; Python's decoder accepts them, others do not."""
+    raise ValueError(f"non-JSON constant {name}")
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """An object with a key named twice — or two keys that one parser reads as the same name — is not
+    decoded at all.
+
+    JSON leaves duplicate names to the parser, and parsers disagree: Python's `json` and JavaScript's
+    `JSON.parse` keep the LAST, others keep the first. Go's encoding/json, a common MCP server stack,
+    goes further: it matches object keys to struct fields CASE-INSENSITIVELY with Unicode simple
+    folding (`ſ` reads as `s`, the Kelvin sign as `k`), and the last match wins. So
+    `{"name":"read_file","Name":"delete_all"}` was decided here as read_file and run upstream as
+    delete_all. Keys are compared after NFKC normalisation and case folding, which covers those folds;
+    a message both ends cannot agree on is refused, in both directions, like any other undecodable
+    input.
+    """
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise ValueError("duplicate key in a JSON object")
+    if len(obj) > 1:
+        # Fast path, in C: distinct keys that are ASCII with no uppercase letter cannot fold together.
+        joined = "".join(obj)
+        if not (joined.isascii() and joined == joined.lower()):
+            folded = {_fold(k) for k in obj}
+            if len(folded) != len(obj):
+                raise ValueError("keys in a JSON object that differ only by case or compatibility form")
+    return obj
+
+
+def _fold(key: str) -> str:
+    return unicodedata.normalize("NFKC", key).casefold()
 
 
 def encode(payload: Any) -> bytes:

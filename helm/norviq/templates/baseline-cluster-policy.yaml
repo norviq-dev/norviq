@@ -7,12 +7,12 @@
   "installed by default". Two safe-looking defaults combining into a silent gap is refused here: fail
   the install loudly instead of shipping it.
 
-  Note this guard is about the baseline EXISTING, not about it blocking. It renders in
-  `baselineClusterPolicy.enforcementMode`, which defaults to `audit`: the controls evaluate and record
-  non-compliance, and calls proceed. Rendering zero baselines is still wrong under that default — the
-  customer loses the visibility the audit posture exists to give them.
+  Note this guard is about the baseline EXISTING. It renders in `baselineClusterPolicy.enforcementMode`,
+  which defaults to `block` from 0.2.6 (it was `audit` through 0.2.5): the preset's enforcing controls
+  refuse the call (two MCP controls hold it for approval), and the one it authors as a record
+  (scope_violation_dangerous_tool) records it. Rendering zero baselines loses both.
 */ -}}
-{{- fail "\n\nbaselineClusterPolicy.enabled=true but policyQuotaNamespaces is EMPTY.\nNo baseline guard would be rendered, leaving every agent class without the fail-closed cluster baseline.\nEither:\n  - set policyQuotaNamespaces to your tenant namespaces (the baseline renders one per namespace), for example:\n      --set policyQuotaNamespaces='{default,chatbot-prod}'\n    or\n  - set baselineClusterPolicy.enabled=false to explicitly run WITHOUT a cluster baseline (not recommended).\n" }}
+{{- fail "\n\nbaselineClusterPolicy.enabled=true but policyQuotaNamespaces is EMPTY.\nNo baseline guard would be rendered, leaving every agent class with NO cluster baseline at all — no controls evaluating, not even in audit mode.\nEither:\n  - set policyQuotaNamespaces to your tenant namespaces (the baseline renders one per namespace), for example:\n      --set policyQuotaNamespaces='{default,chatbot-prod}'\n    or\n  - set baselineClusterPolicy.enabled=false to explicitly run WITHOUT a cluster baseline (not recommended).\n" }}
 {{- end }}
 {{- range $ns := .Values.policyQuotaNamespaces }}
 apiVersion: norviq.io/v1alpha1
@@ -25,7 +25,7 @@ metadata:
 spec:
   target:
     namespace: {{ $ns }}
-  enforcementMode: {{ $.Values.baselineClusterPolicy.enforcementMode | default "audit" }}
+  enforcementMode: {{ $.Values.baselineClusterPolicy.enforcementMode | default "block" }}
   preset: {{ $.Values.baselineClusterPolicy.preset }}
   clusterPriority: {{ $.Values.baselineClusterPolicy.clusterPriority }}
 ---

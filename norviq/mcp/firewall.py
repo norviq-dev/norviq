@@ -22,11 +22,15 @@ re-deriving a verdict per call.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
+import re
+import uuid
 from dataclasses import dataclass, field
 from time import monotonic, perf_counter
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import structlog
 
@@ -42,6 +46,7 @@ from norviq.mcp.pins import (
 )
 from norviq.mcp.servers import ServerRegistry
 from norviq.mcp.scanner import (
+    _MAX_WALK_NODES,
     Finding,
     ScanReport,
     name_skeleton,
@@ -66,22 +71,29 @@ _SEVERITY_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 # definition and still leaves the diff readable when a hostile server pads one.
 _CANONICAL_MAX = 8192
 
-# Total characters scanned across ALL entries of one DISCOVERY RESPONSE — `tools/list` and each of
+# Total scan cost across ALL entries of one DISCOVERY RESPONSE — `tools/list` and each of
 # its three siblings. The server chooses both the size of an entry and the NUMBER of entries, so a
 # per-entry cap bounds nothing; this is the same reasoning as `scanner._MAX_TOTAL_SCAN_CHARS`,
 # applied one level up.
 #
-# SIZED FROM A MEASUREMENT, not from a round number. The rule table costs ~0.19 ms per 1000
-# characters on the reference host, so 512 KiB is ~100 ms: an order of magnitude under the 2 s
-# fail-closed evaluator budget, once per discovery. It was 64 KiB, which is below a real catalogue —
-# 500 files x 200 characters of uri/name/description is 100 KiB — and entries past the bound are
-# WITHHELD, so an under-sized bound is an outage, not a saving.
+# SIZED FROM A MEASUREMENT, not from a round number. The budget is in the scanner's COST units
+# (`scanner._leaf_cost`: characters read in each pass plus a per-leaf minimum), measured at ~0.2 us of
+# work per unit at worst on the reference host. 768 Ki units per discovery response is ~130 ms
+# measured inside `scan_tool_definition` for an 8 MiB listing of any shape (prose, tiny prose,
+# identifiers, empty strings, numbers): an order of magnitude under the 2 s fail-closed evaluator
+# budget. A definition gets at most 256 Ki of it, so one entry cannot take a whole listing's budget,
+# and anything that does not fit is WITHHELD, never sanitised or passed. An under-sized bound is an
+# outage, not a saving: 500 files x 200 characters of uri/name/description is 100 KiB.
 #
-# What it bought: `tools/list` was giving each tool its own 64 KiB, so 500 tools of 16 KiB each cost
-# 1703 ms measured end-to-end (1534 ms of it inside `scan_tool_definition`) — the same denial of
-# service the notification channel was just fixed for, on the ORIGINAL Gate A surface, reachable
-# again on every `notifications/tools/list_changed` the server chooses to send.
-_LIST_SCAN_BUDGET = 524288
+# Why a listing-wide budget at all: with a per-entry budget only, 500 tools of 16 KiB each cost
+# 1703 ms measured end-to-end (1534 ms of it inside `scan_tool_definition`), reachable again on every
+# `notifications/tools/list_changed` the server chooses to send.
+_LIST_SCAN_BUDGET = 786432
+_DEFINITION_SCAN_BUDGET = 262144
+# Nodes walked per discovery response, across all its entries (each walk is also capped at
+# `scanner._MAX_WALK_NODES`). Non-string nodes cost no scan budget, so this is what bounds walking a
+# listing of number arrays: ~0.35 us per node, 65536 nodes ~25 ms.
+_LIST_WALK_NODES = 65536
 
 # Bound on a bare-string list entry before it is scanned. Same rationale, one shape smaller. This is
 # a cap on ONE entry; the shared budget above is what stops five hundred of them.
@@ -109,6 +121,32 @@ _DENIAL_REPORT_WINDOW_S = 60.0
 # Both halves of the key are attacker-influenced — a client may call any tool name it likes — so the
 # ledger itself needs a bound, or it becomes the amplifier one level along.
 _DENIAL_REPORT_MAX_KEYS = 512
+
+# After the proxy's own `tools/list` for a cold catalog FAILS, how long before another call may try
+# again. Without it a server whose list errors or hangs turns every call into an upstream round trip
+# plus up to `mcp_cold_list_timeout_s` of waiting — the client pays the timeout per call and the
+# server is handed a request rate it can set by failing. With it a transient failure still recovers
+# within half a minute, and the calls in between are escalated exactly as before the self-list existed.
+_COLD_LIST_RETRY_S = 30.0
+# The JSON-RPC id of the proxy's own list. A string with a random part, so it cannot collide with an
+# id the client chose (clients number their requests) and a peer cannot predict it to answer it early.
+_COLD_LIST_ID_PREFIX = "norviq-cold-list-"
+
+
+def is_cold_list_id(msg_id: Any) -> bool:
+    """True for the JSON-RPC id of a `tools/list` the proxy itself sent for a cold catalog."""
+    return isinstance(msg_id, str) and msg_id.startswith(_COLD_LIST_ID_PREFIX)
+
+# The 2026-07-28 per-request handshake keys copied from the triggering call onto the self-list, so a
+# stateless server sees the same revision and client capabilities on both requests.
+_COLD_LIST_META_KEYS = (P.META_PROTOCOL_VERSION, P.META_CLIENT_CAPABILITIES, P.META_CLIENT_INFO)
+
+# Sends the proxy's own `tools/list` request upstream and returns the server's response to it (the
+# message whose id matches), or None. Supplied per call by the transport driver, because only the
+# driver owns the upstream connection — and on HTTP, the headers the client's request carried. An
+# optional `credential_key` attribute names the credential it lists with; single flight and back-off
+# are kept per key.
+ListUpstream = Callable[[P.JsonRpcMessage], Awaitable[P.JsonRpcMessage | None]]
 
 
 def _fenced(text: str, *, scanned: bool) -> str:
@@ -178,8 +216,24 @@ def _annotate(parent: Any, payload: dict, key: str = "norviq") -> dict:
     if not isinstance(meta, dict):
         meta = {}
         parent["_meta"] = meta
-    meta[key] = dict(payload)
+    meta[key] = _without_evidence(dict(payload))
     return meta[key]
+
+
+def _without_evidence(value: Any) -> Any:
+    """`value` with every finding's `evidence` removed, at any depth.
+
+    Applied to EVERY annotation, not per call site. `evidence` is an unmasked excerpt of the server's
+    original text, for the operator's log. Two sites stripped it (`_redact_evidence`); the others —
+    the tool-result content guard above all — wrote whole findings into the `_meta` the client
+    reads, so the excerpt reached the model after the content itself had been fenced and DLP-masked,
+    and a card number in an injection-shaped result came back unmasked through the annotation.
+    """
+    if isinstance(value, dict):
+        return {k: _without_evidence(v) for k, v in value.items() if k != "evidence"}
+    if isinstance(value, list):
+        return [_without_evidence(v) for v in value]
+    return value
 
 
 def _redact_evidence(findings: list[dict]) -> list[dict]:
@@ -285,6 +339,73 @@ class MediationResult:
     blocked: bool = False
     decision: PolicyDecision | None = None
     note: str = ""
+    # True when handling this message scanned a catalog the driver has not seen go past: the proxy's
+    # own `tools/list` for a cold catalog. The driver reports the catalog to the control plane on it,
+    # exactly as it does after forwarding a `tools/list` response.
+    catalog_scanned: bool = False
+
+
+# JavaScript's StrWhiteSpaceChar set (ECMA-262 WhiteSpace + LineTerminator), which `Number()` trims.
+_JS_WHITESPACE = "\t\n\v\f\r            " \
+                 "      　﻿"
+# UNAMBIGUOUS, so a failed match backtracks in linear time. The first form, `[0-9]+\.?[0-9]*`, could
+# split a digit run between `[0-9]+` and `[0-9]*` in n ways when the dot is absent, so a run of
+# digits followed by one non-digit cost O(n^2): a 50 KB response id held the event loop for seconds,
+# and every HTTP session shares that loop. Here the digits after the integer part only follow a dot.
+_JS_DECIMAL = re.compile(r"[+-]?(?:Infinity|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)\Z")
+# A string id longer than this has no numeric reading. Ids are request counters: the proxy forwards
+# what the client chose, and no SDK counter reaches 64 characters, while the reading below runs on
+# server text for every response. Bounds the work whatever the patterns cost.
+_MAX_NUMERIC_ID_CHARS = 64
+_JS_RADIX = re.compile(r"0(?:[xX][0-9a-fA-F]+|[oO][0-7]+|[bB][01]+)\Z")
+
+
+def _js_number(text: str) -> float | None:
+    """`Number(text)` as JavaScript computes it (ECMA-262 StringToNumber), or None for NaN.
+
+    Only what decides correlation is reproduced: trimming, the empty string (0), decimal literals with
+    sign and exponent, the 0x/0o/0b radix forms (unsigned), and Infinity. No underscores, as in JS.
+    """
+    body = text.strip(_JS_WHITESPACE)
+    if body == "":
+        return 0.0
+    if _JS_RADIX.match(body):
+        value = int(body[2:], {"x": 16, "o": 8, "b": 2}[body[1].lower()])
+        # JS gives Infinity past the double range; Python's float() raises instead.
+        return float(value) if value.bit_length() <= 1023 else math.inf
+    if _JS_DECIMAL.match(body):  # linear: see the pattern
+        return float(body.replace("Infinity", "inf"))
+    return None
+
+
+def _numeric_readings(text: str) -> set[int]:
+    """Every integer a reference MCP client SDK would read a STRING response id as.
+
+    The two reference SDKs both treat a string id as the number it spells:
+      * TypeScript (@modelcontextprotocol/sdk 1.32, `shared/protocol.js` `_onresponse`):
+        `const messageId = Number(response.id)`, then a lookup in a Map keyed by its integer ids.
+      * Python (mcp 1.30, `shared/session.py` `_normalize_request_id`): `int(response_id)` when the
+        id is a str, falling back to the string; its own request ids are ints.
+    Both readings are taken, because the proxy does not know which SDK is on the other side, and a
+    response the client WILL accept as the answer to request N must be mediated as that answer.
+    """
+    readings: set[int] = set()
+    if len(text) > _MAX_NUMERIC_ID_CHARS:
+        return readings
+    # Any exception is "no reading", never a crash: the id is the server's, and an exception here
+    # would escape `on_server_message` and end the pump (an id of "0x" + 300 hex digits overflowed
+    # float()). An id with no reading is simply unmatched, and dropped.
+    try:
+        readings.add(int(text))         # Python: whitespace, sign, underscores, Unicode digits
+    except Exception:  # noqa: BLE001 — ValueError, and the int-digits limit, alike
+        pass
+    try:
+        js = _js_number(text)
+        if js is not None and math.isfinite(js) and js.is_integer():
+            readings.add(int(js))       # JavaScript: Number() semantics, double precision
+    except Exception:  # noqa: BLE001
+        pass
+    return readings
 
 
 class _PendingMap:
@@ -294,8 +415,8 @@ class _PendingMap:
     the ids. An unbounded map is a trivially-reachable memory-exhaustion primitive: open requests,
     never answer them. Eviction is insertion-ordered (Python dicts preserve it), and evicting the
     OLDEST is right — an id that has gone unanswered longest is the one least likely to still
-    matter, and losing it degrades to "forward the response unexamined", never to a bypass of Gate B
-    (which is enforced on the REQUEST, before anything is forwarded).
+    matter. A response for an evicted id is UNMATCHED, and an unmatched response is dropped, never
+    forwarded (`McpFirewall.on_server_message`).
     """
 
     __slots__ = ("_map", "_cap")
@@ -306,20 +427,17 @@ class _PendingMap:
 
     @staticmethod
     def _key(msg_id: Any) -> str:
-        # JSON-RPC ids may be strings or numbers, and `1` and `"1"` are DIFFERENT ids. Typed keys
-        # keep them apart; a bare str() would conflate them and let a peer confuse the map.
+        # The key a REQUEST id is stored under. Strings and numbers are typed apart, so a client that
+        # uses both `1` and `"1"` keeps two entries and each answer finds its own (exact match first,
+        # see `match`).
         #
-        # NUMBERS ARE NORMALISED ACROSS int/float, though, because JSON has ONE number type and the
-        # peers do not agree on how it decodes. We sent `"id": 1`; a server that answers `"id": 1.0`
-        # produced `float:1.0` here, missed `int:1`, and `take()` returned "" — so the response
-        # matched no discovery branch and was forwarded VERBATIM: no charset check, no skeleton map,
-        # no pin, no catalog entry. The subsequent tools/call on a homoglyph twin then found no
-        # catalog entry, so `call_denied` never ran either. One character skipped Gate A entirely.
-        # A JavaScript MCP host treats 1 and 1.0 as the same Number and accepts the correlation this
-        # proxy rejected, so the two ends genuinely disagreed about which request was being answered.
+        # NUMBERS ARE NORMALISED ACROSS int/float, because JSON has ONE number type and the peers do
+        # not agree on how it decodes. We sent `"id": 1`; a server that answered `"id": 1.0` missed
+        # `int:1` and the response was forwarded verbatim. A JavaScript host treats 1 and 1.0 as the
+        # same Number.
         #
         # `bool` is excluded deliberately: it is an int subclass in Python but is not a valid JSON-RPC
-        # id, and folding `True` into `num:1` would be the conflation the typed key exists to prevent.
+        # id, and folding `True` into `num:1` would conflate two ids no client conflates.
         if isinstance(msg_id, bool):
             return f"bool:{msg_id}"
         if isinstance(msg_id, (int, float)):
@@ -331,13 +449,255 @@ class _PendingMap:
             return f"num:{msg_id!r}"
         return f"{type(msg_id).__name__}:{msg_id}"
 
+    def _candidates(self, msg_id: Any) -> list[str]:
+        """Keys a RESPONSE id can answer, most exact first.
+
+        Matching has to be at least as liberal as the client's own matching. JSON-RPC calls `5` and
+        `"5"` different ids, but both reference SDKs read a string response id as a number (see
+        `_numeric_readings`), so a server answering `"5"` to request 5 has its answer ACCEPTED by the
+        client as the answer to 5. Typing them apart here made that answer match nothing, and an
+        unmatched answer used to be forwarded verbatim: no Gate A, no content guard. An integral
+        number is likewise tried against a numeric string request id, for a client that compares
+        loosely.
+        """
+        keys = [self._key(msg_id)]
+        if isinstance(msg_id, str):
+            keys += [f"num:{n}" for n in sorted(_numeric_readings(msg_id))]
+        elif isinstance(msg_id, (int, float)) and not isinstance(msg_id, bool):
+            if isinstance(msg_id, int) or msg_id.is_integer():
+                keys.append(f"str:{int(msg_id)}")
+        return keys
+
     def put(self, msg_id: Any, method: str) -> None:
-        if len(self._map) >= self._cap:
+        key = self._key(msg_id)
+        if key not in self._map and len(self._map) >= self._cap:
             self._map.pop(next(iter(self._map)), None)
-        self._map[self._key(msg_id)] = method
+        self._map[key] = method
+
+    def match(self, msg_id: Any) -> tuple[str, str] | None:
+        """(key, method) of the pending request this response id answers, without consuming it."""
+        for key in self._candidates(msg_id):
+            method = self._map.get(key)
+            if method is not None:
+                return key, method
+        return None
+
+    def pop(self, key: str) -> None:
+        self._map.pop(key, None)
+
+    def discard(self, msg_id: Any) -> None:
+        """Forget a request that will get no upstream answer (it was answered locally)."""
+        self._map.pop(self._key(msg_id), None)
 
     def take(self, msg_id: Any) -> str:
-        return self._map.pop(self._key(msg_id), "")
+        found = self.match(msg_id)
+        if found is None:
+            return ""
+        self.pop(found[0])
+        return found[1]
+
+
+class Correlation:
+    """Where the client's requests are tracked, and so which server responses can answer them.
+
+    Two states, because "the client sent it" and "the server has it" are different facts:
+
+    * HELD — read from the client, not (yet) forwarded upstream: still in Gate B, or held behind the
+      proxy's own cold-catalog list. The server has not seen it, so nothing the server sends under
+      its id is an answer to it. Such a response is dropped, never forwarded, and does not consume
+      anything: the client gets the proxy's own decision, or later the real answer.
+    * PENDING — forwarded upstream. Only these can be answered.
+
+    One scope per place answers can arrive, and NO scope is shared between requests that did not
+    arrive together. stdio has one client and one stream: the firewall's default scope. Streamable
+    HTTP has one per POST: its response body answers its own request and nothing else.
+
+    A GET stream answers no request (`get_stream`): the transport says a server MUST NOT send a
+    response there unless resuming a stream associated with a previous request, and what a client
+    SDK does with a response it did not expect is not something mediation can depend on — the
+    Python SDK 1.30 rewrites the id of a response on a resumed stream to its pending request's id,
+    and the TypeScript SDK 1.32 adopts any Mcp-Session-Id it is sent. A GET that resumes one of the
+    proxy's POST streams (Last-Event-ID) gets that POST's scope, `resumed`: a response on it is
+    mediated as the answer to THAT POST's request, under that request's id, at most once.
+    """
+
+    __slots__ = ("held", "pending", "get_stream", "resumed", "request_id", "upstream_headers")
+
+    def __init__(self, cap: int, *, get_stream: bool = False) -> None:
+        self.held = _PendingMap(cap)
+        self.pending = _PendingMap(cap)
+        self.get_stream = get_stream
+        self.resumed = False
+        # The id of the request a POST scope forwarded (one POST, one message; batches are refused).
+        self.request_id: Any = None
+        # Transport-owned: the headers the HTTP driver sends on its own requests made on behalf of the
+        # client whose stream this is (a refusal posted back upstream). Empty on stdio.
+        self.upstream_headers: dict[str, str] = {}
+
+    def resumption(self) -> Correlation:
+        """This POST's scope as seen from a GET that resumes its stream: same entries, `resumed`."""
+        view = Correlation(0)
+        view.held, view.pending, view.request_id, view.resumed = (
+            self.held, self.pending, self.request_id, True)
+        view.upstream_headers = self.upstream_headers
+        return view
+
+
+# How many nodes of a call's arguments `_sets_transport_headers` will walk. Past it the call is refused:
+# a tree the proxy cannot inspect is not one it can say sets no header. 65536 is far above a real
+# argument object (the old bound, 4096, was below a large but legitimate array argument).
+_HEADER_WALK_NODES = 65536
+
+# The members the firewall READS from a client message, at the top level and in `params`. A key that
+# differs from one of these only by case or compatibility form is read by this proxy as absent and by a
+# case-insensitive upstream (Go's encoding/json) as that member — so the two would act on different
+# messages. Such a message is refused (`_envelope_alias`).
+_ENVELOPE_KEYS = frozenset({"jsonrpc", "id", "method", "params", "result", "error"})
+_PARAMS_KEYS = frozenset({"name", "arguments", "uri", "_meta", P.INPUT_RESPONSES, P.REQUEST_STATE,
+                          "messages", "maxTokens", "systemPrompt"})
+
+
+def _alias_in(obj: Any, reserved: frozenset) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    folded = {P._fold(k): k for k in reserved}
+    for key in obj:
+        exact = folded.get(P._fold(key))
+        if exact is not None and key != exact:
+            return key
+    return ""
+
+
+# The members of the server->client objects the firewall reads BY NAME: list entries, result
+# envelopes, content blocks, prompt and sampling messages, notification params. A key in one of those
+# objects that folds to one of these without being it is read by this proxy as absent — so whatever it
+# holds is not scanned or masked — and by a case-insensitive client (Go's encoding/json) as that member.
+_SERVER_MEMBERS = frozenset({
+    # list entries (tools, prompts, resources, resource templates)
+    "name", "title", "description", "inputSchema", "outputSchema", "annotations", "uri", "uriTemplate",
+    "mimeType", "arguments", "size", "icons", "_meta",
+    # result envelopes
+    "content", "structuredContent", "isError", "contents", "messages", "tools", "prompts", "resources",
+    "resourceTemplates", "nextCursor", P.RESULT_TYPE, P.INPUT_REQUESTS, P.REQUEST_STATE,
+    # content blocks and messages
+    "type", "text", "resource", "data", "blob", "role",
+    # sampling request params
+    "systemPrompt", "maxTokens", "modelPreferences", "includeContext", "temperature", "stopSequences",
+    "metadata",
+})
+_SERVER_FOLDS = {P._fold(k): k for k in _SERVER_MEMBERS}
+
+
+def _server_alias(obj: Any) -> str:
+    """A key of `obj` that folds to a member in `_SERVER_MEMBERS` without being it, or ""."""
+    if not isinstance(obj, dict):
+        return ""
+    for key in obj:
+        exact = _SERVER_FOLDS.get(P._fold(key))
+        if exact is not None and key != exact:
+            return key
+    return ""
+
+
+def _blocks_alias(blocks: Any) -> str:
+    """The first alias in a content-block value (a block, or a list of blocks) and its `resource`."""
+    for block in (blocks if isinstance(blocks, list) else [blocks]):
+        alias = _server_alias(block) or (_server_alias(block.get("resource")) if isinstance(block, dict) else "")
+        if alias:
+            return alias
+    return ""
+
+
+def _message_alias(container: Any) -> str:
+    """An alias anywhere in the structure of a server result or params object the firewall reads:
+    the object itself, its content blocks, and its messages and their content. Never inside
+    `structuredContent`, schemas or arguments, which are data with keys of their own."""
+    if not isinstance(container, dict):
+        return ""
+    alias = _server_alias(container)
+    if alias:
+        return alias
+    for key in ("content", "contents"):
+        alias = _blocks_alias(container.get(key))
+        if alias:
+            return alias
+    messages = container.get("messages")
+    for message in (messages if isinstance(messages, list) else []):
+        alias = _server_alias(message) or (_blocks_alias(message.get("content")) if isinstance(message, dict) else "")
+        if alias:
+            return alias
+    return ""
+
+
+def _alias_finding(alias: str, path: str) -> Finding:
+    return Finding(
+        "mcp_a_alias_key", "critical", path, alias[:120],
+        f"key '{alias[:64]}' differs from a member this firewall reads only by case or compatibility "
+        "form: unread here, and read as that member by a case-insensitive client",
+    )
+
+
+def _envelope_alias(msg: P.JsonRpcMessage) -> str:
+    """A key of a client message that aliases a protocol member it is not, or ""."""
+    if not isinstance(msg.data, dict):
+        return ""
+    return _alias_in(msg.data, _ENVELOPE_KEYS) or _alias_in(msg.data.get("params"), _PARAMS_KEYS)
+
+
+# The list each discovery result must carry. A result without it is not a well-formed answer to that
+# method, and is dropped rather than forwarded (see `_response_defect`).
+_LIST_RESULT_KEYS = {
+    P.M_TOOLS_LIST: "tools",
+    P.M_PROMPTS_LIST: "prompts",
+    P.M_RESOURCES_LIST: "resources",
+    P.M_RESOURCES_TEMPLATES: "resourceTemplates",
+}
+
+
+def _response_defect(msg: P.JsonRpcMessage, method: str) -> str:
+    """Why this is not a well-formed JSON-RPC 2.0 answer to `method`, or "" when it is.
+
+    Checked BEFORE the pending entry is consumed. A malformed first answer used to consume it; the
+    client rejected that answer and kept waiting, and the server's second answer with the same id then
+    matched nothing and went out verbatim. Now the malformed one is dropped and the request stays
+    pending, so whatever answer the client does accept is the one that is mediated.
+    """
+    data = msg.data
+    if "method" in data:
+        return "a response carries a method"
+    if data.get("jsonrpc") != "2.0":
+        return "jsonrpc is not \"2.0\""
+    if ("result" in data) == ("error" in data):
+        return "a response carries exactly one of result and error"
+    if "error" in data:
+        err = data["error"]
+        code = err.get("code") if isinstance(err, dict) else None
+        if not isinstance(code, int) or isinstance(code, bool) or not isinstance(err.get("message"), str):
+            return "error is not a JSON-RPC error object"
+        return ""
+    result = data["result"]
+    if not isinstance(result, dict):
+        return "result is not an object"
+    key = _LIST_RESULT_KEYS.get(method)
+    if key is not None and not isinstance(result.get(key), list):
+        return f"a {method} result without a {key} list"
+    return ""
+
+
+# Bound on the per-credential single-flight and back-off maps. The key is a digest of what the caller
+# sent, so a caller cycling credentials must not grow them without limit; the oldest is evicted.
+_COLD_LIST_MAX_CREDENTIALS = 64
+
+
+def _bounded_put(mapping: dict, key: str, value: Any) -> None:
+    if key not in mapping and len(mapping) >= _COLD_LIST_MAX_CREDENTIALS:
+        mapping.pop(next(iter(mapping)), None)
+    mapping[key] = value
+
+
+# How often the unmatched-response drop is logged per firewall. A server chooses how many it sends,
+# so the log line is coalesced; the count of suppressed drops rides on the next line.
+_UNMATCHED_LOG_WINDOW_S = 60.0
 
 
 class McpFirewall:
@@ -368,11 +728,31 @@ class McpFirewall:
         self._prefix = tool_name_prefix
         self._catalog: dict[str, CatalogEntry] = {}
         self._skeletons: dict[str, str] = {}   # folded name -> canonical name, for shadowing detection
-        self._client_pending = _PendingMap(settings.mcp_max_pending_requests)
+        # The default correlation scope: the whole session on stdio, and any caller that passes none.
+        # The HTTP driver passes one per POST (see `Correlation`).
+        self._corr = Correlation(settings.mcp_max_pending_requests)
         self._server_pending = _PendingMap(settings.mcp_max_pending_requests)
         # (tool, rule) -> (monotonic of last report, refusals suppressed since). Rate-limits the
         # PEP-denial REPORT only; Gate A's decision never consults it.
         self._denial_reports: dict[tuple[str, str], tuple[float, int]] = {}
+        # Whether a `tools/list` response for this server has been through Gate A in this process.
+        # Not the same as "the catalog is non-empty": a blocked server or an empty server is listed and
+        # leaves no entries, and must not be re-listed on every call because of it.
+        self._catalog_listed = False
+        # The proxy's own list for a cold catalog, PER CREDENTIAL (`ListUpstream.credential_key`): one
+        # task shared by every call with that credential that arrives while it runs (single flight),
+        # and when that credential's list last failed (see `_COLD_LIST_RETRY_S`). Per credential so a
+        # caller never waits on, or is backed off by, a list sent with someone else's Authorization.
+        # The CATALOG stays shared: it is this attested workload's view of the server, exactly as a
+        # client listing warms it for every caller of the same firewall.
+        self._cold_lists: dict[str, asyncio.Task] = {}
+        self._cold_list_failed: dict[str, float] = {}
+        # Counts CLIENT-initiated tools/list responses that have been through Gate A. The proxy's own
+        # list compares it before and after its wait: see `_cold_list_once`.
+        self._client_list_generation = 0
+        # (monotonic of the last unmatched-response log line, drops suppressed since). See
+        # `_drop_unmatched`.
+        self._unmatched_log: tuple[float, int] = (0.0, 0)
         self.stats: dict[str, int] = {}
 
     # ---------------------------------------------------------------- helpers
@@ -431,8 +811,20 @@ class McpFirewall:
         ]
 
     # ============================================================ CLIENT -> SERVER
-    async def on_client_message(self, msg: P.JsonRpcMessage) -> MediationResult:
-        """Mediate one message travelling from the MCP client to the upstream server."""
+    def new_correlation(self, *, get_stream: bool = False) -> Correlation:
+        """A correlation scope for one place answers arrive: an HTTP POST, or a GET stream."""
+        return Correlation(settings.mcp_max_pending_requests, get_stream=get_stream)
+
+    async def on_client_message(
+        self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None = None,
+        *, registered: bool = False, corr: Correlation | None = None,
+    ) -> MediationResult:
+        """Mediate one message travelling from the MCP client to the upstream server.
+
+        `list_upstream` lets the firewall send its own `tools/list` when a `tools/call` finds the
+        catalog cold (see `_warm_cold_catalog`). Without it — a caller that cannot reach the upstream
+        — a cold call is evaluated unscanned, which is the behaviour before the self-list existed.
+        """
         # A batch is a JSON-RPC 2.0 array. MCP removed batching in the 2025-06-18 revision, but an
         # older client may still send one — and a proxy that forwards an array it did not inspect
         # would let a `tools/call` ride inside it ungoverned. Refusing is the only safe answer that
@@ -448,9 +840,52 @@ class McpFirewall:
                 blocked=True, note="batch_refused",
             )
 
+        # `registered`: the driver already called `note_client_request` when it read this message.
+        # Registering again here would re-open an entry an answer has consumed in between, and a
+        # second answer to the same request would then be mediated and forwarded as well.
+        corr = corr or self._corr
+        alias = _envelope_alias(msg)
+        if alias:
+            # Refused before anything else reads it: Gate B would decide on one spelling and a
+            # case-insensitive upstream would act on the other.
+            self._bump("ambiguous_key_refused")
+            log.warning("nrvq.mcp.client.ambiguous_key_refused", key=alias[:64], code="NRVQ-MCP-5089")
+            corr.held.discard(msg.id)
+            return MediationResult(
+                reply=P.encode(P.error_response(
+                    msg.id if isinstance(msg.id, (str, int)) and not isinstance(msg.id, bool) else None,
+                    P.E_INVALID_REQUEST,
+                    f"Norviq MCP firewall refused this message: its key '{alias[:64]}' differs from a "
+                    "protocol field only by case or compatibility form.")),
+                blocked=True, note="ambiguous_key")
+        if not registered:
+            self.note_client_request(msg, corr)
+        result = await self._on_client_message(msg, list_upstream)
         if msg.is_request:
-            self._client_pending.put(msg.id, msg.method)
+            # HELD until now. Forwarded: the server will have it, so its answer can be accepted —
+            # here and in every peer scope. Answered here (refused, malformed): the server never sees
+            # it, so nothing it sends under this id is an answer; it leaves HELD and goes nowhere.
+            corr.held.discard(msg.id)
+            if result.forward is not None:
+                corr.pending.put(msg.id, msg.method)
+                corr.request_id = msg.id
+        return result
 
+    def note_client_request(self, msg: P.JsonRpcMessage, corr: Correlation | None = None) -> None:
+        """Record a client request as HELD. Idempotent.
+
+        The drivers call this the moment they READ a message, before anything awaits — on stdio the
+        pump holds a call while the proxy's own list is in flight, and the server learns from that
+        list's timing that a call is waiting. An answer to a HELD request is an answer to something
+        the server has not been sent: it is dropped and the client gets the proxy's decision. It
+        becomes PENDING (answerable) only when `on_client_message` forwards it.
+        """
+        if msg.is_request:
+            (corr or self._corr).held.put(msg.id, msg.method)
+
+    async def _on_client_message(
+        self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None,
+    ) -> MediationResult:
         method = msg.method
         # ANSWER PLANE (2026-07-28 MRTR). A retry carries `inputResponses` — data leaving the trust
         # boundary in reply to a question the SERVER composed. That is the confused-deputy vector the
@@ -460,7 +895,7 @@ class McpFirewall:
             if result is not None:
                 return result
         if method == P.M_TOOLS_CALL:
-            return await self._gate_b_tools_call(msg)
+            return await self._gate_b_tools_call(msg, list_upstream)
         if method == P.M_RESOURCES_READ and settings.mcp_govern_resources:
             return await self._gate_b_resources_read(msg)
 
@@ -470,15 +905,37 @@ class McpFirewall:
         return MediationResult(forward=msg.framed)
 
     # ============================================================ SERVER -> CLIENT
-    async def on_server_message(self, msg: P.JsonRpcMessage) -> MediationResult:
-        """Mediate one message travelling from the upstream server to the MCP client."""
+    async def on_server_message(self, msg: P.JsonRpcMessage,
+                                corr: Correlation | None = None) -> MediationResult:
+        """Mediate one message travelling from the upstream server to the MCP client.
+
+        `corr` is the scope the message arrived in (see `Correlation`); a response can answer only a
+        request PENDING there.
+        """
+        corr = corr or self._corr
         if msg.is_batch:
             self._bump("batch_refused")
             return MediationResult(blocked=True, note="batch_refused_from_server")
 
+        # The ENVELOPE first. Messages are classified by exact keys, so `{"Id": 7, "method":
+        # "sampling/createMessage", ...}` read here as a notification (no `id`) and was forwarded,
+        # while a case-insensitive client (Go's encoding/json) read `Id` and ran it as a sampling
+        # request: past the sampling gate. `Params`, `Method`, `Result` and the rest likewise move text
+        # or a whole shape past the gate that would have read it. Such a message is dropped.
+        envelope_alias = _alias_in(msg.data, _ENVELOPE_KEYS) if isinstance(msg.data, dict) else ""
+        if envelope_alias:
+            self._bump("alias_key_refused")
+            log.warning("nrvq.mcp.server.alias_key_refused", surface="envelope", key=envelope_alias[:64],
+                        server=self._server_id, code="NRVQ-MCP-5091")
+            return MediationResult(blocked=True, note="alias_key")
+
         # Server-INITIATED request (the reverse direction: sampling, roots/list, elicitation).
         if msg.is_request:
             self._server_pending.put(msg.id, msg.method)
+            if msg.method == P.M_SAMPLING_CREATE:
+                alias = _message_alias(msg.params)
+                if alias:
+                    return self._refuse_alias(msg, msg.method, alias)
             if msg.method == P.M_SAMPLING_CREATE and settings.mcp_govern_sampling:
                 return await self._gate_b_sampling(msg)
             # The server asking a HUMAN a question it composed. Sampling was gated; this was not.
@@ -487,6 +944,9 @@ class McpFirewall:
             return MediationResult(forward=msg.framed)
 
         if msg.is_notification:
+            alias = _message_alias(msg.params)
+            if alias:
+                return self._refuse_alias(msg, msg.method, alias)
             if msg.method in (P.N_TOOLS_CHANGED, P.N_PROMPTS_CHANGED, P.N_RESOURCES_CHANGED):
                 self._on_catalog_changed(msg.method)
             # 2026-07-28 replaces the standalone GET stream and resources/subscribe with ONE opted-in
@@ -504,7 +964,56 @@ class McpFirewall:
             return MediationResult(forward=msg.framed)
 
         if msg.is_response:
-            requested = self._client_pending.take(msg.id)
+            # The answer to the PROXY's own cold-catalog `tools/list` that nobody is waiting for any
+            # more: it arrived after the timeout, it is a second answer to the same id, or (HTTP) the
+            # server pushed it onto another stream. The waiting side is the only place it is scanned,
+            # so forwarding it here would hand the client the server's raw catalog — unscanned,
+            # unpinned, poisoned definitions included — under an id the client never sent. Dropped
+            # by PREFIX rather than by a record of issued ids, so no eviction or restart can reopen it;
+            # a client that chose such an id for its own request loses only its own response.
+            if is_cold_list_id(msg.id):
+                self._bump("cold_list_answer_dropped")
+                log.warning("nrvq.mcp.gate_a.cold_list_answer_dropped", server=self._server_id,
+                            id=str(msg.id)[:64], code="NRVQ-MCP-5081",
+                            detail="an answer to the proxy's own tools/list arrived when nothing was "
+                                   "waiting for it (late or duplicate); it was not forwarded")
+                return MediationResult(blocked=True, note="cold_list_answer_dropped")
+            # FAIL CLOSED ON CORRELATION. A response is mediated as the answer to the client request
+            # it answers; one that answers no pending request has no method to be mediated as, and
+            # used to fall through to the terminal forward below — verbatim, past Gate A and the
+            # content guard. Reachable three ways, all server-chosen: an id the client SDK reads as
+            # a pending id but this map did not (`"5"` for 5), a malformed first answer that consumed
+            # the entry before the real one arrived, and an answer timed to land before the client's
+            # request was registered. Matching is now as liberal as the client's (see
+            # `_PendingMap._candidates`), a malformed answer leaves the request pending, and anything
+            # still unmatched is dropped.
+            if corr.get_stream:
+                return self._drop_unmatched(msg, "response on GET stream")
+            if corr.resumed:
+                # A resumed POST stream answers that POST's request and nothing else. The client SDK
+                # puts the response under its pending request's id whatever id the server wrote, so
+                # it is mediated as that request — and goes out under that id — or not at all.
+                if corr.request_id is None or corr.pending.match(corr.request_id) is None:
+                    return self._drop_unmatched(msg, "resumed stream: its request is already answered")
+                msg = P.JsonRpcMessage({**msg.data, "id": corr.request_id},
+                                       P.encode({**msg.data, "id": corr.request_id}).rstrip(b"\n"))
+            found = corr.pending.match(msg.id)
+            if found is None:
+                if corr.held.match(msg.id) is not None:
+                    # An answer to a request the proxy has not forwarded. The server cannot have
+                    # computed it; forwarding it would let the server pre-empt Gate B with a result.
+                    return self._drop_unmatched(msg, "it answers a request not yet forwarded upstream")
+                return self._drop_unmatched(msg, "it answers no pending client request")
+            pending_key, requested = found
+            defect = _response_defect(msg, requested)
+            if defect:
+                return self._drop_unmatched(msg, f"not a well-formed answer: {defect}")
+            corr.pending.pop(pending_key)
+            # Results the firewall reads by member name: an alias key fails closed (`_refuse_alias`).
+            if requested in (P.M_TOOLS_CALL, P.M_RESOURCES_READ, P.M_PROMPTS_GET):
+                alias = _message_alias(msg.result)
+                if alias:
+                    return self._refuse_alias(msg, requested, alias)
             # `server/discover` replaces the initialize handshake and is the FIRST thing a 2026-07-28
             # client asks. It advertises the server's identity and capabilities as free text, so it is
             # a discovery surface exactly like tools/list — and Gate A never saw it.
@@ -528,7 +1037,9 @@ class McpFirewall:
             if requested == P.M_TOOLS_LIST:
                 # The only awaited branch in this dispatch. It reports a blocked-server refusal to the
                 # control plane, and that report is a network call — see `_gate_a_tools_list`.
-                return await self._gate_a_tools_list(msg)
+                result = await self._gate_a_tools_list(msg)
+                self._client_list_generation += 1
+                return result
             if requested == P.M_PROMPTS_GET:
                 return self._gate_a_prompts_get(msg)
             # The three discovery siblings of tools/list. Same channel, different method name — the
@@ -555,6 +1066,48 @@ class McpFirewall:
         self._bump("malformed_from_server")
         log.warning("nrvq.mcp.malformed_dropped", direction="server", code="NRVQ-MCP-5011")
         return MediationResult(blocked=True, note="malformed")
+
+    def _refuse_alias(self, msg: P.JsonRpcMessage, surface: str, alias: str) -> MediationResult:
+        """Fail closed on a server message whose structure carries an alias key (`_SERVER_MEMBERS`).
+
+        Whatever sits under the alias was not scanned, masked or fenced, and a case-insensitive client
+        reads it as the member it aliases. A tool result becomes a tool error; a resource or prompt
+        result an error; a server request is refused back to the server; a notification is dropped.
+        """
+        self._bump("alias_key_refused")
+        log.warning("nrvq.mcp.server.alias_key_refused", surface=surface, key=alias[:64],
+                    server=self._server_id, code="NRVQ-MCP-5091")
+        text = (f"Norviq MCP firewall withheld this {surface} message: its key '{alias[:64]}' differs "
+                "from a protocol field only by case or compatibility form, so its content was not "
+                "inspected.")
+        if msg.is_notification:
+            return MediationResult(blocked=True, note="alias_key")
+        if msg.is_request:
+            return MediationResult(reply=P.encode(P.error_response(msg.id, P.E_POLICY_DENIED, text)),
+                                   blocked=True, note="alias_key")
+        if surface == P.M_TOOLS_CALL:
+            return MediationResult(forward=P.encode(P.tool_error_result(msg.id, text, {
+                "gate": "A", "server": self._server_id, "alias_key": True})), note="alias_key")
+        return MediationResult(forward=P.encode(P.error_response(msg.id, P.E_POLICY_DENIED, text)),
+                               note="alias_key")
+
+    def _drop_unmatched(self, msg: P.JsonRpcMessage, reason: str) -> MediationResult:
+        """Drop a server response that cannot be mediated as the answer to a client request.
+
+        Logged at WARNING, coalesced to one line per `_UNMATCHED_LOG_WINDOW_S` with the count of the
+        drops in between, because the server chooses how many of these it sends.
+        """
+        self._bump("unmatched_response_dropped")
+        last, suppressed = self._unmatched_log
+        now = monotonic()
+        if now - last >= _UNMATCHED_LOG_WINDOW_S:
+            log.warning("nrvq.mcp.server.unmatched_response_dropped", server=self._server_id,
+                        id=repr(msg.id)[:64], reason=reason, suppressed_since_last=suppressed,
+                        code="NRVQ-MCP-5084")
+            self._unmatched_log = (now, 0)
+        else:
+            self._unmatched_log = (last, suppressed + 1)
+        return MediationResult(blocked=True, note="unmatched_response_dropped")
 
     # ============================================================ GATE B
     def _mcp_context(self, tool_name: str, surface: str) -> dict:
@@ -887,7 +1440,8 @@ class McpFirewall:
                 out.append(f"argument '{key}' must be {'/'.join(wanted)}")
         return out[:16]  # bounded: the reason string goes back to the caller
 
-    async def _gate_b_tools_call(self, msg: P.JsonRpcMessage) -> MediationResult:
+    async def _gate_b_tools_call(self, msg: P.JsonRpcMessage,
+                                 list_upstream: ListUpstream | None = None) -> MediationResult:
         """Enforce policy on `tools/call` before the upstream server ever sees it."""
         timer0 = perf_counter()
         params = msg.params
@@ -932,6 +1486,21 @@ class McpFirewall:
                 )
             arguments = {}
 
+        # --- Cold catalog: scan before use. ---
+        #
+        # AFTER the two refusals above and before everything below, on purpose. Those two read only
+        # the message, so a call the proxy refuses on its own terms never causes an upstream list
+        # (which carries the client's credentials). Everything below — the Gate A verdict, schema
+        # conformance, and the `input.mcp` facts policy decides on — is read from the catalog, so it
+        # cannot be decided before the catalog exists.
+        scanned = await self._warm_cold_catalog(msg, list_upstream)
+        result = await self._gate_b_decide(msg, name, arguments, timer0)
+        result.catalog_scanned = scanned
+        return result
+
+    async def _gate_b_decide(self, msg: P.JsonRpcMessage, name: str, arguments: dict,
+                             timer0: float) -> MediationResult:
+        """The catalog-dependent half of `_gate_b_tools_call`: Gate A carry-over, schema, policy."""
         # --- Gate A carry-over: one dict lookup, no scanning, no hashing. ---
         entry = self._catalog.get(name)
         if entry is not None and entry.call_denied:
@@ -1100,6 +1669,124 @@ class McpFirewall:
         )
 
     # ============================================================ GATE A
+    async def _warm_cold_catalog(self, call: P.JsonRpcMessage, list_upstream: ListUpstream | None) -> bool:
+        """List the server ourselves when a `tools/call` arrives before any `tools/list` was scanned.
+
+        The catalog is process memory, built only from `tools/list` responses. After a proxy restart
+        a client that does not re-list — a stateless HTTP client, or one reusing the catalog it read
+        before the restart — reached Gate B with no entry for anything it called, and the enforcing
+        baseline's `mcp_definition_never_scanned` held every such call for approval. Measured live on
+        kind: 45/45 calls escalated for an SDK client that calls without listing, 45/45 for one
+        reusing a pre-restart catalog, 0/45 for one that re-lists. mcp 1.30's `call_tool` refreshes
+        its tool list only after a NON-error result and an escalation is an error result, so such a
+        client never recovered on its own.
+
+        The fix scans before use rather than skipping the scan: the server's answer goes through
+        `_gate_a_tools_list`, the same function a client-initiated list goes through — scan, TOFU pin,
+        drift check, shadowing, strip/sanitise, server-level block — and only then is the call
+        evaluated, so a withheld, drifted or quarantined tool is refused by Gate A exactly as it would
+        have been after a client list. Nothing about the policy changes; a tool the server did not
+        list is still unscanned.
+
+        Returns True when this call caused (or shared) a successful scan, so the driver reports the
+        catalog to the control plane as it does after a client list. Never raises: a failure leaves
+        the catalog cold and the call is evaluated as before.
+        """
+        if self._catalog_listed or list_upstream is None:
+            return False
+        timeout = float(settings.mcp_cold_list_timeout_s or 0)
+        if timeout <= 0:
+            return False
+        # A server the operator BLOCKED is not listed on the call path. Its listing would be withheld
+        # wholesale anyway (see `_gate_a_tools_list`), so a self-list could only ever leave the call
+        # unscanned — while sending the client's credentials to a server nobody is meant to talk to.
+        if not self._servers.get(self._server_id).reachable:
+            return False
+        credential = str(getattr(list_upstream, "credential_key", "") or "")
+        task = self._cold_lists.get(credential)
+        if task is None or task.done():
+            failed_at = self._cold_list_failed.get(credential)
+            if failed_at is not None and monotonic() - failed_at < _COLD_LIST_RETRY_S:
+                return False
+            # SINGLE FLIGHT. A restart is exactly when calls arrive in a burst, and N concurrent cold
+            # calls each sending their own list would hand the burst straight to the server. Every
+            # call with this credential that arrives while this runs awaits the same task.
+            task = asyncio.ensure_future(self._cold_list_once(call, list_upstream, timeout, credential))
+            _bounded_put(self._cold_lists, credential, task)
+        # Shielded: one waiter being cancelled (an HTTP client hanging up) must not cancel the list
+        # every other waiter is relying on.
+        return await asyncio.shield(task)
+
+    async def _cold_list_once(self, call: P.JsonRpcMessage, list_upstream: ListUpstream,
+                              timeout: float, credential: str = "") -> bool:
+        t0 = perf_counter()
+        generation = self._client_list_generation
+        request_id = f"{_COLD_LIST_ID_PREFIX}{uuid.uuid4().hex}"
+        params: dict[str, Any] = {}
+        call_meta = call.meta
+        meta = {k: call_meta[k] for k in _COLD_LIST_META_KEYS if k in call_meta}
+        if meta:
+            params["_meta"] = meta
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": P.M_TOOLS_LIST, "params": params}
+        request = P.JsonRpcMessage(payload, P.encode(payload).rstrip(b"\n"))
+
+        reason = ""
+        response: P.JsonRpcMessage | None = None
+        try:
+            response = await asyncio.wait_for(list_upstream(request), timeout)
+        except asyncio.TimeoutError:
+            reason = f"no answer within {timeout:g}s"
+        except Exception as exc:  # noqa: BLE001 — any failure keeps the call unscanned; never raise
+            reason = f"{type(exc).__name__}: {exc}"[:200]
+        if not reason:
+            if response is None or not response.is_response or response.id != request_id:
+                reason = "no response to the proxy's tools/list"
+            elif "error" in response.data:
+                err = response.data.get("error")
+                detail = err.get("message") if isinstance(err, dict) else err
+                reason = f"the server answered with an error: {str(detail)[:200]}"
+            elif _response_defect(response, P.M_TOOLS_LIST):
+                # The same well-formedness a client's listing must meet; a result with no tools list
+                # included. Failing (and backing off) rather than treating it as an empty catalog.
+                reason = f"not a well-formed answer: {_response_defect(response, P.M_TOOLS_LIST)}"
+        if not reason and self._client_list_generation != generation:
+            # A CLIENT listing went through Gate A while this answer was in flight. Its verdicts are
+            # newer than this answer, and applying this one now would put Gate A out of order: a late
+            # answer carrying the pinned definition would overwrite the drift the client's newer
+            # listing had just found, and the waiting call would run a tool the client was shown as
+            # withheld. The catalog is warm from that listing, so the call is decided from it.
+            self._bump("cold_list_superseded")
+            log.info("nrvq.mcp.gate_a.cold_list_superseded", server=self._server_id,
+                     code="NRVQ-MCP-5083")
+            return True
+        if not reason:
+            try:
+                await self._gate_a_tools_list(response)
+            except Exception as exc:  # noqa: BLE001 — same: fall back to the unscanned path, loudly
+                reason = f"scanning the listing failed: {type(exc).__name__}: {exc}"[:200]
+
+        if reason:
+            _bounded_put(self._cold_list_failed, credential, monotonic())
+            self._bump("cold_list_failed")
+            log.warning(
+                "nrvq.mcp.gate_a.cold_list_failed", server=self._server_id,
+                tool=str(call.params.get("name", ""))[:200], reason=reason,
+                retry_after_s=_COLD_LIST_RETRY_S, code="NRVQ-MCP-5080",
+                hint="calls are evaluated with no scanned definition (the baseline escalates them as "
+                     "mcp_definition_never_scanned) until the client lists or a later attempt succeeds",
+            )
+            return False
+        self._cold_list_failed.pop(credential, None)
+        self._bump("cold_listed")
+        log.info(
+            "nrvq.mcp.gate_a.cold_listed", server=self._server_id, tools=len(self._catalog),
+            # Only the first page is read. A tool listed on a later page stays unscanned until the
+            # client lists, which is the behaviour before the self-list.
+            more_pages=bool(response.result.get("nextCursor")),
+            ms=round((perf_counter() - t0) * 1000.0, 1), code="NRVQ-MCP-5079",
+        )
+        return True
+
     def _on_catalog_changed(self, method: str) -> None:
         """React to `notifications/*_changed`.
 
@@ -1127,6 +1814,9 @@ class McpFirewall:
         tools = msg.result.get("tools")
         if not isinstance(tools, list):
             return MediationResult(forward=msg.framed)
+        # Set before the server-level decision below: a blocked server's listing has been through Gate
+        # A too, and a cold-catalog self-list must not repeat on every call because it left no entries.
+        self._catalog_listed = True
 
         # THE SERVER-LEVEL DECISION COMES FIRST, and it withholds WHOLESALE rather than per tool.
         #
@@ -1200,6 +1890,7 @@ class McpFirewall:
         # — its unscanned prose does not reach the model, the tool stays callable, and the operator
         # gets the log line. Fail closed, loudly, in that order.
         budget = _LIST_SCAN_BUDGET
+        walk_nodes = _LIST_WALK_NODES
         for tool in tools:
             if not isinstance(tool, dict):
                 changed = True           # drop anything that is not a tool object
@@ -1209,8 +1900,14 @@ class McpFirewall:
                 changed = True
                 continue
 
-            report = scan_tool_definition(tool, budget)
+            nodes = [min(_MAX_WALK_NODES, walk_nodes)]
+            report = scan_tool_definition(tool, min(_DEFINITION_SCAN_BUDGET, budget), nodes)
+            walk_nodes = max(0, walk_nodes - (min(_MAX_WALK_NODES, walk_nodes) - max(0, nodes[0])))
             budget = max(0, budget - report.scanned_chars)
+            alias = _server_alias(tool)
+            if alias:
+                # The definition's prose may sit under the alias, unscanned. Withheld (critical).
+                report.findings.append(_alias_finding(alias, alias))
             severity = report.severity
 
             # Cross-tool shadowing: two names that fold to the same skeleton ("send_email" and
@@ -1230,10 +1927,10 @@ class McpFirewall:
             # the description and drops `annotations`, and leaves `inputSchema` — whose `description`
             # and `default` values reach the model exactly as prose does. This file's own argument for
             # preferring strip applies verbatim: a sanitised entry "is still listed, still selectable,
-            # and still points wherever the server said". Only the CHARACTER budget triggers it; the
-            # walk bound is graded `low` on purpose, because the leaves it cuts off in a tool schema
-            # are enum values the scan predicate discards anyway (see `_scan_pairs`).
-            if any(f.rule == "mcp_a_scan_budget_exhausted" for f in report.findings):
+            # and still points wherever the server said". Either bound triggers it — the character
+            # budget AND the walk bounds (depth, strings, members): `report.budget_exhausted` is set
+            # by both. Only the first did, and a definition the walk could not finish was passed.
+            if report.budget_exhausted:
                 action = "strip"
 
             schema = tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {}
@@ -1343,12 +2040,18 @@ class McpFirewall:
         _annotate(rewritten.get("result"), {
             "gate": "A", "surface": "prompts/get", "scan": scan,
         })
-        if _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3):
+        # NOT READ IN FULL is withheld whatever the strip setting: over the budget the scanner reports
+        # only its own HIGH finding, so with the strip setting at "critical" an unread template —
+        # whatever it said — was forwarded.
+        if report.budget_exhausted or (
+                _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3)):
+            why = ("is larger than the scan budget allows, so it could not be read in full"
+                   if report.budget_exhausted else "matched instruction-injection patterns")
             rewritten["result"]["messages"] = [{
                 "role": "user",
                 "content": {"type": "text", "text": (
-                    "[Prompt withheld by the Norviq MCP firewall: the template supplied by this "
-                    "server matched instruction-injection patterns.]"
+                    f"[Prompt withheld by the Norviq MCP firewall: the template supplied by this "
+                    f"server {why}.]"
                 )},
             }]
         return MediationResult(forward=P.encode(rewritten), note="gate_a_prompt")
@@ -1396,6 +2099,7 @@ class McpFirewall:
         # ONE budget for the whole response, spent in list order. A per-item budget is not a bound at
         # all when the server also chooses how many items there are.
         budget = _LIST_SCAN_BUDGET
+        walk_nodes = _LIST_WALK_NODES
         for index, item in enumerate(items):
             if not isinstance(item, dict):
                 # A string entry is still SCANNED, so the operator gets the rule that fired; but it
@@ -1425,15 +2129,21 @@ class McpFirewall:
             # `name` is an IDENTIFIER on `prompts/list` — `prompts/get` takes `{"name": ...}` — and a
             # display string on the other two, which are addressed by uri/uriTemplate. That is the
             # whole of the charset rule's tool-specific justification, and it transfers.
-            report = scan_catalog_item(item, key, budget, name_is_identifier=(key == "prompts"))
+            nodes = [min(_MAX_WALK_NODES, walk_nodes)]
+            report = scan_catalog_item(item, key, min(_DEFINITION_SCAN_BUDGET, budget),
+                                       name_is_identifier=(key == "prompts"), nodes=nodes)
+            walk_nodes = max(0, walk_nodes - (min(_MAX_WALK_NODES, walk_nodes) - max(0, nodes[0])))
             budget = max(0, budget - report.scanned_chars)
+            alias = _server_alias(item)
+            if alias:
+                report.findings.append(_alias_finding(alias, f"{key}[{index}].{alias[:64]}"))
             if report.clean:
                 kept.append(item)
                 continue
             findings.extend(f.as_dict() for f in report.findings)
-            # AN ENTRY THAT WAS NOT SCANNED IS NOT AN ENTRY THAT SCANNED CLEAN. The exhaustion
-            # finding is graded medium — right for a notification, where withholding the whole
-            # message would be its own denial of service — but on a catalogue the whole point of the
+            # AN ENTRY THAT WAS NOT SCANNED IS NOT AN ENTRY THAT SCANNED CLEAN. Withheld on
+            # `budget_exhausted` itself, not on the grade of the exhaustion finding, so the strip
+            # setting cannot let an unread entry through: on a catalogue the whole point of the
             # gate is to keep unvetted server text out of the model's context. Grading alone would
             # have let a server spend the shared budget on a padded first entry and walk its payload
             # through in the second, which is a bypass built out of the bound.
@@ -1524,7 +2234,9 @@ class McpFirewall:
         self._bump("gate_a_elicitation_flagged")
         log.warning("nrvq.mcp.gate_a.elicitation_flagged", severity=report.severity,
                     findings=[f.rule for f in report.findings], code="NRVQ-MCP-5068")
-        if _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3):
+        if report.budget_exhausted or (
+                _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3)):
+            # Not read in full: refused whatever the strip setting, as on every other surface.
             # REFUSED rather than rewritten. A rewritten question still gets asked, and the thing
             # being protected here is a person deciding what to type — the one participant that
             # cannot be told "treat the following as data".
@@ -1558,6 +2270,11 @@ class McpFirewall:
         report = scan_object_text(params, "params")
         if report.clean:
             return MediationResult(forward=msg.framed)
+        if report.budget_exhausted:
+            # Too large to read in full: withheld, never forwarded unread with an annotation.
+            self._bump("notification_withheld_unscanned")
+            log.warning("nrvq.mcp.notification_withheld", method=msg.method, code="NRVQ-MCP-5092")
+            return MediationResult(blocked=True, note="notification_withheld")
         self._bump("notification_text_flagged")
         log.warning("nrvq.mcp.notification_flagged", method=msg.method, severity=report.severity,
                     findings=[f.rule for f in report.findings], code="NRVQ-MCP-5069")
@@ -1631,12 +2348,18 @@ class McpFirewall:
         """
         stack = [arguments]
         seen = 0
-        while stack and seen < 4096:
+        while stack:
+            if seen >= _HEADER_WALK_NODES:
+                # FAIL CLOSED. This returned False when the walk ran out, so an `x-mcp-header` placed
+                # after 4096 padding nodes was never seen and the call went on to Gate B as if it set
+                # no header. An argument tree too large to inspect is refused, as one that sets a
+                # header is.
+                return True
             node = stack.pop()
             seen += 1
             if isinstance(node, dict):
                 for key, value in node.items():
-                    if isinstance(key, str) and key.lower() == P.X_MCP_HEADER:
+                    if isinstance(key, str) and P._fold(key) == P.X_MCP_HEADER:
                         return True
                     stack.append(value)
             elif isinstance(node, list):
@@ -1679,11 +2402,23 @@ class McpFirewall:
         the model READING advertised text as instructions — which fencing addresses and refusal does
         not.
         """
-        report: ScanReport = scan_untrusted_content(
-            json.dumps(msg.result, sort_keys=True)[:16384], label)
+        # Every string of the result, under the shared scan budget. This scanned the first 16384
+        # characters of the result's JSON, so `instructions` text past that point — which the host
+        # puts in front of the model — was never looked at and the handshake passed as clean. A result
+        # larger than the budget now carries the budget finding instead of a clean verdict.
+        report: ScanReport = scan_object_text(msg.result, label)
         if report.clean:
             self._bump("discover_clean")
             return MediationResult(forward=msg.framed)
+        if report.budget_exhausted:
+            # Too large to read in full: withheld. The handshake's instructions go in front of the
+            # model, so an unread one is not forwarded with an annotation.
+            self._bump("discover_withheld_unscanned")
+            log.warning("nrvq.mcp.discover.withheld", surface=surface, code="NRVQ-MCP-5093")
+            return MediationResult(forward=P.encode(P.error_response(
+                msg.id, P.E_POLICY_DENIED,
+                f"Norviq MCP firewall withheld this {surface} result: it is larger than the scan "
+                "budget allows, so it could not be read in full.")), note="discover_withheld")
         findings = [f.as_dict() for f in report.findings]
         self._bump("discover_flagged")
         log.warning("nrvq.mcp.discover.flagged", surface=surface,
@@ -1757,11 +2492,17 @@ class McpFirewall:
         if not requests:
             return MediationResult(forward=msg.framed)
         findings: list[dict] = []
-        for entry in requests:
-            report: ScanReport = scan_untrusted_content(json.dumps(entry, sort_keys=True)[:16384],
-                                                        "result.inputRequests")
-            if not report.clean:
-                findings.extend(f.as_dict() for f in report.findings)
+        # Every string of every demand, in full under the scan budget. This scanned the first 16384
+        # characters of each demand's JSON and nothing after it.
+        report: ScanReport = scan_object_text({"inputRequests": requests}, "result")
+        if report.budget_exhausted:
+            self._bump("input_required_withheld")
+            log.warning("nrvq.mcp.input_required.withheld", code="NRVQ-MCP-5094")
+            return MediationResult(forward=P.encode(P.tool_error_result(
+                msg.id, "Norviq MCP firewall withheld this demand for input: it is larger than the "
+                "scan budget allows, so it could not be read in full.", {"gate": "answer"})),
+                note="input_required_withheld")
+        findings.extend(f.as_dict() for f in report.findings)
         if not findings:
             self._bump("input_required_clean")
             return MediationResult(forward=msg.framed)
@@ -1818,9 +2559,15 @@ class McpFirewall:
                 over_budget += 1
                 text = _fenced(text, scanned=False)
             else:
+                remaining = budget
                 budget -= len(text)
                 if scan_on:
-                    report: ScanReport = scan_untrusted_content(text, path)
+                    # The remaining budget is passed in: the scanner no longer truncates a field at
+                    # 16 KiB, so one block larger than what is left is scanned up to the budget and
+                    # reported (`mcp_a_scan_budget_exhausted`, high), which fences it. It is charged
+                    # on the FOLDED length, which is what the scan costs.
+                    report: ScanReport = scan_untrusted_content(text, path, remaining)
+                    budget = 0 if report.budget_exhausted else min(budget, remaining - report.scanned_chars)
                     if not report.clean:
                         findings.extend(f.as_dict() for f in report.findings)
                         # NOT dropped. This is DATA the agent asked for, and silently returning nothing

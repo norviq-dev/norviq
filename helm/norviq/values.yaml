@@ -7,12 +7,53 @@
 # fails on a namespace that hasn't been created yet. Example: [prod-agents, analytics].
 # Global settings shared across the chart.
 global:
-  # Air-gapped / private-mirror host prepended to the THIRD-PARTY images (opa, redis, postgres, the
+  # Air-gapped / private-mirror host prepended to the THIRD-PARTY images (opa, valkey, postgres, the
   # internal-tls nginx proxy, the cert-bootstrap job, the helm-test curl). Empty = pull from their
   # public upstreams. Norviq's own images use images.registry (below) instead. Example:
   #   --set global.imageRegistry=myregistry.example.com
-  # then mirror e.g. openpolicyagent/opa, redis, postgres into that registry preserving the path.
+  # then mirror e.g. openpolicyagent/opa, valkey/valkey, postgres into that registry preserving the
+  # path AND the digest (see thirdPartyImageDigests below).
   imageRegistry: ""
+  # The multi-arch index digest of every third-party image the chart ships, keyed by the upstream ref
+  # EXACTLY as the chart names it (pre-mirror). Each one renders as `repo:tag@sha256:…`, so a release
+  # deploys the bytes it was tested with: `postgres:16-alpine` and `valkey/valkey:8.1-alpine` are
+  # rebuilt upstream every few weeks, and a tag alone meant two installs of one chart version could
+  # run different datastore builds. First-party images are pinned separately (images.<c>.digest,
+  # stamped by the release workflow).
+  #
+  # Keyed by ref, not a `digest` beside each tag, so a digest only applies to the tag it was resolved
+  # for: override opa.image or images.redis.tag and your ref has no entry here, so you get exactly
+  # the image you named (pin it yourself with `@sha256:` in the string, or add an entry for it).
+  #
+  # Mirroring (global.imageRegistry): the digest is kept after the mirror prefix, so copy with a tool
+  # that preserves the index digest — `crane copy`, `skopeo copy --all`, `regctl image copy`, or a
+  # pull-through cache. `docker pull` + `docker push` re-pushes ONE platform under a new digest, and
+  # the pinned ref then fails with "manifest unknown"; drop the pins for such a mirror with
+  #   --set global.thirdPartyImageDigests=null
+  #
+  # Every value is an OCI image index / manifest list covering at least linux/amd64 and linux/arm64,
+  # resolved 2026-10-30 with `docker buildx imagetools inspect <ref> --format '{{json .Manifest}}'`
+  # and checked against a second source. When you bump a tag here or in the image values, resolve its
+  # digest the same way and replace the entry: a bumped tag with no entry renders unpinned, and the
+  # release gate (scripts/check_image_pins.py) refuses to publish it.
+  thirdPartyImageDigests:
+    # opa — resolved 2026-10-30 from the registry API instead (no docker here): mirror.gcr.io and Docker
+    # Hub return the same index digest. The /opa in its amd64 and arm64 images is a separate build of the
+    # release binaries Dockerfile.api/engine verify: `go version -m` matches except for the build host.
+    "openpolicyagent/opa:1.21.4-static": "sha256:47f93480b09e24c220ae75f1e9133585ba6d698059951668d35e6a4fc32ebc82"
+    # valkey — images.redis (the single-instance store) and redis.ha.image (the RedisFailover's redis
+    # and sentinel pods, rendered only with HA on) share this one ref. Re-checked 2026-11-04: Docker Hub
+    # and mirror.gcr.io return the same OCI index (Valkey 8.1.11; linux/amd64, arm64, arm/v7, ppc64le).
+    "valkey/valkey:8.1-alpine": "sha256:2602ace2be6569bc2bbb06f873776516ab9089821525be34f4305c67eb9db02a"
+    "postgres:16-alpine": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab"
+    # nginx and curl — resolved 2026-11-02 (OCI index / manifest list; linux/amd64 and linux/arm64 among
+    # the platforms), identical on registry-1.docker.io and mirror.gcr.io. Bumped from nginx:1.27-alpine
+    # (EOL, 60 fixable HIGH/CRITICAL in Trivy 0.69.3) and curlimages/curl:8.10.1 (22).
+    "nginx:1.30-alpine": "sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949"
+    "busybox:1.36": "sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+    "curlimages/curl:8.23.0": "sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93"
+    # postgresql.ha.image — the CloudNativePG operand (PostgreSQL 16.15), rendered only with HA on.
+    "ghcr.io/cloudnative-pg/postgresql:16": "sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a"
 
 policyQuotaNamespaces: []
 
@@ -69,22 +110,46 @@ baselineClusterPolicy:
   name: baseline-cluster-guard
   clusterPriority: 900
   preset: strict
-  # audit (default) — every baseline control EVALUATES and records a non-compliance event, and the
-  # call proceeds. block — the baseline refuses the call outright.
+  # block (default from 0.2.6) — the baseline enforces: each control acts at the severity the preset
+  # authors it with (below). audit — every baseline control EVALUATES and records a non-compliance
+  # event, and the call proceeds.
   #
-  # This shipped as `block`, which meant installing the chart silently put 22 block rules in front of
-  # every tool call in every tenant namespace, on day one, before the customer had written a single
-  # policy or seen a single decision. The failure mode was not theoretical: until 0.2.1,
+  # Before 0.2.0 this shipped as `block` with every control blocking, which meant installing the chart
+  # silently put 22 block rules in front of every tool call in every tenant namespace, on day one,
+  # before the customer had written a single policy or seen a single decision. The failure mode was
+  # not theoretical: until 0.2.1,
   # `deny_shell_execution` fired on roughly 1 in 8 ordinary alphanumeric identifiers (the base64
   # fan-out decoded an order id to random bytes and matched `|` in them), so a stock install dropped a
   # real fraction of a support bot's legitimate lookups and attributed it to shell injection. That
   # specific bug is fixed; the argument for arriving in `audit` never depended on it.
   #
-  # Defaulting to `audit` inverts the install experience: Norviq arrives observing, the customer sees
-  # in the compliance view exactly what WOULD be blocked and by which control, and promotes controls
-  # to enforcement when the blast radius is known. Set to `block` here to restore the old posture
-  # cluster-wide, or promote individual controls via the baseline controls API.
-  enforcementMode: audit
+  # Through 0.2.5 this defaulted to `audit` on that argument: arrive observing, and promote controls to
+  # enforcement once their blast radius is known.
+  #
+  # From 0.2.6 it defaults to `block`, and the preset decides what that means per control: 20 of the 21
+  # are authored to enforce (17 refuse; llm06_excessive_agency refuses destructive tools and holds
+  # elevated ones for approval; mcp_definition_drift and mcp_definition_never_scanned hold the call for
+  # approval), and scope_violation_dangerous_tool is authored as a record, so it records whatever this
+  # says. The
+  # console's Baseline controls default to the same. Evidence taken before the flip:
+  # norviq.redteam.precision over the 51-case benign corpus, built with the engine's own input builder,
+  # gives 0 false positives with every control at deny. Four corpus calls are refused by design, and
+  # one matters on upgrade:
+  # llm05_supply_chain refuses install_package by NAME, even from public PyPI.
+  #
+  # Three ways to turn it off, widest first; each records the call instead of refusing it, except a
+  # control switched Off, which is not evaluated at all:
+  #   every baseline namespace  set this to `audit` (the 0.2.5 posture)
+  #   one namespace             console Target Settings -> Monitor, or
+  #                             PUT /api/v1/settings?namespace=<ns> {"enforcement_mode": "audit"}
+  #   one control               console Baseline controls -> Monitor or Off, or PUT /api/v1/baseline/controls
+  #                             (preset `strict` only: the panel compiles strict, and next to another
+  #                             preset its save is one more floor that relaxes nothing)
+  # Once saved, a namespace's Baseline controls replace this baseline in that namespace (when they are
+  # this release's compile of the same preset, baseline.covers) and run in block, so `audit` here no
+  # longer reaches that namespace. config.enforcementMode below is NOT a way off: it never softens a
+  # block a policy returns.
+  enforcementMode: block
 
 images:
   # Registry prefix (trailing slash) prepended to every component repository. Defaults to the
@@ -127,8 +192,12 @@ images:
     digest: ""
     pullPolicy: Always
   redis:
-    repository: redis
-    tag: "7-alpine"
+    # valkey/valkey, not redis/redis: Redis relicensed to RSALv2/SSPLv1 at 7.4, and `7-alpine` had floated
+    # onto 7.4.11. Valkey is the BSD-3-Clause fork under the Linux Foundation; its image symlinks
+    # `redis-server` and `redis-cli` to the valkey binaries and runs sentinel mode, so nothing else changes.
+    # Minor-pinned on purpose — a floating major is how the licence changed under a stock install.
+    repository: valkey/valkey
+    tag: "8.1-alpine"
   postgresql:
     repository: postgres
     tag: "16-alpine"
@@ -141,7 +210,7 @@ imagePullSecrets: []
 # in-flight requests drain during a rolling upgrade. Applied to api/engine/webhook. 0 = no hook.
 # `helm test` connection-probe pod image (curl). Override for an air-gapped mirror.
 tests:
-  image: "curlimages/curl:8.10.1"
+  image: "curlimages/curl:8.23.0"
 
 # Extra annotations stamped onto every norviq pod template. Chiefly a rollout lever: a value that
 # changes with each build (an image ID, a git sha) forces the Deployment to actually roll, which a
@@ -171,12 +240,13 @@ gracefulShutdown:
 # Hardened container securityContext for the primary app containers (defense-in-depth). The
 # chart sets it inline rather than relying on an external PSA/Kyverno restricted-profile mutation
 # ("injected by cluster policy"), which need not exist on the target cluster.
-# This restricted profile matches the opa/tls-proxy sidecars: non-root, no privilege escalation, all caps
-# dropped, seccomp RuntimeDefault, read-only root FS. Consumers whose container writes its root FS must
-# provide a writable emptyDir mount (the api/engine/webhook images already run as a non-root USER, and the
-# webhook writes nothing to its rootfs). The UI (nginx) is NOT covered by this default — it runs as root
-# and binds :80, so it needs a component-specific uid/port/emptyDir treatment. Set enabled:false to defer
-# entirely to a cluster-level PodSecurity/Kyverno policy.
+# The api, engine, ui and webhook containers all take non-root, no privilege escalation, all caps
+# dropped and seccomp RuntimeDefault from here, which is also what the opa/tls-proxy sidecars set.
+# The readOnlyRootFilesystem value below reaches ONLY the webhook, which writes nothing to its rootfs: the api,
+# engine and ui templates deliberately leave it out (the api writes tmp at runtime; the UI entrypoint
+# writes config.js + fleet-proxy.conf at startup), and the opa/tls-proxy sidecars do not set
+# it either. The UI is covered like the rest — it runs nginx-unprivileged as uid 101 on :8080. Set
+# enabled:false to defer entirely to a cluster-level PodSecurity/Kyverno policy.
 securityContext:
   enabled: true
   runAsNonRoot: true
@@ -324,6 +394,11 @@ openshift:
 
 webhook:
   enabled: true
+  # Accept locally built sidecar images (`norviq/norviq-engine:*`, which is how scripts/kind-e2e tags
+  # them) in addition to the project's GHCR images. Off for every real install: those names resolve to
+  # Docker Hub's `norviq` namespace, which the project does not control. scripts/kind-e2e/values-e2e.yaml
+  # turns it on for the local and CI kind rigs.
+  allowLocalSidecarImages: false
   # Turnkey sidecar injection: render the MutatingWebhookConfiguration from the chart and
   # auto-bootstrap TLS via a pre/post-install hook Job (self-signs a cert, writes the
   # norviq-webhook-tls secret, patches the webhook caBundle). No cert-manager required.
@@ -427,8 +502,10 @@ webhook:
     # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
     # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
     #   "allow" (DEFAULT) = fail-OPEN. Tool calls are forwarded during an outage so the customer's
-    #     agents keep working. Each one is audited as rule_id=thin_proxy_fail_open — never as a policy
-    #     allow — so "we went unjudged" is countable and alertable rather than silent.
+    #     agents keep working. Each one carries rule_id=thin_proxy_fail_open — never a policy allow —
+    #     and the sidecar logs it as NRVQ-SDC-3036, so "we went unjudged" is countable and alertable
+    #     from the sidecar logs rather than silent. It is NOT written to audit_log: the API that
+    #     writes the audit log is the thing that is unreachable.
     #   "block"           = fail-CLOSED. No ungoverned tool call, ever, at the cost of taking every
     #     agent in the cluster down with us for as long as the engine is down.
     # This applies ONLY to a genuine outage (5xx / timeout / connection error). A 4xx is the engine
@@ -547,7 +624,12 @@ redis:
   # PRODUCTION credential path: name of a Secret YOU manage holding the full Redis URL. When set, the
   # chart never renders or generates a Redis credential — the pods read the URL straight from your
   # Secret, so it never passes through values, `--set` (which lands in `helm history` and your shell
-  # history) or the chart's own Secret. Create it with e.g.:
+  # history) or the chart's own Secret. Set `host` (and `port`, if not 6379) as well if you want the
+  # readiness gate to wait on the cache before api/engine start — the chart cannot read an address out
+  # of your Secret at template time, so with `existingSecret` alone the gate is skipped and the pods
+  # start at once (api and engine retry the connect for ~15s, then the pod restarts).
+  # `host` only adds the gate; the URL still comes from the Secret, so keep the two in agreement or the
+  # gate waits on the wrong address. Create it with e.g.:
   #   kubectl create secret generic my-redis --from-literal=url='rediss://:PW@host:6380/0'
   existingSecret: ""
   existingSecretKey: "url"
@@ -562,8 +644,21 @@ redis:
     # intended clients speak the Sentinel protocol; Norviq's client is a plain `redis://` URL. The
     # Service selects the operator's `redisfailovers-role: master` pod label, so it tracks the
     # current master and follows failover with no client changes. Failover-tested 2026-07-29: master
-    # killed, replica promoted, the Service endpoint moved and the API recovered on its own.
+    # killed, replica promoted, the Service endpoint moved and the API recovered on its own. That run
+    # was on Redis 7; on Valkey 8.1 the operator's replication, readiness and sentinel steps were rerun
+    # outside Kubernetes (2026-11-04), and the in-cluster failover still needs a run on a cluster.
     serviceName: norviq-redis-ha
+    # The RedisFailover's image, for its redis AND sentinel pods: Valkey 8.1 (BSD-3-Clause). The key
+    # keeps its `redis` name; the store speaks the Redis protocol and the image ships `redis-server`
+    # and `redis-cli` as symlinks to the valkey binaries, which is what the operator's scripts call.
+    # Deliberately NOT images.redis, so a bump of the single store's engine never rolls into a running
+    # failover. Through 0.2.5 the failover ran Redis 7.4 (RSALv2/SSPLv1) under the name norviq-redis-ha.
+    # Valkey 8.1 can neither load the RDB format 12 that 7.4 left on those volumes nor take a full sync
+    # from a 7.4 master, and `helm upgrade --wait` does not watch the operator's pods. So 0.2.6 renders
+    # the failover under a NEW name, norviq-valkey-ha, on new volumes, and the upgrade starts the store
+    # empty (CHANGELOG, 0.2.6 upgrade impact). Changing the engine here again on a running failover
+    # needs the same care: check that the new image reads what the old one wrote, or rename.
+    image: "valkey/valkey:8.1-alpine"
   resources:
     requests:
       cpu: 100m
@@ -598,9 +693,11 @@ postgresql:
   # so it never passes through values or `--set` (which lands in `helm history` and your shell history).
   # The URL carries user/password/host/port/database. Set `host` as well if you want the readiness
   # gate to wait on the datastore before api/engine start — the chart cannot read an address out of
-  # your Secret at template time, so with `existingSecret` alone the gate is skipped and the app
-  # simply retries its own connection. (It previously waited on the BUNDLED service name here, which
-  # `enabled: false` never creates, and pods sat in Init:0/2 forever.) Every other key below is unused. Create it with:
+  # your Secret at template time, so with `existingSecret` alone the gate is skipped and the pods
+  # start at once (api and engine retry the connect for ~15s, then the pod restarts). `host` only adds the gate;
+  # keep it in agreement with the Secret's URL or the gate waits on the wrong address. (It previously
+  # waited on the BUNDLED service name here, which `enabled: false` never creates, and pods sat in
+  # Init:0/2 forever.) Every other key below is unused, except `port`, which the gate dials. Create it with:
   #   kubectl create secret generic my-pg --from-literal=url='postgresql://user:PW@host:5432/norviq'
   existingSecret: ""
   existingSecretKey: "url"
@@ -671,12 +768,12 @@ otel:
 # queries it over HTTP; set config.opaMode=subprocess to roll back to the per-call `opa eval` fork.
 # Pinned (not `latest-static`) so the running OPA version stays matched to the one
 # scripts/gen-opa-capabilities.py generated helm/norviq/files/opa-capabilities.json from (verified real,
-# multi-arch amd64+arm64, via `docker manifest inspect openpolicyagent/opa:1.19.1-static`) — `latest-static`
-# could silently drift to a version with a different builtin set than what the engine-layer capabilities
-# check (norviq/engine/opa_client.py::_check_capabilities) validates against.
+# multi-arch amd64+arm64: the index for openpolicyagent/opa:1.21.4-static lists linux/amd64 and linux/arm64)
+# — `latest-static` could silently drift to a version with a different builtin set than what the
+# engine-layer capabilities check (norviq/engine/opa_client.py::_check_capabilities) validates against.
 opa:
   enabled: true
-  image: "openpolicyagent/opa:1.19.1-static"
+  image: "openpolicyagent/opa:1.21.4-static"
   port: 8181
   resources:
     requests:
@@ -724,12 +821,17 @@ config:
   # certs/CSRs. Set false only for a plaintext dev cluster.
   internalTls:
     enabled: true
-    proxyImage: "nginx:1.27-alpine"
+    proxyImage: "nginx:1.30-alpine"
     # Resources for the api tls-proxy sidecar (nginx terminating internal TLS on :8443).
     proxyResources:
       requests: { cpu: 10m, memory: 24Mi }
       limits: { memory: 64Mi }
   logLevel: INFO
+  # Engine-wide default (NRVQ_ENFORCEMENT_MODE). Under `block` it lets noPolicyDecision=deny refuse a
+  # call no policy covers (under `audit` that call is allowed), and GET /api/v1/settings reports it as
+  # the mode of a namespace with none of its own. It never softens a block a policy or the baseline
+  # returns, and a module that returns no decision is allowed either way. To stop the baseline refusing
+  # calls, see baselineClusterPolicy.enforcementMode.
   enforcementMode: block
   # What a namespace with NO policy loaded does. "allow" (default) | "deny".
   #
@@ -855,9 +957,9 @@ auth:
   # keys the trust score + the agent_frozen: kill-switch, so a credential that CARRIES either claim is
   # ALWAYS pinned to it (never spoofable) regardless of this flag. This governs credentials that carry
   # NO binding — pre-upgrade sidecar tokens and API keys issued without an agentClass:
-  #   false (default) — they may still assert an identity, so an upgrade doesn't fail-closed every
+  #   false           — they may still assert an identity, so an upgrade doesn't fail-closed every
   #                     in-flight sidecar mid-rollout.
-  #   true            — every non-admin caller must present a bound credential (403 otherwise).
+  #   true (default)  — every non-admin caller must present a bound credential (403 otherwise).
   # DEFAULTS TO true (F-003): agent_class selects the Rego program, so it must be attested like
   # namespace already is. Left false, a namespace-scoped key with an empty agent_class let the request
   # BODY pick the class — including one with no policy, which falls through to noPolicyDecision: allow.

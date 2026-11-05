@@ -2518,7 +2518,8 @@
         "type": "function"
       },
       "description": "Checks that the document matches the JSON schema. The `pattern` keyword is enforced using Go's RE2 regex dialect; schemas relying on ECMA-262 features that RE2 does not support (e.g. negative lookahead) will be rejected.",
-      "name": "json.match_schema"
+      "name": "json.match_schema",
+      "nondeterministic": true
     },
     {
       "categories": [
@@ -2725,7 +2726,8 @@
         "type": "function"
       },
       "description": "Checks that the input is a valid JSON schema object. The schema can be either a JSON string or an JSON object. The `pattern` keyword, if present, is compiled using Go's RE2 regex dialect; schemas relying on ECMA-262 features that RE2 does not support (e.g. negative lookahead) will be rejected.",
-      "name": "json.verify_schema"
+      "name": "json.verify_schema",
+      "nondeterministic": true
     },
     {
       "categories": [
@@ -3818,7 +3820,7 @@
         },
         "type": "function"
       },
-      "description": "Matches a string against a pattern, where there pattern may be glob-like",
+      "description": "Matches a string against a pattern, where the pattern may be glob-like",
       "name": "regex.template_match"
     },
     {
@@ -4834,7 +4836,7 @@
         "args": [
           {
             "description": "value to convert",
-            "name": "x",
+            "name": "value",
             "of": [
               {
                 "type": "null"
@@ -4853,13 +4855,13 @@
           }
         ],
         "result": {
-          "description": "the numeric representation of `x`",
+          "description": "the numeric representation of `value`",
           "name": "num",
           "type": "number"
         },
         "type": "function"
       },
-      "description": "Converts a string, bool, or number value to a number: Strings are converted to numbers using `strconv.Atoi`, Boolean `false` is converted to 0 and `true` is converted to 1.",
+      "description": "Converts value of type string, null or boolean to number. Numeric strings converts to the corresponding number when possible. Null and boolean `false` converts to 0 and boolean `true` to 1. Numbers are returned without conversion.",
       "name": "to_number"
     },
     {
@@ -5456,7 +5458,9 @@
     "template_strings"
   ],
   "future_keywords": [
-    "not"
+    "and",
+    "not",
+    "or"
   ],
   "wasm_abi_versions": [
     {

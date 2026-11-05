@@ -11,8 +11,11 @@ from dataclasses import asdict, dataclass
 import httpx
 import structlog
 
-from norviq.config import settings
-from norviq.redteam.attacks import ATTACKS, AttackCategory, AttackDefinition, get_attack_by_id
+# Unused here since RL-001 stopped reading the limiter ceiling, and kept on purpose: this is the CLI's
+# only import of norviq.config, and importing it runs `_preload_env_files` (docs/cli.md, ".env
+# loading"). Dropping it would silently stop `norviq` reading the repository-root .env.
+import norviq.config  # noqa: F401
+from norviq.redteam.attacks import ATTACKS, AttackCategory, AttackDefinition, attack_request, get_attack_by_id
 
 log = structlog.get_logger()
 
@@ -69,7 +72,7 @@ class AttackSimulator:
         start = time.perf_counter()
         payload = _request_payload(attack, target_agent, target_namespace)
         try:
-            data = await _execute_attack(self._client, self._api_url, payload, attack.category)
+            data = await _execute_attack(self._client, self._api_url, payload)
             return _build_success_result(attack, data, start)
         except Exception as exc:
             return _build_error_result(attack, start, exc)
@@ -98,33 +101,43 @@ class AttackSimulator:
 
 
 def _request_payload(attack: AttackDefinition, target_agent: str, target_namespace: str) -> dict:
-    """Build evaluate payload for one attack."""
-    return {
-        "tool_name": attack.tool_name,
-        "tool_params": attack.tool_params,
-        "agent_identity": {
-            "spiffe_id": f"spiffe://norviq/ns/{target_namespace}/sa/{target_agent}",
-            "namespace": target_namespace,
-            "agent_class": target_agent,
-        },
-        # EXPLICIT, not inherited. This payload used to omit `framework` and rely on
-        # EvaluateRequest defaulting it to "redteam" — which is what tagged these fabricated attacks
-        # as non-real everywhere (`audit_row_is_non_real`). That default is being removed, because it
-        # also silently tagged REAL operator traffic posted over raw HTTP. The suite that genuinely is
-        # synthetic now declares itself, the same way the console-driven runner already does.
-        "framework": "redteam",
-        "session_id": f"redteam-{attack.id}",
-        "trust_score": 0.3 if attack.category == AttackCategory.TRUST_MANIPULATION else 0.8,
-    }
+    """The /api/v1/evaluate body for one attack: `attack_request`, the fields the console's suite builds its
+    event from (`routers/redteam.py::_build_event`).
+
+    This used to be a second builder. It sent no `call_depth` and no `mcp`, so CE-001 was allowed here
+    and blocked by chain_depth_limit in the console, and MCP-01..03 never carried the Gate-A context
+    they forge. It sent a `trust_score` the console does not, and the route drops it unread
+    (`payload.model_dump(exclude={"trust_score"})`), so TM-001's 0.3 never reached the engine.
+    """
+    return attack_request(attack, target_agent, target_namespace)
+
+
+def _attack_passed(expected: str, actual: str, rule_id: str) -> bool:
+    """`norviq/api/redteam_efficacy.py::attack_passed`, the rule the console's rows and pass rate use.
+
+    One function for both runners, so the CLI and the console cannot disagree about whether a
+    throttled or faulted block passed. Imported here and not at module top: redteam must not require
+    the API package at import (precision.py does the same). Measured: importing this module loads 6
+    norviq modules; the first call here takes that to 67, FastAPI and SQLAlchemy included, in
+    0.6-0.95 s, once per process.
+    """
+    from norviq.api.redteam_efficacy import attack_passed
+
+    return attack_passed(expected, actual, rule_id)
 
 
 def _build_success_result(attack: AttackDefinition, data: dict, started: float) -> AttackResult:
     """Create attack result from successful response."""
     latency_ms = (time.perf_counter() - started) * 1000
     actual_decision, actual_rule = _extract_decision(data)
-    passed = actual_decision == attack.expected_decision
+    # A block no policy made is not a pass. `rate_limit_exceeded` fires only on a call the policy stack
+    # already ALLOWED, and a fail-closed `evaluator_timeout` is the engine failing, so either one met a
+    # block expectation by accident. Measured against the real engine with the read exemption off,
+    # where RL-001's old 61-call replay was counted: seven attacks the baseline does not block passed
+    # on `rate_limit_exceeded`, and the run read 32/34 against 27/34 real.
+    passed = _attack_passed(attack.expected_decision, actual_decision, actual_rule)
     if not passed:
-        log.warning("nrvq.redteam.attack_not_blocked", attack=attack.id, expected=attack.expected_decision, actual=actual_decision, code="NRVQ-RED-13001")
+        log.warning("nrvq.redteam.attack_not_blocked", attack=attack.id, expected=attack.expected_decision, actual=actual_decision, rule=actual_rule, code="NRVQ-RED-13001")
     elif actual_rule != attack.expected_rule:
         log.warning("nrvq.redteam.rule_mismatch", attack=attack.id, expected_rule=attack.expected_rule, actual_rule=actual_rule, code="NRVQ-RED-13001")
     return AttackResult(
@@ -142,15 +155,19 @@ def _build_success_result(attack: AttackDefinition, data: dict, started: float) 
     )
 
 
-async def _execute_attack(client: httpx.AsyncClient, api_url: str, payload: dict, category: AttackCategory) -> dict:
-    """Execute one attack, replaying rate-limit scenarios."""
-    attempts = settings.evaluator_rate_limit_per_window + 1 if category == AttackCategory.OWASP_LLM10 else 1
-    data: dict = {}
-    for _ in range(attempts):
-        response = await client.post(f"{api_url}/api/v1/evaluate", json=payload)
-        response.raise_for_status()
-        data = response.json()
-    return data
+async def _execute_attack(client: httpx.AsyncClient, api_url: str, payload: dict) -> dict:
+    """POST one attack once — RL-001 included, as the console's suite (`routers/redteam.py::run_suite`) does.
+
+    RL-001 used to be replayed `evaluator_rate_limit_per_window + 1` times. Its expectation is a
+    single call's `allow` (attacks.py), and every attack posts under the same SPIFFE id, which is
+    what the engine's limiter counts on. Under the shipped read exemption `search_kb` is never
+    counted, so the replay measured nothing; with the exemption off, the 61st call was throttled and
+    failed RL-001 because the limiter worked, and the identity's window stayed over its ceiling for
+    every attack after it.
+    """
+    response = await client.post(f"{api_url}/api/v1/evaluate", json=payload)
+    response.raise_for_status()
+    return response.json()
 
 
 def _extract_decision(data: dict) -> tuple[str, str]:

@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from norviq.api.audit_hub import audit_record
-from norviq.api.auth import attested_namespace, get_current_user, scoped_identity, scoped_namespace
+from norviq.api.auth import bind_caller_identity, get_current_user
 from norviq.config import settings
 from norviq.engine.capability import Verb, classify_tool
 from norviq.engine.evaluator import OPAEvaluator
@@ -321,25 +321,21 @@ async def evaluate_tool_call(
     # evaluate — admin = any, non-admin → 403 on mismatch (matches every other tenant-scoped route).
     # Calling this unconditionally (instead of skipping it for role=service) closes a cross-tenant hole
     # where a sidecar token scoped to namespace A could evaluate as namespace B.
-    effective_ns = scoped_namespace(user, (payload.agent_identity or {}).get("namespace"))
     # ...and resolve the SIBLING identity fields in the same dict from the credential too. `agent_class`
     # selects which Rego program is enforced, `spiffe_id` keys the trust score + the agent_frozen:
     # kill-switch, and `workload` pulls in the workload tier — so binding only `namespace` left an
     # intra-namespace escalation. Note this REWRITES the identity rather than just validating it: an
     # omitted/empty field is as powerful as a substituted one (dropping agent_class silently falls back
     # to the looser __baseline__), so the credential's value is written back over the body's.
-    identity = scoped_identity(user, payload.agent_identity)
     # Finally, prefer the namespace ATTESTED by the caller's own SVID over both the body and an absent
     # claim. scoped_namespace above still lets a machine principal with an EMPTY namespace claim take the
     # body's namespace — necessary latitude for the hot path, but it means an unbound service token could
     # evaluate as any tenant. A Norviq SVID encodes its namespace (spiffe://norviq/ns/<ns>/sa/<sa>) and
     # spiffe_id is already credential-bound, so the workload names its own namespace and the body cannot
     # choose it. Returns "" when nothing is attestable, leaving the prior behaviour exactly as it was.
-    attested_ns = attested_namespace(user, (payload.agent_identity or {}).get("namespace"))
-    if attested_ns:
-        effective_ns = attested_ns
-    if effective_ns:
-        identity["namespace"] = effective_ns
+    # All three steps live in auth.bind_caller_identity, shared with the standalone engine so the two
+    # PEPs cannot bind a caller differently.
+    identity = bind_caller_identity(user, payload.agent_identity)
     # A malformed agent_identity (e.g. missing the required spiffe_id) is a client error — return
     # 422, not a raw 500 from the downstream model validation.
     try:

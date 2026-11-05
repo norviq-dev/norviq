@@ -31,9 +31,16 @@ project:
 
 # Explicit targets. Anything not listed is not analysed, which is the point — the previous config
 # relied on exclusion, and exclusion cannot describe a dependency set that lives inside one lockfile.
+#
+# `setuptools` is fossa-cli's type for requirements files (it discovers `req*.txt`). This line said
+# `pip` from 2026-08-19 to 2026-10-30, and fossa-cli has no `pip` type (3.20.8's src/Types.hs lists
+# setuptools, pipenv, poetry, pdm, uv and conda for Python). A filter that matches nothing is silent:
+# every run's summary read "2 projects scanned" (npm and gomod), and the gate passed without grading
+# one Python package. fossa.yml now fails if any of the three is missing from the summary, and
+# tests/test_fossa_config.py checks every type here against the CLI's list.
 targets:
   only:
-    - type: pip          # requirements-runtime.txt — the shipped Python closure, generated in CI
+    - type: setuptools   # requirements-runtime.txt — the shipped Python closure, generated in CI
       path: .
     - type: npm          # the console's production dependencies
       path: ui

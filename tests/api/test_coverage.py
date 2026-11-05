@@ -143,3 +143,119 @@ def test_parse_capability_policy_kind() -> None:
     from norviq.api.routers.coverage import _parse_agent_policy
     s = _parse_agent_policy("etl", "package norviq.remediation.capability.pg_delete_etl\n", priority=100, mode="block")
     assert s["kind"] == "capability"
+
+
+# --- `allow_names` with no tools: two stored forms, both live ------------------------------------
+#
+# An intent allowlist that denies the class everything was stored as `allow_names := {}` up to 0.2.5
+# and as the typed empty comprehension since (norviq/engine/empty_literals.py — a bare `{}` does not
+# compile on OPA 1.21). Stored rows are never rewritten, so the Overview (coverage.py) and the attack-path
+# badge (threats.py) read both, through the one parser that sits next to the generator.
+
+_LEGACY_EMPTY_ALLOWLIST = (
+    "package norviq.intent.report_gen\n"
+    'default decision = "block"\n'
+    "allow_names := {}\n"
+    "allow_skeletons := {}\n"
+    "in_allowlist { allow_names[lower(input.tool_name)] }\n"
+)
+
+
+def _typed_empty_allowlist() -> str:
+    from norviq.api.threat_intent import Intent, generate_intent_rego
+
+    return generate_intent_rego("report-gen", [], Intent())
+
+
+def test_parse_allow_names_reads_both_empty_forms_and_a_populated_set() -> None:
+    from norviq.api.threat_intent import AllowNames, parse_allow_names
+    from norviq.engine.empty_literals import EMPTY_OBJECT
+
+    assert parse_allow_names("package norviq.custom.x\n") is None  # no set at all — not "empty"
+    assert parse_allow_names("allow_names := {}") == AllowNames(())
+    assert parse_allow_names(f"allow_names := {EMPTY_OBJECT}") == AllowNames(())
+    assert parse_allow_names(_typed_empty_allowlist()) == AllowNames(())
+    assert parse_allow_names('allow_names := {"search_kb", "get_order"}') == AllowNames(("get_order", "search_kb"))
+
+
+_HAND_WRITTEN = 'package norviq.intent.report_gen\nallow_names := {n | n := ["search_kb"][_]}\n'
+
+
+def test_an_expression_is_unknown_names_not_an_empty_allowlist() -> None:
+    """An empty intent allowlist means "denies every tool"; an expression the parser cannot evaluate
+    means nothing of the kind. 0.2.5 listed the quoted strings inside it; claiming it empty would be
+    worse. Only the exact typed empty form is read as empty — a comprehension with another placeholder
+    is someone else's expression."""
+    from norviq.api.threat_intent import AllowNames, parse_allow_names
+
+    assert parse_allow_names(_HAND_WRITTEN) == AllowNames(None)
+    assert parse_allow_names('allow_names := {k: k | k := "__never__"; false}') == AllowNames(None)
+
+
+def test_a_row_written_now_reads_as_empty_to_the_0_2_5_parser() -> None:
+    """Rollback: 0.2.5 parses `allow_names` with exactly these two patterns. It must read today's empty
+    form as no tools, not as a tool named after the placeholder — which is why the placeholder is `""`."""
+    import re
+
+    allow_names_re_0_2_5 = re.compile(r"allow_names\s*:=\s*\{([^}]*)\}")
+    quoted_re_0_2_5 = re.compile(r'"([^"]+)"')
+    m = allow_names_re_0_2_5.search(_typed_empty_allowlist())
+    assert m is not None
+    assert quoted_re_0_2_5.findall(m.group(1)) == []
+
+
+def test_coverage_summarises_both_empty_forms_identically() -> None:
+    from norviq.api.routers.coverage import _parse_agent_policy
+
+    legacy = _parse_agent_policy("report-gen", _LEGACY_EMPTY_ALLOWLIST, priority=100, mode="block")
+    typed = _parse_agent_policy("report-gen", _typed_empty_allowlist(), priority=100, mode="block")
+    assert legacy["kind"] == typed["kind"] == "intent"
+    assert legacy["allow_tools"] == typed["allow_tools"] == []
+    assert legacy["allow_tools_known"] is typed["allow_tools_known"] is True
+    # A hand-written expression: its names are unknown, and the console is told so rather than shown
+    # an empty list, which it renders as "denies every tool for the class".
+    hand = _parse_agent_policy("report-gen", _HAND_WRITTEN, priority=100, mode="block")
+    assert hand["allow_tools"] == [] and hand["allow_tools_known"] is False
+
+
+def _governing(rego: str) -> dict:
+    import asyncio
+
+    from norviq.api.routers.threats import _governing_policies
+
+    class _Rows:
+        def __init__(self, rows: list[dict]) -> None:
+            self._rows = rows
+
+        def mappings(self) -> _Rows:
+            return self
+
+        def all(self) -> list[dict]:
+            return self._rows
+
+    class _Session:
+        async def execute(self, *_a, **_k) -> _Rows:
+            return _Rows([{"agent_class": "report-gen", "rego_source": rego}])
+
+    return asyncio.run(_governing_policies(_Session(), None))["report-gen"]
+
+
+def test_threat_paths_read_both_empty_forms_identically() -> None:
+    from norviq.api.routers.threats import _path_governed_by
+
+    legacy, typed = _governing(_LEGACY_EMPTY_ALLOWLIST), _governing(_typed_empty_allowlist())
+    # An empty allowlist DENIES every tool, so every chokepoint for the class is governed by it.
+    assert legacy["allow"] == typed["allow"] == set()
+    assert legacy["kind"] == typed["kind"] == "intent"
+    for gov in (legacy, typed):
+        assert _path_governed_by({"report-gen": gov}, "report-gen", "send_email", "send") == "intent"
+
+
+def test_threat_paths_claim_no_defence_from_an_unreadable_allowlist() -> None:
+    """Read as empty, a hand-written expression badged EVERY chokepoint for the class as defended —
+    including tools the expression plainly admits."""
+    from norviq.api.routers.threats import _path_governed_by
+
+    gov = _governing(_HAND_WRITTEN)
+    assert gov["name_scoped"] is False
+    assert _path_governed_by({"report-gen": gov}, "report-gen", "search_kb", "read") == ""

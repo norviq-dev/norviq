@@ -71,6 +71,12 @@ _MAX_LINE = 8 * 1024 * 1024
 # How long the server->client pump gets to drain after the CLIENT hangs up. Bounded so a server that
 # never closes its stdout cannot keep the proxy alive indefinitely.
 _DRAIN_TIMEOUT_S = 5.0
+# How many client messages may be read (and registered as pending) ahead of the one being mediated.
+# Bounded so a client cannot buffer without limit while mediation is held; the reader then waits.
+_READ_AHEAD = 256
+# ...and how many BYTES. 256 messages of up to `_MAX_LINE` each is 2 GiB; this caps what reading
+# ahead can hold. One message larger than the budget is still read when nothing else is queued.
+_READ_AHEAD_BYTES = 16 * 1024 * 1024
 
 
 def configure_stdio_logging() -> None:
@@ -132,6 +138,9 @@ class StdioProxy:
         self._out_lock = asyncio.Lock()
         self._pin_store = None      # set only for the control-plane backend
         self._server_store = None   # the MCP server registry; always set once the firewall is built
+        # The firewall's own `tools/list` requests awaiting their answer, by JSON-RPC id. Their
+        # responses are the PROXY's, so the server->client pump hands them here instead of to the client.
+        self._own_requests: dict[str, asyncio.Future] = {}
 
     # ------------------------------------------------------------------ setup
     async def _build_firewall(self) -> McpFirewall:
@@ -321,22 +330,92 @@ class StdioProxy:
         await proc.stdin.drain()
 
     async def _pump_client_to_server(self, client_in: asyncio.StreamReader) -> None:
+        """Read the client's messages and mediate them strictly in order.
+
+        Reading and mediating are two tasks joined by a bounded queue. Mediation stays strictly
+        sequential (ordering is a correctness property, see the module docstring), but READING runs
+        ahead of it, and every request is registered as pending with the firewall the moment it is
+        read. While mediation is held — a tools/call waiting for the proxy's own list, for up to
+        `mcp_cold_list_timeout_s` — the client keeps sending, and a server that knows the window is
+        open could otherwise answer those not-yet-registered ids first: an answer to an unregistered
+        id has no method to be mediated as. Registered at read, it is mediated as that answer.
+        """
         firewall = self._firewall
-        while True:
-            line = await _read_line(client_in)
-            if line is None:
-                break
-            msg = P.decode(line)
-            if msg is None:
-                # Unparseable input. Dropping is the fail-closed choice: forwarding bytes we could
-                # not classify would mean forwarding a possible tools/call ungoverned.
-                log.warning("nrvq.mcp.client.undecodable_dropped", bytes=len(line), code="NRVQ-MCP-5003")
-                continue
-            result = await firewall.on_client_message(msg)
-            if result.reply is not None:
-                await self._write_client(result.reply)
-            if result.forward is not None:
-                await self._write_server(result.forward)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_READ_AHEAD)
+        queued_bytes = 0
+        room = asyncio.Condition()
+
+        async def _read() -> None:
+            nonlocal queued_bytes
+            try:
+                while True:
+                    line = await _read_line(client_in)
+                    if line is None:
+                        break
+                    msg = P.decode(line)
+                    if msg is None:
+                        # Unparseable input. Dropping is the fail-closed choice: forwarding bytes we
+                        # could not classify would mean forwarding a possible tools/call ungoverned.
+                        log.warning("nrvq.mcp.client.undecodable_dropped", bytes=len(line),
+                                    code="NRVQ-MCP-5003")
+                        continue
+                    size = len(line)
+                    async with room:
+                        await room.wait_for(
+                            lambda: queued_bytes == 0 or queued_bytes + size <= _READ_AHEAD_BYTES)
+                        queued_bytes += size
+                    firewall.note_client_request(msg)
+                    await queue.put((msg, size))
+            except Exception as exc:  # noqa: BLE001 — end the session the way EOF does, loudly
+                log.error("nrvq.mcp.proxy.pump_failed", task="c2s-read", error=str(exc),
+                          code="NRVQ-MCP-5001")
+            # End of input. Not in a `finally`: a cancelled reader must not block on a full queue.
+            await queue.put(None)
+
+        reader = asyncio.create_task(_read(), name="c2s-read")
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                msg, size = item
+                async with room:
+                    queued_bytes -= size
+                    room.notify_all()
+                result = await firewall.on_client_message(msg, list_upstream=self._list_upstream,
+                                                          registered=True)
+                if result.catalog_scanned:
+                    # The proxy listed a cold catalog itself; report it exactly as a forwarded list.
+                    self._report_catalog()
+                if result.reply is not None:
+                    await self._write_client(result.reply)
+                if result.forward is not None:
+                    await self._write_server(result.forward)
+        finally:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await reader
+
+    async def _list_upstream(self, request: P.JsonRpcMessage) -> P.JsonRpcMessage | None:
+        """Send the firewall's own request to the server and wait for the response with its id.
+
+        The client->server pump awaits this inline, which keeps the client's own ordering: its call is
+        forwarded after the list, never before. The firewall bounds the wait; cancelling it on timeout
+        lands in the `finally` below, so an unanswered id does not stay registered.
+        """
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._own_requests[request.id] = future
+        try:
+            await self._write_server(request.framed)
+            return await future
+        finally:
+            self._own_requests.pop(request.id, None)
+
+    def _report_catalog(self) -> None:
+        if self._pin_store is not None:
+            catalog = self._firewall.catalog_report_due()
+            if catalog is not None:
+                asyncio.create_task(self._pin_store.flush(catalog))
 
     async def _pump_server_to_client(self) -> None:
         firewall = self._firewall
@@ -350,6 +429,32 @@ class StdioProxy:
             if msg is None:
                 log.warning("nrvq.mcp.server.undecodable_dropped", bytes=len(line), code="NRVQ-MCP-5004")
                 continue
+            # The answer to the proxy's OWN request. Not forwarded: the client never asked for it, and
+            # an unsolicited response would confuse its id bookkeeping. The firewall scans it on the
+            # waiting side, through the same Gate A function a client's listing goes through. An
+            # answer nobody waits for any more (late, or a second one) is not in this map and goes on
+            # to the firewall, which drops it by its id prefix (NRVQ-MCP-5081) — never to the client.
+            own = self._own_requests.get(msg.id) if msg.is_response and isinstance(msg.id, str) else None
+            if own is not None and not own.done():
+                own.set_result(msg)
+                continue
+            if msg.is_request and self._own_requests and msg.method == P.M_PING:
+                # A keepalive. It asks nothing of the CLIENT, so the proxy answers it for the session
+                # rather than giving up its list over it — a server that pings before it lists would
+                # otherwise never get a self-list through. Not forwarded: the server has its answer.
+                await self._write_server(P.encode({"jsonrpc": "2.0", "id": msg.id, "result": {}}))
+                continue
+            if msg.is_request and self._own_requests:
+                # A server->client request (roots/list, sampling, elicitation) while the proxy's own
+                # list is pending. The client's reply would queue behind the call the client->server
+                # pump is holding for that list, and a server that waits for the reply before it
+                # lists would stall the session for the whole timeout. Give up the list instead: the
+                # call is decided as it was before the self-list existed, and the reply gets through.
+                for future in list(self._own_requests.values()):
+                    if not future.done():
+                        future.set_exception(RuntimeError(
+                            f"the server sent a {msg.method[:64]} request while the proxy's tools/list "
+                            "was pending; the list was abandoned so the client can answer it"))
             result = await firewall.on_server_message(msg)
             if result.reply is not None:
                 await self._write_server(result.reply)
@@ -363,10 +468,7 @@ class StdioProxy:
             # The DUE rule now lives on the firewall and is shared with the HTTP driver. It used to
             # be "a rewrite, or the first listing", which re-reported on every list of a persistently
             # poisoned server — the report rate was the server's to choose.
-            if self._pin_store is not None:
-                catalog = firewall.catalog_report_due()
-                if catalog is not None:
-                    asyncio.create_task(self._pin_store.flush(catalog))
+            self._report_catalog()
 
     async def _drain_server_stderr(self) -> None:
         """Relay the upstream server's stderr to ours.

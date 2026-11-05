@@ -243,3 +243,4 @@ async def test_prune_once_isolates_a_failing_step(monkeypatch):
     assert counts["intent_drafts"] == 1                # drafts GC still ran
     assert counts["agent_registry"] == 1               # registry sweep still ran
     assert counts["asset_graph"] == 1                  # graph prune still ran
+    assert counts["revoked_tokens"] == 1               # expired logout revocations still pruned

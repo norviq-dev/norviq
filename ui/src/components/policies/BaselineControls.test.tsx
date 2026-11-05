@@ -381,6 +381,35 @@ describe("Enforce does not mean one thing", () => {
     expect(intro.textContent).toMatch(/each row says exactly how/i);
   });
 
+  it("does not tell an operator that nothing enforces until they say so", async () => {
+    // It did. From 0.2.6 the chart's baseline refuses calls from install and twenty rows arrive at
+    // Enforce, so the sentence invited exactly the wrong assumption on the panel that turns them off.
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const intro = await screen.findByTestId("baseline-intro");
+    expect(intro.textContent).not.toMatch(/nothing is enforced/i);
+    expect(intro.textContent).toMatch(/most arrive at Enforce/i);
+    expect(intro.textContent).toMatch(/Off stops the control evaluating/i);
+  });
+
+  it("says what decides besides the rows: the install mode until a save, and the namespace mode", async () => {
+    // The rows show what THIS PANEL says. Under an audit install with nothing saved they show
+    // Enforce while the chart's baseline only records; saving there starts refusing; and a namespace
+    // in Monitor refuses nothing whatever the rows say. Each is stated, not implied.
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const posture = (await screen.findByTestId("baseline-intro-posture")).textContent ?? "";
+    expect(posture).toMatch(/until you save here, the chart's baseline decides/i);
+    expect(posture).toMatch(/baselineClusterPolicy\.enforcementMode=audit/);
+    expect(posture).toMatch(/saving under an audit install starts acting on what is at Enforce/i);
+    expect(posture).toMatch(/next to any other it keeps applying, and these rows cannot relax it/i);
+    // Not "refuses none": a trust freeze, an invalid identity and the rate limit stay hard in Monitor
+    // (_posture_exempt_rules).
+    expect(posture).toMatch(/Monitor in Target Settings records what these rows would stop instead of stopping it/i);
+    expect(posture).toMatch(/a frozen agent, an invalid agent identity and the rate limit are still refused/i);
+    expect(posture).toMatch(/policyQuotaNamespaces/);
+  });
+
   it("words the impact line from enforced_as, not as an unconditional block", async () => {
     mockFetch(withEnforcedAs("escalate"));
     mockCompliance([{

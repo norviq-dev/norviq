@@ -8,7 +8,7 @@ Fail-on-bug: on the pre-fix code POST /api/v1/auth/logout was 404 and the same t
 denylist TTL == the token's remaining lifetime, JWT-only semantics (missing/garbage/API-key creds and
 double logout all 401), Redis-down behavior (logout still revokes via the in-process mirror; the
 revocation CHECK fails open), decode_token (the /ws/audit path) rejecting a logged-out token, and the
-mirror's prune/cap bounds.
+mirror's bounds: expired entries are pruned off the request path, and no live one is ever evicted.
 """
 
 from __future__ import annotations
@@ -133,9 +133,12 @@ def test_logout_denylist_ttl_matches_remaining_token_lifetime() -> None:
     client = _client(cache)
     token = _mint(ttl=600)
     assert client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {token}"}).status_code == 200
-    assert len(cache.revoked) == 1
-    ttl = next(iter(cache.revoked.values()))
-    assert 595 <= ttl <= 600  # TTL = exp - now: the entry dies exactly when the token would
+    # Two entries, by design: the canonical key over the decoded token, and the 0.2.5 raw-string key so
+    # a rollback still sees the revocation. This asserted exactly one entry when there was one key.
+    from norviq.api.session_revocation import _legacy_token_hash, token_hash
+    assert set(cache.revoked) == {token_hash(token), _legacy_token_hash(token)}
+    for ttl in cache.revoked.values():
+        assert 595 <= ttl <= 600  # TTL = exp - now: each entry dies exactly when the token would
 
 
 def test_logout_requires_a_valid_jwt() -> None:
@@ -218,20 +221,30 @@ def test_ws_audit_accepts_a_normal_token() -> None:
 # --- session_revocation primitives ---------------------------------------------------------------
 
 
-async def test_mirror_prunes_expired_entries() -> None:
+async def test_mirror_prunes_expired_entries_off_the_request_path() -> None:
+    """An expired entry protects nothing (the JWT check refuses the token on its own exp) and must not
+    linger, but dropping it is not the check's job: a scan of the mirror on every request cost 385us at
+    10k entries, and the mirror now holds every replica's logouts. The sync pass prunes (see
+    test_revocation_durable); a process with no pass prunes when it writes."""
     sr._mirror[sr.token_hash("old-token")] = int(time.time()) - 10  # entry whose token has expired
     assert await sr.is_revoked(None, "old-token") is False
-    assert sr._mirror == {}  # pruned, not lingering
+    assert sr.token_hash("old-token") in sr._mirror  # the check did no work proportional to the mirror
+    await sr.revoke(None, "another-token", exp=int(time.time()) + 60)
+    assert sr.token_hash("old-token") not in sr._mirror  # pruned, not lingering
 
 
-async def test_mirror_cap_evicts_soonest_to_expire_first() -> None:
+async def test_mirror_never_evicts_a_live_revocation() -> None:
+    """The mirror used to cap at 10,000 entries and evict the soonest to expire. Once it held every
+    replica's logouts, loaded from Postgres, that cap evicted real revocations, and after a Redis loss
+    those tokens verified again. No live entry is evicted now; the memory this costs is stated in
+    session_revocation's module docstring."""
     now = int(time.time())
-    for i in range(sr._MIRROR_MAX_ENTRIES):
+    for i in range(10_000):
         sr._mirror[f"h{i}"] = now + 1000 + i
     await sr.revoke(None, "one-more", exp=now + 5000)
-    assert len(sr._mirror) <= sr._MIRROR_MAX_ENTRIES
-    assert sr._mirror.get(sr.token_hash("one-more"))  # the new revocation always survives eviction
-    assert "h0" not in sr._mirror  # the soonest-to-expire entry was evicted
+    assert len(sr._mirror) == 10_001
+    assert sr._mirror.get(sr.token_hash("one-more"))
+    assert "h0" in sr._mirror  # the soonest-to-expire entry is still there
 
 
 async def test_is_revoked_prefers_mirror_over_redis() -> None:

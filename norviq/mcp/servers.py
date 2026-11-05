@@ -169,7 +169,7 @@ class ControlPlaneServerStore:
     codebase in a different form and is documented in `HttpProxy._install_pin_store`: three proxies
     refused every call at Gate A for eleven hours across an API rollout, nothing reached the audit
     log, and the failure was indistinguishable from a defence working. Availability wins here for the
-    same reason it wins there, with the same two mitigations: it is logged loudly at NRVQ-MCP-5070,
+    same reason it wins there, with the same two mitigations: it is logged loudly at NRVQ-MCP-5077,
     and Gate B is unaffected — every call is still evaluated, so a policy that refuses an unregistered
     server still refuses it.
 

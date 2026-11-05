@@ -5,9 +5,12 @@
 //  Run suite → the button shows an in-flight state (disabled + aria-busy + "Running…"); a rapid
 //      double-click fires exactly ONE POST /redteam/suite (client one-submit guard + backend 409 guard).
 //  The results table is scoped to the run and paginated — mounted rows stay bounded (≤50) even for a
-//      large run; the got-through filter surfaces misses; the roll-up stays pinned above.
+//      large run; the got-through filter lists exactly the scorecard's "Got through" rows; the roll-up
+//      stays pinned above.
 
 import { test, expect, waitForApp } from "./fixtures";
+
+const PAGE_SIZE = 50; // RedTeam.tsx PAGE_SIZE — the most result rows the table mounts at once
 
 test.describe("Red Team run-state + bounded results table", () => {
   test("run suite shows Running… + disabled, double-click fires ONE POST, table stays bounded", async ({ page }) => {
@@ -53,15 +56,31 @@ test.describe("Red Team run-state + bounded results table", () => {
 
     // The table is bounded — at most 50 rows mounted regardless of run size
     const rowCount = await page.getByTestId("redteam-attack-row").count();
-    expect(rowCount).toBeLessThanOrEqual(50);
+    expect(rowCount).toBeLessThanOrEqual(PAGE_SIZE);
 
-    // got-through filter is reachable and, when misses exist, narrows to only failed rows
-    const gotThrough = await page.getByTestId("redteam-gotthrough").textContent();
-    if (gotThrough && parseInt(gotThrough.replace(/\D/g, "") || "0", 10) > 0) {
-      await page.getByTestId("redteam-failed-filter").getByRole("checkbox").check();
-      const failedRows = await page.getByTestId("redteam-row-failed").count();
-      expect(failedRows).toBeGreaterThan(0);
-      expect(await page.getByTestId("redteam-attack-row").count()).toBe(failedRows);
+    // The got-through filter lists EXACTLY the rows the scorecard counted, whatever that number is.
+    //
+    // This used to assert only "> 0 rows, all red" when the scorecard was above zero, and it flaked: the
+    // scorecard counts the server's verdict, while the table re-derived one from `passed`. A throttled
+    // block (`rate_limit_exceeded` — 17 of them in the kind cluster's audit_log) passes and is a
+    // got-through, so on a run that happened to be throttled the scorecard read N and the filter listed
+    // none. Rows now carry the server's `outcome`, and the count must match both ways — including zero.
+    // `toHaveCount` auto-waits for the filtered re-render instead of sampling it once.
+    const scored = parseInt((await page.getByTestId("redteam-gotthrough").textContent())?.replace(/\D/g, "") || "0", 10);
+    await page.getByTestId("redteam-failed-filter").getByRole("checkbox").check();
+    const mounted = Math.min(scored, PAGE_SIZE);
+    await expect(page.getByTestId("redteam-row-failed")).toHaveCount(mounted);
+    if (scored > 0) {
+      await expect(page.getByTestId("redteam-attack-row")).toHaveCount(mounted);
+    } else {
+      await expect(page.getByTestId("redteam-attack-row")).toHaveCount(0);
+      await expect(page.getByTestId("redteam-attacks")).toContainText("No matching results.");
+    }
+    // Past one page the pager carries the rest; its total must still be the scorecard's number.
+    if (scored > PAGE_SIZE) {
+      await expect(page.getByTestId("redteam-pager")).toContainText(`of ${scored}`);
+    } else {
+      await expect(page.getByTestId("redteam-pager")).toHaveCount(0);
     }
 
     // the per-technique roll-up stays pinned above the table

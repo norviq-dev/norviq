@@ -84,4 +84,5 @@ RUN /opt/norviq/mcp-proxy/norviq-mcp --help > /dev/null \
  && /opt/norviq/mcp-proxy/norviq-mcp --http 2>&1 | grep -q "requires --upstream"
 
 FROM scratch AS payload
+LABEL org.opencontainers.image.licenses=Apache-2.0
 COPY --from=builder /opt/norviq/mcp-proxy /opt/norviq/mcp-proxy

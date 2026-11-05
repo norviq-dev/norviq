@@ -7,10 +7,13 @@ from __future__ import annotations
 
 from norviq.redteam.vectors import EVALUATE_REACHABLE, VECTORS
 from norviq.api.redteam_efficacy import (
+    SCORED_OUTCOMES,
     attack_mapping,
     catalog_entry,
     compute_efficacy,
     owasp_control_for_category,
+    row_outcome,
+    with_outcomes,
 )
 from norviq.redteam.attacks import ATTACKS, get_attack_by_id
 
@@ -286,3 +289,99 @@ def test_the_buckets_still_sum_to_total():
     eff = compute_efficacy(rows)
     for bucket in [eff["overall"], *eff["by_technique"]]:
         assert bucket["caught"] + bucket["would_block"] + bucket["got_through"] == bucket["total"], bucket
+
+
+# --- One verdict per row: the scorecard and the table under it must agree ---------------------------
+#
+# The scorecard's numbers come from `compute_efficacy`; the console's results table used to label and
+# filter rows with its own `!passed && applicable !== false`. The two disagreed in both directions, and
+# a kind run showed it: 17 red-team audit rows `block / rate_limit_exceeded`, a scorecard reading
+# "got through > 0", and a got-through filter that listed nothing. `row_outcome` is now served on every
+# row and is the only thing the roll-up counts.
+
+def _mixed_run():
+    """One of every verdict, spread across techniques, OWASP controls and MCP vectors."""
+    return [
+        _row("SQL-001", "billing", "block", technique="AML.T0054", tname="Jailbreak"),
+        _row("PI-001", "billing", "block", owasp="LLM01:2025", oname="PI", rule_id="rate_limit_exceeded"),
+        _row("DL-001", "billing", "block", owasp="LLM02:2025", oname="DL", rule_id="evaluator_timeout"),
+        _row("PII-001", "billing", "audit", owasp="LLM02:2025", oname="DL", rule_id="pii_detection"),
+        _row("EA-001", "billing", "allow", technique="AML.T0051", tname="Agency"),
+        _row("TM-001", "billing", "escalate", technique="AML.T0051", tname="Agency", rule_id="demo_external_email"),
+        {**_row("FIN-001", "billing", "allow"), "applicable": False},
+        _row("RL-001", "billing", "block", expected="allow", rule_id="rate_limit_exceeded"),
+        _row("SH-001", "scorer", "allow"),
+        _mcp_row("MCP-01", "block", "mcp-server-identity-unattested"),
+        {**_mcp_row("MCP-02", "audit", "mcp-server-identity-unattested"),
+         "rule_id": "monitor_would_block:mcp_server_not_allowlisted"},
+    ]
+
+
+def test_every_bucket_is_a_count_of_row_outcome():
+    """The invariant the Red Team page relies on: filter the rows by their served `outcome` and you get
+    exactly the scorecard's number — overall, and inside every breakdown bucket."""
+    rows = _mixed_run()
+    eff = compute_efficacy(rows)
+    outcomes = [row_outcome(r) for r in rows]
+
+    def counts(selected):
+        return {o: sum(1 for r, ro in zip(rows, outcomes) if selected(r) and ro == o) for o in SCORED_OUTCOMES}
+
+    assert {o: eff["overall"][o] for o in SCORED_OUTCOMES} == counts(lambda r: True)
+    assert eff["overall"]["total"] == sum(1 for o in outcomes if o in SCORED_OUTCOMES)
+    for b in eff["by_technique"]:
+        got = counts(lambda r, t=b["technique_id"]: (r.get("atlas_technique") or "unknown") == t)
+        assert {o: b[o] for o in SCORED_OUTCOMES} == got, b
+    for b in eff["by_owasp"]:
+        got = counts(lambda r, c=b["control_id"]: r.get("owasp_control") == c)
+        assert {o: b[o] for o in SCORED_OUTCOMES} == got, b
+    for b in eff["by_vector"]:
+        got = counts(lambda r, v=b["vector_id"]: r.get("mcp_vector") == v)
+        assert {o: b[o] for o in SCORED_OUTCOMES} == got, b
+    # The three reasons a row is not scored are counts of the same verdict.
+    assert eff["excluded_synthetic"] == outcomes.count("synthetic") == 1
+    assert eff["non_enforcement"] == outcomes.count("non_enforcement") == 1
+    assert eff["sector_not_enabled"] == outcomes.count("not_enabled") == 1
+    # Not vacuous: the mix really does hold every verdict, and every breakdown has buckets to check.
+    assert set(outcomes) == {*SCORED_OUTCOMES, "synthetic", "non_enforcement", "not_enabled"}
+    assert eff["by_technique"] and eff["by_owasp"] and eff["by_vector"]
+
+
+def test_a_throttled_block_is_got_through_although_it_passed():
+    """`passed` is True — actual block == expected block — which is why a client reading `passed` hid
+    it. The policy stack allowed this call; the rate limiter refused it afterwards, on volume."""
+    r = _row("PI-001", "billing", "block", rule_id="rate_limit_exceeded")
+    assert r["passed"] is True
+    assert row_outcome(r) == "got_through"
+    assert compute_efficacy([r])["overall"]["got_through"] == 1
+
+
+def test_an_audited_detection_is_would_block_although_it_failed():
+    """`passed` is False — audit != block — which is why a client reading `passed` painted it red.
+    A control on Monitor detected it and let it proceed on purpose; that is not a miss."""
+    r = _row("PII-001", "billing", "audit", rule_id="pii_detection")
+    assert r["passed"] is False
+    assert row_outcome(r) == "would_block"
+    o = compute_efficacy([r])["overall"]
+    assert o["would_block"] == 1 and o["got_through"] == 0
+
+
+def test_rows_the_roll_up_does_not_score_say_why():
+    """Synthetic first, then a non-block expectation, then not-enabled — the order `compute_efficacy`
+    has always excluded them in, so a row carries exactly one reason."""
+    assert row_outcome(_row("A", "scorer", "allow")) == "synthetic"
+    assert row_outcome({**_row("A", "scorer", "allow"), "applicable": False}) == "synthetic"
+    # RL-001 expects allow; a throttle turning it into a block is neither a catch nor a miss.
+    throttled_allow = _row("RL-001", "billing", "block", expected="allow", rule_id="rate_limit_exceeded")
+    assert row_outcome(throttled_allow) == "non_enforcement"
+    assert row_outcome({**_row("FIN-001", "billing", "allow"), "applicable": False}) == "not_enabled"
+    # An errored evaluation (the suite's `_error_row`) is a miss, as it always was.
+    errored = {**_row("X", "billing", "block"), "actual": "error", "rule_id": "", "passed": False}
+    assert row_outcome(errored) == "got_through"
+
+
+def test_with_outcomes_annotates_copies_and_tolerates_a_pruned_run():
+    rows = [_row("A", "billing", "block")]
+    assert with_outcomes(rows) == [{**rows[0], "outcome": "caught"}]
+    assert "outcome" not in rows[0]  # the stored row is never mutated
+    assert with_outcomes(None) == []  # a detail-pruned run stores results=None

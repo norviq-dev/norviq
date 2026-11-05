@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, scoped_cluster
 from norviq.config import settings
-from norviq.fleet.bundle import rfc3339_z, sign_bundle
+from norviq.fleet.bundle import RESERVED_SCOPES, rfc3339_z, sign_bundle
 from norviq.fleet.db import fleet_get_session
 from norviq.fleet.models import Cluster, FleetPolicy, PolicyRollout
 from norviq.fleet.schemas import PolicyAuthorBody, RolloutReportBody
@@ -30,10 +30,12 @@ from norviq.fleet.ssrf_guard import SSRFBlockedError
 log = structlog.get_logger()
 router = APIRouter()
 
-# Scopes a fleet push must NEVER replace — a cluster's baseline (comprehensive) and its materialized sector
-# pack are managed PER-CLUSTER (the seed / packs-enable path), not by fleet distribution. A push that targeted
-# __baseline__ would otherwise wipe comprehensive across every cluster.
-_RESERVED_SCOPES = {"__baseline__", "__pack__"}
+# Scopes a fleet push must NEVER replace — each is managed PER-CLUSTER by its own path, not by fleet
+# distribution. A push that targeted __baseline__ would wipe the baseline across every cluster, and one
+# that targeted __controls__ would replace it (the saved controls supersede the chart's baseline). This
+# was {"__baseline__", "__pack__"} and let __controls__, __egress__ and __mcp__ through; the set is now
+# shared with the spoke's puller, which refuses the same scopes (norviq/fleet/bundle.py).
+_RESERVED_SCOPES = RESERVED_SCOPES
 
 
 def _utcnow() -> datetime:
@@ -48,14 +50,15 @@ async def author_policy(
 ) -> dict:
     """Create/update a fleet policy (admin only). Re-authoring the same name bumps its version."""
     require_admin(user)  # authoring allow/deny rules is admin-only (service/viewer -> 403)
-    # A fleet push must not replace a managed per-cluster scope (baseline/pack) fleet-wide.
+    # A fleet push must not replace a managed per-cluster scope (baseline, packs, controls, egress, MCP).
     if body.agent_class in _RESERVED_SCOPES:
         log.warning("nrvq.fleet.policy.reserved_scope", name=body.name, agent_class=body.agent_class,
                     actor=user.get("sub"), code="NRVQ-FLT-15023")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"'{body.agent_class}' is a managed per-cluster scope and cannot be fleet-pushed — change a "
-                   "cluster's baseline via its seed and sector packs via the packs API (POST /policy-packs/{id}/enable).",
+                   "cluster's baseline via its seed, sector packs via the packs API (POST /policy-packs/{id}/enable), "
+                   "and baseline controls, egress and MCP servers via that cluster's own API.",
         )
     # A fleet-WIDE push (no cluster_id -> matches >1 cluster) needs an explicit confirm.
     if not body.target_selector.get("cluster_id") and not body.confirm_fleet_wide:
@@ -145,7 +148,7 @@ def _resolve_for_cluster(policies: list[FleetPolicy], cluster: Cluster) -> list[
     chosen: dict[tuple[str, str], tuple[bool, FleetPolicy]] = {}  # (ns,class) -> (is_override, policy)
     for p in policies:
         # Defense-in-depth: a reserved-scope policy already in the DB (e.g. a pre-guard or neutralized row)
-        # must never be distributed in a bundle — baseline/pack are per-cluster managed, never fleet-pushed.
+        # must never be distributed in a bundle — these scopes are per-cluster managed, never fleet-pushed.
         if p.agent_class in _RESERVED_SCOPES:
             continue
         sel = p.target_selector or {}

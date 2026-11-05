@@ -37,6 +37,40 @@ class SpiffeResolutionError(RuntimeError):
     """Raised in workload-api mode when an SVID cannot be fetched/validated (fail-closed)."""
 
 
+# The one rule for an agent identity, shared by everything that mints, evaluates or controls one: POST /keys
+# (binding a key to it), the evaluator (deciding for it) and the admin trust routes (freezing it). They used
+# to disagree — the evaluator took any "spiffe://..." string, the key API any up to 512 characters including
+# the bare prefix, while the admin routes refused the bare prefix and anything longer than the registry's
+# 512-character column — so an identity could make decisions that no freeze could reach. The bound is 512
+# characters: the width of every column that holds an agent id and what POST /keys always stored. The SPIFFE
+# specification allows 2048 bytes; ids longer than 512 characters are refused everywhere, consistently (a
+# known limitation, docs/cli.md). Widening the columns was tried and reverted: on Postgres the ALTER rebuilds
+# the (namespace, agent_id) index on every audit_log partition under ACCESS EXCLUSIVE, 10 s per API start at
+# 6M audit rows, with API-key auth stalled meanwhile.
+SPIFFE_ID_MAX_LEN = 512
+
+
+def _storable(spiffe_id: str) -> bool:
+    """Whether both stores can hold the id: Redis keys and Postgres text are strict UTF-8 (a lone surrogate
+    cannot be encoded, so neither store, nor a URL, can carry it), and Postgres text cannot hold NUL."""
+    # A str fails strict UTF-8 encoding only on a surrogate code point (U+D800-U+DFFF).
+    return "\x00" not in spiffe_id and not any("\ud800" <= c <= "\udfff" for c in spiffe_id)
+
+
+def is_controllable_spiffe_id(spiffe_id: object) -> bool:
+    """True when ``spiffe_id`` starts with "spiffe://", is not empty or only whitespace after it, is at most
+    SPIFFE_ID_MAX_LEN characters, and both stores can hold it (strict UTF-8, no NUL: an id that cannot be
+    stored can never be frozen, review round 8). Any other character, whitespace and glob characters
+    included, is accepted: the id only names registry rows and Redis keys used with GET/SET/DEL/EVAL."""
+    return (
+        isinstance(spiffe_id, str)
+        and spiffe_id.startswith("spiffe://")
+        and bool(spiffe_id[len("spiffe://"):].strip())
+        and len(spiffe_id) <= SPIFFE_ID_MAX_LEN
+        and _storable(spiffe_id)
+    )
+
+
 def _parse_norviq_spiffe_id(spiffe_id: str) -> tuple[str, str] | None:
     """Parse spiffe://norviq/ns/<ns>/sa/<sa> -> (namespace, service_account); None if not ours."""
     prefix = f"spiffe://{_TRUST_DOMAIN}/"

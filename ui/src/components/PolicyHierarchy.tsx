@@ -14,7 +14,7 @@
 // only (the cluster header is inert on the single-cluster GA surface).
 
 import { useEffect, useMemo, useState } from "react";
-import { apiGet, fetchEffectivePolicy, fetchSettings, type EffectiveLayer } from "../api/client";
+import { apiGet, fetchEffectivePolicy, fetchSettings, type EffectiveLayer, type SupersededLayer } from "../api/client";
 import { fleetEnabled } from "../api/fleet";
 import { Panel } from "./common/Panel";
 import { useApi } from "../hooks/useApi";
@@ -75,7 +75,7 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
   useEffect(() => { if (pickerClasses.length && !pickerClasses.includes(agentClass)) setAgentClass(pickerClasses[0]); }, [pickerClasses, agentClass]);
 
   // The effective stack — cacheKey `effective:` so a pack/policy mutation (which busts that prefix) re-fetches it.
-  const eff = useApi<{ layers: EffectiveLayer[]; note?: string }>(
+  const eff = useApi<{ layers: EffectiveLayer[]; superseded?: SupersededLayer[]; note?: string }>(
     () => (agentClass ? fetchEffectivePolicy(namespace, agentClass) : Promise.resolve({ layers: [] })),
     [namespace, agentClass],
     { cacheKey: `effective:${namespace}:${agentClass}`, staleTimeMs: 15_000 }
@@ -126,9 +126,25 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
       ? "Monitor — evaluate & log would-block, but allow (observe mode)"
       : "Block — matching policies are enforced";
 
+  // A layer the API reports as SUPERSEDED: present, but replaced by another layer and deciding nothing.
+  // Today that is the chart's namespace baseline once the namespace's saved baseline controls replace it.
+  // The legend matched the ns-baseline slot on `__baseline__` rows only, so it read "○ namespace baseline"
+  // (not configured) while the table's controls row said it was the namespace baseline — two claims about
+  // one layer, one of them false. Only an entry whose replacement is actually in force counts.
+  const superseded = useMemo(() => {
+    const inForce = new Set(layers.map((l) => l.scope));
+    return (eff.data?.superseded ?? []).filter((s) => inForce.has(s.superseded_by));
+  }, [eff.data?.superseded, layers]);
+
+  const replacedIn = (key: string) => {
+    const slot = TEMPLATE.find((s) => s.key === key);
+    return slot ? superseded.find((s) => { const { ns, ac } = acOf(s.scope); return slot.match(ns, ac, s.scope, agentClass); }) : undefined;
+  };
+
   const presentSlot = (key: string) => {
     const slot = TEMPLATE.find((s) => s.key === key);
-    return !!slot && layers.some((l) => { const { ns, ac } = acOf(l.scope); return slot.match(ns, ac, l.scope, agentClass); });
+    if (!slot) return false;
+    return layers.some((l) => { const { ns, ac } = acOf(l.scope); return slot.match(ns, ac, l.scope, agentClass); }) || !!replacedIn(key);
   };
 
   const cell: React.CSSProperties = { padding: "8px 12px", borderBottom: "1px solid var(--border, #2a2a2a)", textAlign: "left" };
@@ -201,6 +217,20 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
         </table>
       )}
 
+      {/* What replaced what. Not table rows: a superseded layer is not in force, and the table is the stack
+          the evaluator resolves. Leaving it out entirely would read as "no chart baseline here". */}
+      {!eff.error && superseded.length > 0 && (
+        <div data-testid={`${testId}-superseded`} style={{ marginTop: 8, fontSize: 12, color: muted }}>
+          {superseded.map((s) => (
+            <div key={s.scope} data-testid={`${testId}-superseded-row`}>
+              <span style={{ fontFamily: "var(--font-mono)" }}>{s.scope}</span> ({s.label}) is replaced by{" "}
+              <span style={{ fontFamily: "var(--font-mono)" }}>{s.superseded_by}</span>: the saved baseline controls
+              decide here, each control as set in Baseline controls.
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Presence legend — the full precedence template, marking which conceptual slots are in force vs an empty slot
           (not configured). Purely informational; it never reorders the authoritative API stack above. */}
       {agentClass && !eff.error && (
@@ -209,11 +239,13 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {TEMPLATE.filter((s) => !s.fleetOnly || fleetEnabled).map((s) => {
               const on = presentSlot(s.key);
+              const replaced = replacedIn(s.key);
               return (
                 <span key={s.key} data-testid={`${testId}-slot-${s.key}`} data-present={on ? "1" : "0"}
+                  data-replaced-by={replaced?.superseded_by}
                   style={{ padding: "2px 8px", borderRadius: 6, border: `1px solid ${on ? "var(--good, #2ecc71)" : "var(--border)"}`,
                     color: on ? "var(--good, #2ecc71)" : muted, opacity: on ? 1 : 0.7 }}>
-                  {on ? "✓" : "○"} {s.label}
+                  {on ? "✓" : "○"} {s.label}{replaced ? " · replaced by saved controls" : ""}
                 </span>
               );
             })}

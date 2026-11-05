@@ -18,12 +18,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import AgentRegistryEntry, RedTeamRun
 from norviq.api.db.session import get_session
-from norviq.api.redteam_efficacy import attack_mapping, catalog_entry, compute_efficacy
+from norviq.api.redteam_efficacy import (
+    attack_mapping,
+    attack_passed,
+    catalog_entry,
+    compute_efficacy,
+    pass_summary,
+    row_outcome,
+    with_outcomes,
+)
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.config import settings
-from norviq.redteam.attacks import ATTACKS, AttackCategory, get_attack_by_id
+from norviq.redteam.attacks import ATTACKS, AttackCategory, attack_request, get_attack_by_id
 from norviq.redteam.vectors import vector_title
-from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+from norviq.sdk.core.events import ToolCallEvent
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -121,7 +129,7 @@ async def run_attack(
     decision = await request.app.state.evaluator.evaluate(event)
     _emit_redteam_audit(request, event, decision)
     row = _result_row(attack, target_agent, target_namespace, decision.decision, decision.rule_id, decision.latency_ms)
-    return {**row, "trust_score": decision.trust_score}
+    return {**row, "outcome": row_outcome(row), "trust_score": decision.trust_score}
 
 
 @router.post("/redteam/suite")
@@ -194,16 +202,14 @@ async def run_suite(
                         results.append(_result_row(attack, agent_class, target_namespace, decision.decision, decision.rule_id, decision.latency_ms, applicable))
                     except Exception as exc:
                         results.append(_error_row(attack, agent_class, target_namespace, str(exc)))
-            passed = sum(1 for item in results if item.get("passed"))
+            tally = pass_summary(results)  # a throttled or faulted block is not a pass (attack_passed)
+            passed = tally["passed"]
             efficacy = compute_efficacy(results)  # caught-vs-got-through roll-up (synthetic excluded)
             report = {
                 "run_id": run_id,
                 "namespace": target_namespace,
                 "targets": targets,
-                "total": len(results),
-                "passed": passed,
-                "failed": len(results) - passed,
-                "pass_rate": round(passed / len(results) * 100, 1) if results else 0,
+                **tally,
                 "results": results,
                 "efficacy": efficacy,
                 # WHAT WAS ACTUALLY MEASURED (F-014). A pass_rate is meaningless without it, and the
@@ -247,7 +253,7 @@ async def run_suite(
     log.info("nrvq.redteam.suite_run", namespace=target_namespace, targets=targets,
              total=len(results), passed=passed, proven_blocking_pct=efficacy["overall"]["proven_blocking_pct"],
              code="NRVQ-RED-13006")
-    return report
+    return _served(report)
 
 
 def plan_retention(
@@ -422,7 +428,7 @@ async def get_result(
     if row is not None:
         return _run_to_dict(row)
     if run_id in REPORTS:
-        return REPORTS[run_id]
+        return _served(REPORTS[run_id])
     raise HTTPException(status_code=404, detail="Run not found")
 
 
@@ -433,7 +439,19 @@ async def get_report(run_id: str, user: dict = Depends(get_current_user)) -> dic
     require_admin(user)  # red-team is admin-only
     if run_id not in REPORTS:
         raise HTTPException(status_code=404, detail="Report not found")
-    return REPORTS[run_id]
+    return _served(REPORTS[run_id])
+
+
+def _pass_figures(row: RedTeamRun) -> dict[str, Any]:
+    """A stored run's total / passed / failed / pass_rate, re-derived from its rows while it has them.
+
+    The stored columns of a run written while `passed` was `actual == expected` count its throttled
+    and faulted blocks as passes, and the newest run, the one "Suite pass-rate" shows, always keeps
+    its rows. A detail-pruned run has no rows to re-derive from, so it serves what it was written with.
+    """
+    if row.results is None:
+        return {"total": row.total, "passed": row.passed, "failed": row.failed, "pass_rate": row.pass_rate}
+    return pass_summary(row.results)
 
 
 def _run_summary(row: RedTeamRun) -> dict[str, Any]:
@@ -445,14 +463,20 @@ def _run_summary(row: RedTeamRun) -> dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "namespace": row.namespace,
         "targets": row.targets,
-        "total": row.total,
-        "passed": row.passed,
-        "failed": row.failed,
-        "pass_rate": row.pass_rate,
+        **_pass_figures(row),
         "proven_blocking_pct": overall.get("proven_blocking_pct", 0.0),
         "caught": overall.get("caught", 0),
         "got_through": overall.get("got_through", 0),
     }
+
+
+def _served(report: dict[str, Any]) -> dict[str, Any]:
+    """A cached suite report as the API serves it: every result row carries its `outcome`.
+
+    The cached and persisted rows stay raw on purpose — the verdict is derived on the way out, by the
+    same `row_outcome` that built the report's efficacy, so the two cannot drift apart in storage.
+    """
+    return {**report, "results": with_outcomes(report.get("results"))}
 
 
 def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
@@ -465,11 +489,8 @@ def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "namespace": row.namespace,
         "targets": row.targets,
-        "total": row.total,
-        "passed": row.passed,
-        "failed": row.failed,
-        "pass_rate": row.pass_rate,
-        "results": row.results or [],
+        **_pass_figures(row),
+        "results": with_outcomes(row.results),
         "detail_pruned": pruned,
         "efficacy": row.efficacy,
     }
@@ -499,30 +520,10 @@ def _emit_redteam_audit(request: Request, event: ToolCallEvent, decision: Any) -
 
 
 def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolCallEvent:
-    """Build a tool-call event for one attack as a target identity. Each class gets its own SVID so it picks
-    up its own trust history; thread a chained-call `depth` param into the event's call_depth so chain-depth
-    rules can fire (the engine reads input.call_depth, not the tool param)."""
-    depth = attack.tool_params.get("depth")
-    return ToolCallEvent(
-        tool_name=attack.tool_name,
-        tool_params=attack.tool_params,
-        agent_identity=AgentIdentity(
-            spiffe_id=f"spiffe://norviq/ns/{target_namespace}/sa/{target_agent}",
-            namespace=target_namespace,
-            agent_class=target_agent,
-        ),
-        # Tag the decision source so the audit row is EXCLUDED from real-traffic counts by the same
-        # framework filter the Overview uses. Without this the row lands untagged and synthetic
-        # attack volume would inflate the operator's live metrics.
-        framework="redteam",
-        session_id=f"redteam-{attack.id}",
-        call_depth=int(depth) if isinstance(depth, (int, str)) and str(depth).isdigit() else 0,
-        # Gate-A context, published to rego as `input.mcp`. Empty for every non-MCP attack, which is
-        # the same document a plain SDK call presents, so nothing about the existing 29 changes.
-        # COPY it: `ATTACKS` is a module constant built once at import, and handing the same dict to
-        # every event in every run makes any future mutation an untraceable cross-run bug.
-        mcp=dict(getattr(attack, "mcp_context", None) or {}),
-    )
+    """Build a tool-call event for one attack as a target identity, from `attack_request`: the same fields
+    `norviq redteam run` posts to /api/v1/evaluate, so the two runners hand the engine the same call. The
+    CLI used to build its own body, without `call_depth` or `mcp`."""
+    return ToolCallEvent.model_validate(attack_request(attack, target_agent, target_namespace))
 
 
 def _mapping_fields(attack: Any) -> dict[str, Any]:
@@ -594,7 +595,7 @@ def _result_row(attack: Any, agent_class: str, namespace: str, actual: str, rule
         "expected": attack.expected_decision,
         "actual": actual,
         "rule_id": rule_id,
-        "passed": actual == attack.expected_decision,
+        "passed": attack_passed(attack.expected_decision, actual, rule_id),
         "applicable": applicable,
         "latency_ms": latency_ms,
         **_mapping_fields(attack),

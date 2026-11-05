@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import collections
+import json
+import math
 import weakref
+from typing import Any
 from time import monotonic
 
 import httpx
@@ -18,6 +22,53 @@ from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 
 log = structlog.get_logger()
+
+
+def _non_finite(value: Any) -> bool:
+    """Whether a float inf/nan occurs anywhere in `value`.
+
+    Each container is visited once (by identity): a self-referential tool_params made this loop
+    forever, holding the event loop while memory grew, and a structure that shares one sub-object many
+    times would be walked once per reference. A cycle is left to the encoder, which refuses it.
+    Bounded at `_MAX_PARAM_NODES` containers; past that the request is refused as unencodable.
+    """
+    stack = [value]
+    visited: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if isinstance(node, float):
+            if not math.isfinite(node):
+                return True
+            continue
+        if not isinstance(node, _CONTAINERS):
+            continue
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if len(visited) > _MAX_PARAM_NODES:
+            raise _UnencodableRequest(f"more than {_MAX_PARAM_NODES} containers in the call")
+        if isinstance(node, dict):
+            # Keys too: the encoder writes a float key as a string, so an inf/nan key reaches the
+            # engine as text it cannot tell from an ordinary one.
+            stack.extend(node.keys())
+            stack.extend(node.values())
+        else:
+            stack.extend(node)
+    return False
+
+
+# Every container the encoder serialises as an object or array. frozenset and deque were walked past,
+# so an inf inside one reached the engine as null.
+_CONTAINERS = (dict, list, tuple, set, frozenset, collections.deque)
+
+
+# Containers `_non_finite` will visit in one call. Far above a real tool call; a structure past it is
+# not one this process will encode for the engine.
+_MAX_PARAM_NODES = 100_000
+
+
+class _UnencodableRequest(Exception):
+    """The evaluate request could not be serialised in this process (see `PolicyEngineClient._post`)."""
 
 
 class PolicyEngineClient:
@@ -87,11 +138,30 @@ class PolicyEngineClient:
     async def _post(self, event: ToolCallEvent) -> dict:
         """POST event payload with retry and exponential backoff."""
         client = await self._get_client()
+        # Encoded HERE, before any network call, so that failing to build the request is told apart
+        # from the engine failing to answer it. A tool_params tree nested ~255 levels deep makes
+        # pydantic's serialiser raise "Circular reference detected (depth exceeded)"; raised inside
+        # `client.post` it fell to `_handle_unknown_error` and the OUTAGE fallback, so with
+        # sdk_fallback_mode=allow a call nobody could evaluate was allowed. The caller chooses the
+        # params, so that was a bypass on demand. A request this process cannot encode is not an
+        # outage: `evaluate` blocks it whatever the fallback mode.
+        #
+        # Non-finite floats are refused BEFORE pydantic sees them: `model_dump(mode="json")` writes inf
+        # and nan as null, so the engine would decide on `amount: null` — a threshold rule that is not
+        # written for null lets it through — while the tool runs with the caller's real value.
+        if _non_finite(event.tool_params) or _non_finite(event.mcp):
+            raise _UnencodableRequest("a non-finite number (inf or nan) in the call")
+        try:
+            body = json.dumps(event.model_dump(mode="json"), separators=(",", ":"),
+                              ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise _UnencodableRequest(str(exc)) from exc
         for attempt in range(self._max_retries + 1):
             try:
                 # The central API mounts the evaluate router at /api/v1 (norviq/api/main.py) — same
                 # endpoint + auth contract the thin-proxy sidecar's RemoteEvaluator uses.
-                response = await client.post("/api/v1/evaluate", json=event.model_dump(mode="json"))
+                response = await client.post("/api/v1/evaluate", content=body,
+                                             headers={"content-type": "application/json"})
                 response.raise_for_status()
                 self._record_success()
                 return response.json()
@@ -187,6 +257,16 @@ class PolicyEngineClient:
             decision = PolicyDecision(**(await self._post(event)))
             self._log_success(event.event_id, decision.decision)
             return decision
+        except _UnencodableRequest as exc:
+            log.error("nrvq.sdk.evaluate.unencodable", event_id=event.event_id, error=str(exc)[:200],
+                      code="NRVQ-SDK-1016")
+            return PolicyDecision(
+                decision="block",
+                rule_id="engine_request_unencodable",
+                reason=("The evaluate request could not be encoded locally (for example, arguments "
+                        "nested too deeply); this is not an engine outage, and fail-open does not apply."),
+                event_id=event.event_id,
+            )
         except NorviqTimeoutError as exc:
             return self._handle_timeout(event, exc)
         except httpx.HTTPStatusError as exc:

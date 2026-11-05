@@ -99,7 +99,9 @@ export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { 
               >
                 <div style={{ fontWeight: 700, marginBottom: 4 }}>{p.cls} · {KIND_LABEL[p.kind] ?? p.kind}</div>
                 <Row label="Intended tools">
-                  {p.allow_tools.length ? p.allow_tools.join(", ") : (p.kind === "intent" ? "none — denies every tool for the class" : "—")}
+                  {p.allow_tools_known === false
+                    ? "not readable — the allowlist is written as an expression"
+                    : p.allow_tools.length ? p.allow_tools.join(", ") : (p.kind === "intent" ? "none — denies every tool for the class" : "—")}
                 </Row>
                 <Row label="Refinements">
                   {p.refinements.length ? p.refinements.map((r) => REFINEMENT_LABEL[r] ?? r).join(", ") : "none"}

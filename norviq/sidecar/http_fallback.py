@@ -5,19 +5,60 @@
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
+from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.sidecar.proxy import _coerce_depth
 from norviq.engine.identity import SPIFFEResolver
-from norviq.sdk.core.events import ToolCallEvent
+from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.telemetry.exporter import mount_metrics_endpoint
 
 log = structlog.get_logger()
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+async def _remote_identity(request: Request, body: dict, cache) -> AgentIdentity | JSONResponse:
+    """Authenticate an OFF-pod caller, or refuse it. Returns the identity to evaluate under, or the
+    response to send. Never evaluates anything itself."""
+    peer = request.client.host if request.client else ""
+    if str(settings.sidecar_remote_callers).lower() != "token":
+        log.warning("nrvq.sidecar.http.remote_refused", peer=peer, code="NRVQ-SDC-3040")
+        return JSONResponse(status_code=403, content={"action": "drop", "error": "remote_callers_not_accepted"})
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        log.warning("nrvq.sidecar.http.remote_unauthenticated", peer=peer, code="NRVQ-SDC-3041")
+        return JSONResponse(status_code=401, content={"action": "drop", "error": "missing_bearer_token"})
+    # Imported here so the injected sidecar, which never takes this branch, does not load the API's auth.
+    from norviq.api.auth import bind_caller_identity, decode_token
+    try:
+        user = await decode_token(token.strip(), cache)
+    except Exception as exc:  # noqa: BLE001 — any verification failure is a 401, never an evaluation
+        log.warning("nrvq.sidecar.http.remote_token_rejected", peer=peer, error=type(exc).__name__,
+                    code="NRVQ-SDC-3042")
+        return JSONResponse(status_code=401, content={"action": "drop", "error": "invalid_token"})
+    try:
+        bound = bind_caller_identity(user, body.get("agent_identity") if isinstance(body.get("agent_identity"), dict) else None)
+        return AgentIdentity.model_validate(bound)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"action": "drop", "error": "identity_not_permitted"})
+    except Exception as exc:  # noqa: BLE001 — an identity the credential cannot back is a refusal, not a 500
+        log.warning("nrvq.sidecar.http.remote_identity_invalid", peer=request.client.host if request.client else "",
+                    error=type(exc).__name__, code="NRVQ-SDC-3044")
+        return JSONResponse(status_code=422, content={"action": "drop", "error": "invalid_agent_identity"})
 
 
 def create_http_fallback(
@@ -49,10 +90,21 @@ def create_http_fallback(
         session_id = str(data.get("session_id", ""))
         # See norviq/sidecar/proxy.py _coerce_depth: this PEP had the same defect.
         call_depth = _coerce_depth(data.get("call_depth"))
+        # Off-pod callers are authenticated before anything is evaluated, and evaluated as THEMSELVES.
+        # The pod-local app keeps the resolver's identity — the pod's own, which is who it is.
+        caller: AgentIdentity | None = None
+        peer = request.client.host if request.client else ""
+        if not _is_loopback(peer):
+            cache = getattr(getattr(interceptor, "_evaluator", None), "_cache", None)
+            outcome = await _remote_identity(request, data, cache)
+            if isinstance(outcome, JSONResponse):
+                return outcome
+            caller = outcome
         try:
             decision = await interceptor.intercept(tool_name, tool_params, session_id,
-                                                   framework="sidecar-http", call_depth=call_depth)
-            identity = await resolver.resolve()
+                                                   framework="sidecar-http", call_depth=call_depth,
+                                                   identity=caller)
+            identity = caller or await resolver.resolve()
             event = ToolCallEvent(
                 tool_name=tool_name,
                 tool_params=tool_params if isinstance(tool_params, dict) else {},

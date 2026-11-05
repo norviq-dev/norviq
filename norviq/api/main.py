@@ -15,14 +15,16 @@ if sys.platform == "win32":
 
 from norviq.api.audit_hub import AuditHub, bind_peer_publisher
 from norviq.api.audit_retention import RetentionPruner
-from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
+from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db, ping_db
 from norviq.api.path_timing import PathTimingMiddleware
 from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
+from norviq.api import session_revocation
 from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, baseline_router, cluster_info, compliance_view, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, tools, version
 from norviq.config import settings
+from norviq.startup_retry import connect_with_backoff
 from norviq.logging_setup import configure_logging
 from norviq.api.auth import warn_if_identity_binding_is_partial
 from norviq.engine.audit_emitter import AuditEmitter
@@ -51,24 +53,9 @@ log.info(
 )
 
 
-async def _connect_with_backoff(coro_factory, name: str, retry_code: str, fail_code: str, attempts: int = 5):
-    """Retry a startup connection with exponential backoff (1,2,4,8,16s).
-
-    Defense-in-depth atop the initContainers: a backend may accept TCP before it is
-    query-ready, so retry rather than crash. Raises after the final attempt so the pod
-    restarts (initContainers should normally prevent reaching that).
-    """
-    delay = 1
-    for attempt in range(1, attempts + 1):
-        try:
-            return await coro_factory()
-        except Exception as exc:
-            if attempt == attempts:
-                log.error(f"nrvq.startup.{name}_failed", attempts=attempt, error=str(exc), code=fail_code)
-                raise
-            log.warning(f"nrvq.startup.{name}_retry", attempt=attempt, delay=delay, error=str(exc), code=retry_code)
-            await asyncio.sleep(delay)
-            delay *= 2
+# The shared bounded startup retry (1/2/4/8 s, then raise). Kept under this name: the call sites below
+# are what tests/api/test_revocation_durable.py reads to check the startup order.
+_connect_with_backoff = connect_with_backoff
 
 
 # SCHEMA OWNERSHIP: there is no Alembic in this product, deliberately. Schema comes from
@@ -124,13 +111,36 @@ async def lifespan(app: FastAPI):
                 "Set NRVQ_AUTH_ADMIN_PASSWORD (NRVQ_REQUIRE_STRONG_SECRET is enabled)."
             )
     log.info("nrvq.startup.db_engine_creating", code="NRVQ-DB-DEBUG-1")
-    await _connect_with_backoff(init_db, "init_db", retry_code="NRVQ-DB-9035", fail_code="NRVQ-DB-9034")
+    # init_db only builds SQLAlchemy's lazy engine and opens no socket, so retrying it could never fail:
+    # the first real connection used to be create_tables(), which retries a lock timeout only, and a
+    # refused Postgres killed startup in 0.28 s with no retry. ping_db opens one, under the backoff.
+    await init_db()
+    await _connect_with_backoff(ping_db, "init_db", retry_code="NRVQ-DB-9035", fail_code="NRVQ-DB-9034")
     log.info("nrvq.startup.db_engine_created", code="NRVQ-DB-DEBUG-2")
     await create_tables()
     app.state.cache = RedisCache()
     await _connect_with_backoff(
         app.state.cache.connect, "cache_connect", retry_code="NRVQ-REG-9035", fail_code="NRVQ-REG-9034"
     )
+    # LOGOUT HAS TO SURVIVE A REDIS LOSS. Revocations are persisted in Postgres, and this process
+    # loads every live one into its in-process mirror BEFORE it serves a request. Not an advisory warm
+    # like the ones further down: a process answering "not revoked" from an empty mirror, beside a Redis
+    # that came back empty, is exactly how a logged-out token came back to life. So a failed load is
+    # retried and then refuses startup — the posture create_tables() above already has for the same
+    # database — and the old pods keep serving until a new one can. Each attempt is bounded
+    # (session_revocation._LOAD_TIMEOUT_S), so a database that does not answer is retried, not
+    # waited on for asyncpg's 60s connect timeout per attempt. The same pass imports what only Redis
+    # holds (0.2.5's revocations, on the first boot) and repairs a wiped Redis for the readers that have
+    # nothing else (the engine's remote-caller path, a rolled-back 0.2.5 pod).
+    session_revocation.bind_store(get_session)
+    loaded = await _connect_with_backoff(
+        lambda: session_revocation.sync(app.state.cache),
+        "revocations_load",
+        retry_code="NRVQ-AUTH-14025",
+        fail_code="NRVQ-AUTH-14029",
+    )
+    log.info("nrvq.auth.revocations_synced", entries=loaded, startup=True, code="NRVQ-AUTH-14026")
+    app.state.revocation_sync_task = asyncio.create_task(session_revocation.sync_forever(app.state.cache))
     app.state.evaluator = OPAEvaluator(app.state.cache)
     if settings.opa_mode == "server":
         await app.state.evaluator.opa.start()
@@ -151,6 +161,16 @@ async def lifespan(app: FastAPI):
         log.info("nrvq.startup.warm_cache_starting", code="NRVQ-DB-DEBUG-5")
         await app.state.loader.warm_cache()
         log.info("nrvq.startup.warm_cache_done", code="NRVQ-DB-DEBUG-6")
+        # Saved baseline controls are a compiled artefact; re-render them with THIS release's compiler
+        # so a module from an earlier release (or earlier defaults) does not keep deciding. It never
+        # blocks startup; a module another compiler rendered cannot supersede the chart's baseline anyway.
+        try:
+            from norviq.api.routers.baseline_router import rematerialize_controls
+
+            await rematerialize_controls(app.state.loader)
+        except Exception as exc:  # noqa: BLE001 — advisory; never block startup
+            log.error("nrvq.startup.baseline_controls_rematerialize_failed", error=str(exc),
+                      code="NRVQ-API-7142")
 
     # HA: every API replica subscribes to the policy-mutation stream so a create/apply/delete on ANY replica
     # propagates to all of them within pub/sub latency (~ms) — without this, a peer replica keeps enforcing
@@ -198,18 +218,23 @@ async def lifespan(app: FastAPI):
 
     bind_peer_publisher(app.state.cache.publish_audit_record)
     app.state.audit_fanout_task = asyncio.create_task(_audit_fanout_loop())
-    # Seed the per-ns posture mirror from persisted NamespaceSettings so pre-existing rows
-    # enforce after a restart / Redis flush (best-effort; the evaluator falls back to global config on a miss).
+    # Seed the per-ns posture mirror from persisted NamespaceSettings so pre-existing rows enforce after a
+    # store restart or flush. Only at process start: a flush while this process runs leaves posture absent
+    # (the evaluator falls back to global config) until an API process starts again (trust-score-design §5).
+    # Retried like the freeze/cap warm below (norviq.startup_retry.warm_with_backoff), ERROR when exhausted.
     try:
-        await settings_router.warm_ns_settings(app.state.cache)
-    except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
+        await settings_router.warm_ns_settings_at_startup(app.state.cache)
+    except Exception as exc:  # noqa: BLE001 — never block startup; the helper itself does not raise
         log.error("nrvq.startup.ns_settings_warm_failed", error=str(exc), code="NRVQ-API-7138")
-    # SECURITY (trust fail-open fix): re-seed durable admin freeze/cap from the DB into Redis so a Redis
-    # restart/flush cannot leave a killed/capped agent running unpoliced.
+    # SECURITY (trust fail-open fix): re-seed durable admin freeze/cap from the DB into Redis so a store that
+    # lost them before this process started does not leave a killed/capped agent running unpoliced. A loss
+    # AFTER it started is not covered: nothing re-seeds until an API process starts again (§5 known gap).
+    # Retried with a bounded backoff (norviq.startup_retry.warm_with_backoff) and logged at ERROR
+    # (NRVQ-API-7035) when every attempt fails: nothing else writes these back while this process runs.
     try:
-        from norviq.api.routers.agents import warm_agent_overrides
-        await warm_agent_overrides(app.state.cache)
-    except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
+        from norviq.api.routers.agents import warm_agent_overrides_at_startup
+        await warm_agent_overrides_at_startup(app.state.cache)
+    except Exception as exc:  # noqa: BLE001 — never block startup; the helper itself does not raise
         log.error("nrvq.startup.agent_overrides_warm_failed", error=str(exc), code="NRVQ-API-7035")
     # Seed the evaluator's promoted-verb map. `_derived_input` is synchronous (it runs inside the hot
     # path's _build_input), so it can never await a DB read — the map has to be warmed out-of-band here
@@ -245,13 +270,18 @@ async def lifespan(app: FastAPI):
     await app.state.fleet_puller.start()  # pull+verify+apply signed bundles (no-op unless configured)
     log.info("nrvq.api.started", port=settings.api_port, code="NRVQ-API-7000")
     yield
-    sync_task = getattr(app.state, "policy_sync_task", None)
-    if sync_task is not None:
+    for task_name in ("policy_sync_task", "revocation_sync_task"):
+        sync_task = getattr(app.state, task_name, None)
+        if sync_task is None:
+            continue
         sync_task.cancel()
         try:
             await sync_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001 — shutdown best-effort
             pass
+    # Logouts this process could not get into Postgres: one last try, and an ERROR if any are left
+    # (NRVQ-AUTH-14031). Before close_db, which it needs.
+    await session_revocation.close()
     await app.state.fleet_puller.stop()
     await app.state.fleet_relay.stop()
     await app.state.siem_forwarder.stop()
@@ -270,7 +300,9 @@ def create_app() -> FastAPI:
     """Create the Norviq FastAPI app."""
     app = FastAPI(
         title="Norviq API",
-        version="0.1.0",
+        # The installed package version, read the same way GET /api/v1/version reads it. This was the
+        # literal "0.1.0" through 0.2.5, so /openapi.json and /docs reported a version that never shipped.
+        version=version._version(),
         description="Runtime security for LLM agent tool calls",
         lifespan=lifespan,
     )

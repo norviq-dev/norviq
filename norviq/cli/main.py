@@ -267,6 +267,20 @@ def agent_freeze(ctx: click.Context, spiffe_id: str) -> None:
     ctx.obj["client"].put(f"/api/v1/agents/{spiffe_id}/trust", {"score": 0.0})
     click.echo(f"Agent frozen: {spiffe_id}")
     _ok("agent.freeze")
+@agent.command("reset-history")
+@click.argument("spiffe_id")
+@click.pass_context
+def agent_reset_history(ctx: click.Context, spiffe_id: str) -> None:
+    """Clear an agent's behavioural history and profile (audited; keeps any freeze or cap)."""
+    data = ctx.obj["client"].post(f"/api/v1/agents/{spiffe_id}/trust/reset", {})
+    if ctx.obj["output"] == "json":
+        fmt_json(data)
+    else:
+        click.echo(f"History reset: {data.get('spiffe_id')} (score before: {data.get('score_before')}, "
+                   f"violations: {data.get('violation_count')}, cleared: {', '.join(data.get('keys_cleared') or []) or 'nothing'})")
+        if data.get("frozen") or data.get("trust_cap") is not None:
+            click.echo("Still frozen or capped: lift it with `norviq agent reset-trust <id> --score 1.0`.")
+    _ok("agent.reset-history")
 @cli.group()
 def config() -> None:
     """Manage CLI settings."""

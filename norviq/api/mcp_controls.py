@@ -43,6 +43,8 @@ import base64
 import json
 import re
 
+from norviq.engine.empty_literals import braces
+
 SCOPE = "__mcp__"
 RULE_UNREGISTERED = "mcp_unregistered_server"
 RULE_UNAPPROVED_WRITE = "mcp_unapproved_write_server"
@@ -118,8 +120,11 @@ def compile(  # noqa: A001 — mirrors baseline.compile and egress_allowlist.com
         "unregistered_decision": unregistered_decision, "write_decision": write_decision,
     }).encode()).decode()
 
-    known_lit = ", ".join(f'"{s}"' for s in known)
-    write_lit = ", ".join(f'"{s}"' for s in write_ok)
+    # `braces`, not a bare `{}`: an empty registry is the fresh-install default and a registry with no
+    # writable server is ordinary, and on OPA 1.21 `not writable_servers[...]` over a bare `{}` does not
+    # compile — which failed every MCP call in the namespace closed (norviq/engine/empty_literals.py).
+    known_lit = braces([f'"{s}"' for s in known])
+    write_lit = braces([f'"{s}"' for s in write_ok])
     unreg_head = "blocks" if unregistered_decision == "block" else "audits"
     write_head = "blocks" if write_decision == "block" else "audits"
 
@@ -139,8 +144,8 @@ default decision = "allow"
 default rule_id = "default_allow"
 default reason = "Allowed"
 
-registered_servers = {{{known_lit}}}
-writable_servers = {{{write_lit}}}
+registered_servers = {known_lit}
+writable_servers = {write_lit}
 
 # Only ever true for a call that CAME THROUGH the MCP proxy. Every other call in the estate — SDK,
 # sidecar, webhook — has no `input.mcp` and is untouched by this module.

@@ -32,13 +32,13 @@ export function FrameworkEmblem({ framework, size = 24 }: { framework: string; s
     case "nist":
       return (
         <svg {...common} data-testid="emblem-nist" viewBox="0 0 44 44">
-          <text x="22" y="27" textAnchor="middle" fontFamily="Outfit, sans-serif" fontSize="13" fontWeight="800" fill="currentColor" letterSpacing="0.5">NIST</text>
+          <text x="22" y="27" textAnchor="middle" style={{ fontFamily: "var(--font-sans)" }} fontSize="13" fontWeight="800" fill="currentColor" letterSpacing="0.5">NIST</text>
         </svg>
       );
     case "iso":
       return (
         <svg {...common} data-testid="emblem-iso" viewBox="0 0 44 44">
-          <text x="22" y="27" textAnchor="middle" fontFamily="Outfit, sans-serif" fontSize="14.5" fontWeight="800" fill="currentColor" letterSpacing="0.5">ISO</text>
+          <text x="22" y="27" textAnchor="middle" style={{ fontFamily: "var(--font-sans)" }} fontSize="14.5" fontWeight="800" fill="currentColor" letterSpacing="0.5">ISO</text>
         </svg>
       );
     case "eu":

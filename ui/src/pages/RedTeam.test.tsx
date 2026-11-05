@@ -383,3 +383,132 @@ it("'got-through only' never lists a row the same table calls not-a-miss", async
   expect(shown).toBe(failed);                       // every listed row really is a miss
   expect(screen.queryByText(/not enabled here/i)).toBeNull();
 });
+
+// --- The table reads the server's verdict, so the filter count IS the scorecard number -----------
+//
+// The page used to re-derive "got through" as `!passed && applicable !== false`. A throttled or faulted
+// block PASSES (actual block == expected block) and the server counts it as got-through; a monitored
+// detection FAILS and the server counts it as would-block. A kind run had 17 `block /
+// rate_limit_exceeded` red-team rows, and "Got through" read above zero over a filter listing none.
+
+function servedRow(attack_id: string, o: Record<string, unknown>) {
+  return {
+    attack_id, attack_name: `Attack ${attack_id}`, category: "sql_injection", agent_class: "finance-agent",
+    namespace: "default", expected: "block", applicable: true, atlas_technique: "AML.T0048",
+    atlas_technique_name: "External Harms", owasp_control: null, owasp_control_name: null, ...o
+  };
+}
+
+// Rows and efficacy exactly as norviq/api/redteam_efficacy.py serves them for this run.
+function verdictRun() {
+  return latest({
+    total: 7, passed: 3, failed: 4, pass_rate: 42.9,
+    results: [
+      servedRow("SQL-001", { actual: "block", rule_id: "deny_sql_injection", passed: true, outcome: "caught" }),
+      servedRow("PI-001", { actual: "block", rule_id: "rate_limit_exceeded", passed: true, outcome: "got_through" }),
+      servedRow("DL-001", { actual: "block", rule_id: "evaluator_timeout", passed: true, outcome: "got_through" }),
+      servedRow("PII-001", { actual: "audit", rule_id: "pii_detection", passed: false, outcome: "would_block" }),
+      servedRow("FIN-001", { category: "sector_policy", actual: "allow", rule_id: "default_allow", passed: false,
+        applicable: false, outcome: "not_enabled" }),
+      servedRow("RL-001", { expected: "allow", actual: "block", rule_id: "rate_limit_exceeded", passed: false,
+        outcome: "non_enforcement" }),
+      servedRow("SH-001", { agent_class: "scorer", actual: "allow", rule_id: "default_allow", passed: false,
+        outcome: "synthetic" })
+    ],
+    efficacy: {
+      overall: { total: 4, caught: 1, would_block: 1, got_through: 2, proven_blocking_pct: 25.0, detected_pct: 50.0 },
+      by_technique: [
+        { technique_id: "AML.T0048", technique_name: "External Harms", total: 4, caught: 1, would_block: 1, got_through: 2, proven_blocking_pct: 25.0 }
+      ],
+      by_owasp: [],
+      non_enforcement: 1,
+      sector_not_enabled: 1,
+      excluded_synthetic: 1
+    }
+  });
+}
+
+function rowFor(attackId: string): HTMLElement {
+  const row = screen.getAllByTestId("redteam-attack-row").find((r) => within(r).queryByText(attackId));
+  if (!row) throw new Error(`no row for ${attackId}`);
+  return row;
+}
+
+it("the got-through filter lists exactly the scorecard's got-through rows — throttles in, monitored detections out", async () => {
+  serveMcp(verdictRun());
+  const scored = Number((await screen.findByTestId("redteam-gotthrough")).textContent?.replace(/\D/g, ""));
+  expect(scored).toBe(2);
+
+  // Before filtering: the throttled and the faulted block are the misses, though both `passed`.
+  expect(within(rowFor("PI-001")).getByTestId("redteam-row-failed")).toBeInTheDocument();
+  expect(within(rowFor("DL-001")).getByTestId("redteam-row-failed")).toBeInTheDocument();
+  // The audited detection is NOT a miss, though it did not `pass`.
+  const audited = rowFor("PII-001");
+  expect(within(audited).queryByTestId("redteam-row-failed")).toBeNull();
+  expect(within(audited).queryByText(/got through/i)).toBeNull();
+  expect(within(audited).getByTestId("redteam-row-monitored")).toHaveTextContent(/detected — monitored/);
+  expect(within(audited).getByTestId("redteam-row-monitored")).toHaveAttribute("title", expect.stringMatching(/Monitor/));
+  expect(within(rowFor("FIN-001")).getByText(/not enabled here/)).toBeInTheDocument();
+
+  const filter = within(screen.getByTestId("redteam-failed-filter")).getByRole("checkbox");
+  fireEvent.click(filter);
+  expect(filter).toBeChecked();
+  const shown = screen.getAllByTestId("redteam-attack-row");
+  expect(shown).toHaveLength(scored);
+  expect(screen.getAllByTestId("redteam-row-failed")).toHaveLength(scored);
+  expect(shown.map((r) => within(r).getByText(/^[A-Z]+-\d+$/).textContent)).toEqual(["PI-001", "DL-001"]);
+});
+
+it("a row stored without `outcome` falls back to the old verdict — an inapplicable miss stays out of the filter", async () => {
+  // Rows from runs written before the field existed carry no `outcome`; the page then falls back to
+  // `!passed && applicable !== false`. That branch had no test: making it always return "got_through"
+  // left every RedTeam test green.
+  const base = latest();
+  serveMcp({
+    ...base,
+    results: [
+      ...base.results,
+      { attack_id: "FIN-002", attack_name: "Sector attack, pack not enabled", category: "sector_policy",
+        agent_class: "finance-agent", namespace: "default", expected: "block", actual: "allow",
+        passed: false, applicable: false, rule_id: "default_allow",
+        atlas_technique: "AML.T0048", atlas_technique_name: "External Harms", owasp_control: null, owasp_control_name: null }
+    ]
+  });
+  await screen.findByTestId("redteam-attacks");
+  expect(within(rowFor("FIN-002")).getByText(/not enabled here/)).toBeInTheDocument();
+  expect(within(rowFor("PI-001")).getByTestId("redteam-row-failed")).toBeInTheDocument();
+  fireEvent.click(within(screen.getByTestId("redteam-failed-filter")).getByRole("checkbox"));
+  expect(screen.getAllByTestId("redteam-attack-row").map((r) => within(r).getByText(/^[A-Z]+-\d+$/).textContent)).toEqual(["PI-001"]);
+});
+
+it("a new run resets the got-through filter and the pager in the same render that shows it", async () => {
+  // The reset used to live in an effect keyed on run_id, which runs only AFTER the new run is on screen —
+  // so a click in that gap was undone (2 of 32 lost clicks with four vitest processes in parallel). It is
+  // done while rendering now; this pins that it still happens.
+  let current = latest({ run_id: "run-1" });
+  server.use(
+    targetsHandler(),
+    http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(current)),
+    http.get("*/api/v1/redteam/results", () => HttpResponse.json(historyPayload())),
+    http.post("*/api/v1/redteam/suite", () => { current = latest({ run_id: "run-2" }); return HttpResponse.json(current); })
+  );
+  renderPage();
+  await screen.findByTestId("redteam-attacks");
+  const filter = () => within(screen.getByTestId("redteam-failed-filter")).getByRole("checkbox");
+  fireEvent.click(filter());
+  expect(filter()).toBeChecked();
+  fireEvent.click(screen.getByTestId("redteam-run"));
+  await waitFor(() => expect(screen.getByTestId("redteam-run")).toBeEnabled());
+  await waitFor(() => expect(filter()).not.toBeChecked());
+  expect(screen.getAllByTestId("redteam-attack-row")).toHaveLength(2);
+});
+
+it("rows the scorecard does not score say why, in a muted label — never red", async () => {
+  serveMcp(verdictRun());
+  await screen.findByTestId("redteam-attacks");
+  const runtime = rowFor("RL-001");
+  const synthetic = rowFor("SH-001");
+  expect(runtime).toHaveTextContent(/runtime control, not scored/);
+  expect(synthetic).toHaveTextContent(/synthetic identity, not scored/);
+  for (const r of [runtime, synthetic]) expect(within(r).queryByTestId("redteam-row-failed")).toBeNull();
+});

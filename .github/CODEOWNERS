@@ -1,0 +1,4 @@
+# GitHub requests a review from the code owner on pull requests opened by anyone else. This list names
+# the same people as MAINTAINERS.md. There is one maintainer, so one owner covers the whole tree.
+# Branch protection does not require code-owner review today; see GOVERNANCE.md, "How code lands".
+* @Santoshkumarpuppala

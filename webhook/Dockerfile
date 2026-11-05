@@ -16,11 +16,12 @@ COPY presets ./presets
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o webhook .
 RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /build/.build_git_sha
 
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian13
 # Uniform build provenance across ALL shipped images (mirrors Dockerfile.api), not just api.
 ARG NRVQ_GIT_SHA=unknown
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
-LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA} \
+      org.opencontainers.image.licenses=Apache-2.0
 COPY --from=builder /build/webhook /webhook
 COPY --from=builder /build/presets /app/presets
 COPY --from=builder /build/.build_git_sha /app/.build_git_sha

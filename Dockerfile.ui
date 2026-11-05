@@ -14,7 +14,7 @@ RUN npm run build
 
 # The unprivileged nginx image runs as uid 101 (non-root) and binds :8080, so the console
 # container no longer runs as root and the pod can drop ALL Linux caps (no NET_BIND_SERVICE needed).
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.30-alpine
 # apk upgrade + the file COPY/chown steps need root; we drop back to uid 101 (the image default) at the end.
 USER root
 # Patch fixable OS-package CVEs in the base at build time (e.g. curl/libcurl HIGHs) so the shipped
@@ -25,11 +25,14 @@ ARG NRVQ_GIT_SHA=dev
 # Carry the SHA as a runtime env + OCI revision label (broadcast by CI) so the UI image is
 # NO-STALE-checkable like api/engine/webhook.
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
-LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA} \
+      org.opencontainers.image.licenses=Apache-2.0
 RUN apk update && apk upgrade --no-cache && echo "os-patched @ ${NRVQ_GIT_SHA}"
 COPY --from=builder /build/dist /usr/share/nginx/html
 COPY ui/nginx.conf /etc/nginx/conf.d/default.conf
 COPY ui/docker-entrypoint.sh /docker-entrypoint.d/99-nrvq-config.sh
+# The console bundles third-party packages; their licence texts travel with the image (not served over HTTP).
+COPY ui/THIRD_PARTY_NOTICES.txt LICENSE NOTICE /usr/share/licenses/norviq-ui/
 # The entrypoint writes config.js (html dir) + fleet-proxy.conf (/etc/nginx) at runtime as uid 101, so
 # those paths must be group-writable and owned by the nginx group. Single-cluster default: an empty
 # fleet-proxy include so nginx starts with no fleet-api dependency.

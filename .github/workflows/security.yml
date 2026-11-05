@@ -6,9 +6,9 @@ name: Security (SAST)
 # This workflow does code / deps / secrets / IaC (filesystem + config) analysis only.
 #
 # Start-green, then ratchet (see docs/engineering/security-baseline.md):
-#   - Diff-aware jobs (secrets, python-sast) fail-closed on NEW high/critical only — pre-existing
-#     findings never fail a PR because only the PR range / changed files are scanned. python-sast's
-#     semgrep step also scans ui/src.
+#   - Diff-aware jobs (secrets, python-sast) fail-closed on NEW findings only (bandit runs -ll, so
+#     medium and high) — pre-existing findings never fail a PR because only the PR range / changed
+#     files are scanned. python-sast's semgrep step also scans ui/src.
 #   - ts-sast (eslint-security) scans the WHOLE ui/src fail-closed (any finding fails the build); it
 #     starts green today. Rules live in ui/eslint.config.js (eslint-plugin-security).
 #   - Whole-repo jobs (deps-audit, iac) start REPORT-ONLY (soft-fail) until the baseline is triaged
@@ -90,7 +90,7 @@ jobs:
           python-version: "3.11"
       - name: install
         run: pip install bandit semgrep
-      - name: bandit (changed .py, high severity, fail-closed)
+      - name: bandit (changed .py, medium and high severity, fail-closed)
         run: |
           # Same empty-BASE trap: on a push this expanded to `git diff ...HEAD`, which returns nothing, so
           # the step printed "no changed python" for a push that changed Python.
@@ -143,14 +143,67 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
-      - name: pip-audit (report)
-        run: pip install pip-audit && pip-audit -r requirements.txt || true
+      - name: pip-audit (shipped closure)
+        # There is no requirements.txt at the repo root and there must not be one — pyproject +
+        # uv.lock are the source of truth. The previous step audited that absent file, errored, and
+        # `|| true` reported success; it had never audited a single package. The export is the same
+        # one fossa.yml uses: `.[spiffe]`, what Dockerfile.api and Dockerfile.engine install. The floor
+        # refuses to "pass" on an implausibly small closure, because a scan of nothing and a scan with
+        # no findings are the same green.
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv export --frozen --no-dev --extra spiffe --no-emit-project --no-hashes > requirements-runtime.txt
+          n=$(grep -cE '^[a-zA-Z0-9]' requirements-runtime.txt)
+          echo "runtime closure: $n packages"
+          test "$n" -ge 40 || { echo "closure of $n packages is implausibly small; refusing to audit it"; exit 1; }
+          pip install --quiet pip-audit
+          pip-audit -r requirements-runtime.txt
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
       - name: npm audit high (report)
         working-directory: ui
         run: npm audit --audit-level=high || true
+      # The optional extras. SECURITY.md said they "are audited with `uv export --extra <name>`", and
+      # nothing ran that: this job and FOSSA both read the runtime export only. On 2026-10-30 an audit
+      # by hand found 69 advisory matches in the extras that a version bump could close. Each extra is
+      # exported and audited here, so the next one shows in the job that exists to show it. Last, and
+      # `if: always()`, so a finding in the shipped closure above does not skip it, and its own findings
+      # do not skip npm audit.
+      #
+      # Each export is fully pinned, so pip-audit reads it as written (--no-deps --disable-pip) instead of
+      # pip-installing it into a scratch venv: 205 packages for `frameworks`, and every extra takes a few
+      # seconds this way (all nine took 8s locally). Markers are evaluated for this job's Python, 3.11, so
+      # a pin the lock keeps only for 3.12+ (numpy 2.5.1, scipy 1.18.0) or for Windows (pywin32) is not
+      # audited here.
+      #
+      # The ids in ACCEPTED (scripts/check_fossa_issues.py, which a test holds to SECURITY.md's table)
+      # are ignored. They are the advisories already reviewed and written up: chromadb x4 and
+      # semantic-kernel x2. Without that this step is red on every run and says nothing new; with it, it
+      # turns red when an advisory nobody has reviewed appears. The shipped-closure step above ignores
+      # nothing, because none of those packages ships. tests/test_deps_audit.py holds the list below to
+      # the extras pyproject.toml declares.
+      - name: pip-audit (each optional extra)
+        if: always()
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+          pip install --quiet pip-audit
+          ignore=$(python3 -c 'import sys; sys.path.insert(0, "scripts"); from check_fossa_issues import ACCEPTED; print(" ".join("--ignore-vuln " + i for i in sorted(ACCEPTED)))')
+          failed=""
+          for extra in dev spiffe langchain langgraph crewai autogen mcp semantic-kernel frameworks; do
+            echo "::group::extra: $extra"
+            if ! uv export --frozen --no-dev --extra "$extra" --no-emit-project --no-hashes > "requirements-$extra.txt"; then
+              failed="$failed $extra"
+            elif n=$(grep -cE '^[a-zA-Z0-9]' "requirements-$extra.txt"); [ "$n" -lt 40 ]; then
+              echo "closure of $n packages is implausibly small; refusing to audit it"; failed="$failed $extra"
+            elif ! pip-audit --no-deps --disable-pip -r "requirements-$extra.txt" $ignore; then
+              failed="$failed $extra"
+            fi
+            echo "::endgroup::"
+          done
+          test -z "$failed" || { echo "::error::pip-audit found unreviewed advisories in, or could not audit:$failed"; exit 1; }
 
   # ── IaC / Helm / CRDs: checkov + kube-linter + trivy config (filesystem, no image). REPORT-ONLY. ──
   iac:

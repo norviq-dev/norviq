@@ -328,3 +328,28 @@ def test_the_requirement_follows_the_deployment_not_a_second_hardcoded_list(
         headers={"Authorization": f"Bearer {_token('admin')}"},
     )
     assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("spiffe_id", ["spiffe://", "spiffe://   ", "plain-id"])
+def test_a_key_cannot_be_bound_to_an_identity_no_admin_control_can_cover(spiffe_id) -> None:
+    """FAIL-ON-BUG: POST /keys accepted any spiffe_id up to 512 characters, the bare prefix included. The
+    evaluator now refuses such an identity (invalid_spiffe_identity) and PUT /agents/{id}/trust cannot freeze
+    it, so the key would be useless at best; it is refused at creation (identity.is_controllable_spiffe_id)."""
+    resp = _client([]).post(
+        "/api/v1/keys",
+        json={"name": "agent", "namespace": "x", "role": "service", "agent_class": "c", "spiffe_id": spiffe_id},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert "spiffe" in str(resp.json()["detail"])
+
+
+def test_a_key_bound_to_an_operator_chosen_identity_is_still_issued() -> None:
+    rows: list = []
+    resp = _client(rows).post(
+        "/api/v1/keys",
+        json={"name": "agent", "namespace": "x", "role": "service", "agent_class": "c",
+              "spiffe_id": "spiffe://acme/agent [prod]"},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert resp.status_code == 200, resp.text

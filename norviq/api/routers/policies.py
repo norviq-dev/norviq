@@ -34,6 +34,11 @@ router = APIRouter()
 # `__cluster__` namespace (the cluster-wide baseline) is likewise undeletable.
 _RESERVED_DELETE_CLASSES = ("__baseline__", "__controls__", "__egress__", "__mcp__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
 _RESERVED_NAMESPACES = ("__cluster__",)
+# Managed scopes CREATE refuses: each is written only by its own router (see create_policy for why each
+# one). Named here, not inline, so the fleet's reserved set can be held to it by a test — the fleet hub
+# reserved only `__baseline__` and `__pack__`, and a bundle could write `__controls__`, which replaces a
+# cluster's chart baseline.
+_MANAGED_SCOPES = ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__", "__mcp__")
 # CONSOLE VIEW SENTINELS — not namespaces. The console's global picker sends `namespace="all"` to mean
 # "aggregate every namespace" (see evaluator._collect_candidates / policy_loader.namespaces_for_class, which
 # both resolve it for READS and explicitly exclude it from the real-namespace set). No agent ever carries it,
@@ -358,6 +363,7 @@ async def list_policies(
 
 _LAYER_LABELS = {
     "__baseline__": "namespace baseline",
+    "__controls__": "baseline controls (console)",
     "__pack__": "sector pack (overlay)",
     "__guardrail__": "tool-allowlist guardrail (overlay)",
     "__pack_override__": "pack override (overlay)",
@@ -373,7 +379,11 @@ async def effective_policy(
 ) -> dict:
     """The EFFECTIVE policy stack governing a (namespace, agent_class) right now — the ordered candidate
     layers the evaluator ACTUALLY resolves. Strictly read-only/derived: it calls the same
-    `evaluator._collect_candidates` enforcement uses, so it can never drift from real behaviour."""
+    `evaluator._collect_candidates` enforcement uses, so it can never drift from real behaviour.
+
+    A chart baseline that the namespace's saved control effects supersede is not a layer — it decides
+    nothing — so it is reported under `superseded` instead, naming what replaced it. Leaving it out
+    silently would read as "no chart baseline here"; listing it as a layer would claim it enforces."""
     from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 
     namespace = scoped_namespace(user, namespace) or "default"
@@ -384,8 +394,10 @@ async def effective_policy(
             spiffe_id=f"spiffe://norviq/ns/{namespace}/sa/{agent_class}", namespace=namespace, agent_class=agent_class),
         session_id="effective",
     )
-    candidates = await evaluator._collect_candidates(event)
+    candidates = await evaluator._collect_candidates(event, explain=True)
+    superseding = {str(c["superseded_by"]) for c in candidates if c.get("superseded_by")}
     layers = []
+    superseded = []
     for c in candidates:
         key = str(c["key"])
         ns, _, ac = key.partition(":")
@@ -397,8 +409,14 @@ async def effective_policy(
             # A per-class remediation overlay key is dynamic ("<class>__remediation__"), so it
             # can't be a literal _LAYER_LABELS entry — label it human-readably rather than showing the raw key.
             label = "compliance remediation (overlay)"
+        elif key in superseding:
+            label = "namespace baseline (console control effects)"
         else:
             label = _LAYER_LABELS.get(ac, ac)
+        if c.get("superseded_by"):
+            superseded.append({"scope": key, "label": label, "priority": int(c.get("priority", 100)),
+                               "superseded_by": str(c["superseded_by"])})
+            continue
         layers.append({
             "scope": key, "label": label, "priority": int(c.get("priority", 100)),
             # Use the provenance flag _collect_candidates tags at construction, not the key-suffix
@@ -407,9 +425,13 @@ async def effective_policy(
             "overlay": bool(c.get("overlay", False)),
         })
     log.info("nrvq.api.policies.effective", namespace=namespace, agent_class=agent_class,
-             layers=len(layers), code="NRVQ-API-7100")
+             layers=len(layers), superseded=len(superseded), code="NRVQ-API-7100")
+    note = "overlay layers are tighten-only (can only make a decision stricter)"
+    if superseded:
+        note += ("; the saved baseline control effects replace the chart's namespace baseline, "
+                 "so each control does what the console shows")
     return {"namespace": namespace, "agent_class": agent_class, "layers": layers,
-            "note": "overlay layers are tighten-only (can only make a decision stricter)"}
+            "superseded": superseded, "note": note}
 
 
 @router.get("/policies/{namespace}/{agent_class}")
@@ -536,7 +558,7 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     # embedded `# nrvq-mcp-registry/v1:` header that the console reads the registry back from, and a
     # hand-written module at that scope would enforce with the weight of an operator guardrail while
     # the MCP Servers page could not describe it at all.
-    if agent_class in ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__", "__mcp__"):
+    if agent_class in _MANAGED_SCOPES:
         log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, agent_class=agent_class,
                     code="NRVQ-API-7016")
         raise HTTPException(

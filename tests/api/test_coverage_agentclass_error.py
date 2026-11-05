@@ -181,6 +181,17 @@ async def test_agent_class_empty_namespace_is_not_degraded() -> None:
     assert degraded is False
 
 
+async def test_agent_class_summary_reports_a_stored_priority_of_0_as_0() -> None:
+    """0 is a legal priority (namespace band 0-499). `int(r["priority"] or 100)` showed it as 100, so the
+    Overview card disagreed with the policy the operator saved. Only a NULL column falls back to 100."""
+    rows = [{**_policy_row("zero"), "priority": 0}, {**_policy_row("unset"), "priority": None}]
+    policies, degraded = await _agent_class_policies(
+        _HealthySession(policy_rows=rows, efficacy_rows=[]), "team-a", "block"
+    )
+    assert degraded is False
+    assert {p["cls"]: p["priority"] for p in policies} == {"zero": 0, "unset": 100}
+
+
 # --- The flag is threaded onto the served response -------------------------------------------------
 
 def _client(session) -> TestClient:

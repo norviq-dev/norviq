@@ -36,8 +36,8 @@ llm = ChatGroq(
 )
 
 # Reads NRVQ_POLICY_ENGINE_URL and NRVQ_API_TOKEN (norviq/config.py). If the engine is
-# unreachable the client returns its fail-closed fallback decision (NRVQ_SDK_FALLBACK_MODE,
-# default "block") rather than letting the call through.
+# unreachable the client returns its fallback decision (NRVQ_SDK_FALLBACK_MODE, default "allow",
+# recorded as rule engine_unavailable_fallback; set it to "block" to fail closed).
 engine = PolicyEngineClient()
 interceptor = ToolInterceptor(evaluator=engine)
 

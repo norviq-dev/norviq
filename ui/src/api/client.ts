@@ -454,7 +454,10 @@ export async function revertPackOverride(namespace: string): Promise<{ namespace
 
 // The effective policy stack governing a (namespace, agent_class) — derived from the real evaluator.
 export type EffectiveLayer = { scope: string; label: string; priority: number; overlay: boolean };
-export async function fetchEffectivePolicy(namespace: string, agentClass: string): Promise<{ namespace: string; agent_class: string; layers: EffectiveLayer[]; note?: string }> {
+/** A layer that exists but decides nothing because another replaced it — the chart's namespace baseline
+ *  once the namespace's saved baseline controls supersede it. `superseded_by` names a scope in `layers`. */
+export type SupersededLayer = { scope: string; label: string; priority: number; superseded_by: string };
+export async function fetchEffectivePolicy(namespace: string, agentClass: string): Promise<{ namespace: string; agent_class: string; layers: EffectiveLayer[]; superseded?: SupersededLayer[]; note?: string }> {
   return apiGet(`/api/v1/policies/effective?namespace=${encodeURIComponent(namespace)}&agent_class=${encodeURIComponent(agentClass)}`);
 }
 
@@ -517,6 +520,15 @@ export async function revokeApiKey(id: string): Promise<ApiKey> {
   return apiSend<ApiKey>(`/api/v1/keys/${encodeURIComponent(id)}`, "DELETE");
 }
 
+/**
+ * The server's verdict on one result row: `row_outcome` in norviq/api/redteam_efficacy.py, the same
+ * function the scorecard's caught / would_block / got_through buckets are counted from. The last three
+ * are the reasons a row is NOT scored. Read this, never `passed`. `passed` is `attack_passed` in the
+ * same file — the expected decision, made by a policy — so a throttled or faulted block no longer
+ * passes, but a monitored detection still fails it and is a would_block, not a got-through.
+ */
+export type RedteamOutcome = "caught" | "would_block" | "got_through" | "not_enabled" | "non_enforcement" | "synthetic";
+
 export type RedteamResult = {
   attack_id: string;
   attack_name: string;
@@ -529,10 +541,13 @@ export type RedteamResult = {
   passed: boolean;
   // false = a CONDITIONAL attack whose enforcing rule isn't loaded for this namespace — a sector pack,
   // or the opt-in MCP integration guardrail. Out of scope, NOT a real miss: excluded from
-  // proven-blocking and rendered as "not enabled here" rather than a red "got through". Anything
-  // reading this must go through `gotThrough()` in RedTeam.tsx; a bare `!passed` disagrees with both
-  // the badge and the scorecard.
+  // proven-blocking and rendered as "not enabled here" rather than a red "got through". The server
+  // folds this into `outcome` ("not_enabled"); anything reading a row goes through `outcomeOf()` in
+  // RedTeam.tsx.
   applicable?: boolean;
+  // Computed on read by the API, so rows of runs stored before the field existed carry it too. Optional
+  // only for an API older than the console.
+  outcome?: RedteamOutcome;
   latency_ms?: number;
   error?: string;
 };
@@ -928,6 +943,9 @@ export type AgentClassPolicy = {
   cls: string;
   kind: "intent" | "capability" | "custom";
   allow_tools: string[]; // the intended allowlist (empty for a pure-refinement or custom policy)
+  // false when `allow_names` is a hand-written expression the server cannot read: the names are
+  // unknown, and an empty allow_tools must then not be shown as "denies every tool". Absent = known.
+  allow_tools_known?: boolean;
   refinements: string[]; // enabled toggles: readonly | egress | scope | rate
   learned_verbs: string[]; // admin-promoted verbs baked in, "tool=verb"
   priority: number;

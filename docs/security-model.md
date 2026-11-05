@@ -13,10 +13,32 @@ allow/block/escalate/audit decisions on the *inputs* of a tool call (`tool_name`
 before the tool body runs.
 
 The governing principle is that **a block is something a customer asked for**. Norviq sits in the
-request path of production agents, so traffic flows by default and the policies you author are the
-defense. A control that drops legitimate traffic nobody asked it to drop is not a strong security
-posture — it is an outage wearing a security-shaped `rule_id`, and it gets removed from the request
-path, which protects nobody.
+request path of production agents, so outside the shipped namespace baseline (below) traffic flows by
+default and the policies you author are the defense. A control that drops legitimate traffic nobody
+asked it to drop is not a strong security posture — it is an outage wearing a security-shaped
+`rule_id`, and it gets removed from the request path, which protects nobody.
+
+**The shipped namespace baseline enforces, from 0.2.6.** It is the one shipped *policy* that blocks on
+your behalf before you have written one. (The engine also refuses on its own account, and those are
+not policies: the per-identity rate limit, 60 non-read calls a minute by default, returns
+`rate_limit_exceeded`; a low-trust agent's would-be allow is escalated; an admin trust freeze blocks;
+and an engine error in a namespace with a policy fails closed, below.) Every namespace you list in `policyQuotaNamespaces` gets
+the `strict` baseline (`baselineClusterPolicy.enforcementMode: block`), whose 21 controls act at the
+severity the preset authors them with — 20 act on a matching call (17 refuse it, `llm06_excessive_agency`
+refuses destructive tools and escalates elevated ones, two MCP controls escalate) and
+`scope_violation_dangerous_tool` only records. It was switched on with evidence —
+`norviq.redteam.precision` over the 51-case benign corpus gives 0 false positives with every control at
+`deny` (`helm/norviq/values.yaml`) — and every scope has a way back:
+`--set baselineClusterPolicy.enforcementMode=audit` for every namespace, Monitor
+(`PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}`) for one, and the console's
+Baseline controls panel (Off / Monitor / Enforce, `PUT /api/v1/baseline/controls`) for one control.
+Each records what it would have refused, except Off, which stops the control evaluating. Saved controls
+replace the chart's baseline in their namespace only when `covers()` proves they are this release's
+compile of the chart's own preset, so saving the panel drops no chart rule except the heads registered
+under a control the operator switched Off — including one added to the chart under that control's id. See [Concepts → Turning the shipped baseline off](concepts.md#turning-the-shipped-baseline-off).
+The baseline is not fail-closed: a namespace outside the list has none, the no-policy decision below
+ships `allow`, and when the engine is unreachable the sidecar follows `webhook.injection.fallbackMode`,
+which also ships `allow`.
 
 Within a namespace the customer *has* chosen to enforce, evaluation is **fail-closed**: if OPA errors,
 times out, or the caller's SPIFFE identity is malformed, the call is blocked rather than silently
@@ -38,10 +60,12 @@ paths. Three worth stating explicitly, because each is a place where a naive imp
   bypass reachable by sending malformed input, so the error path is the enforcement path.
 
 `enforcement_mode=audit` deliberately inverts the no-policy default to allow — that is shadow mode, and
-it is a visibility posture, not an enforcement one. Two `rule_id`s stay hard even in audit mode,
-`trust_frozen` and, while `monitor_exempt_rate_limit` is on (the default), `rate_limit_exceeded`, so an
-admin trust freeze cannot be lifted by flipping a namespace to audit. Engine-health blocks soften like
-any other.
+it is a visibility posture, not an enforcement one. Three `rule_id`s stay hard even in audit mode:
+`trust_frozen`, `invalid_spiffe_identity` and, while `monitor_exempt_rate_limit` is on (the default),
+`rate_limit_exceeded` (`_posture_exempt_rules` in `norviq/engine/evaluator.py`). So an admin trust freeze
+cannot be lifted by flipping a namespace to audit, and a caller whose identity no freeze could reach
+(`norviq/engine/identity.py::is_controllable_spiffe_id`) cannot run there either. Engine-health blocks
+soften like any other.
 
 **Norviq's PEP is cooperative, not interposing.** This is the single most important scope statement in
 this document. The sidecar does not sit in the network path of the tool invocation and does not execute
@@ -117,8 +141,11 @@ not traverse the sidecar.
 
 - **The sidecar (PEP)** — injected into the agent's pod by the mutating webhook, it answers
   forward/drop on the agent's tool calls over a local Unix domain socket; the agent executes the tool
-  (see the cooperative-PEP note above). It presents the workload's SPIFFE SVID as identity, not a
-  bearer secret the agent code controls. In `proxy` mode (the default for *injected* sidecars —
+  (see the cooperative-PEP note above). Its credential is the per-workload service token the webhook
+  mints at injection (HS256, signed with the API secret), and the API takes the namespace, agent class
+  and — in the default `mock` mode — SPIFFE ID from that token's claims; the sidecar resolves a
+  SPIRE-issued SVID only in the opt-in `workload-api` mode. Either way it is not a bearer secret the
+  agent code controls. In `proxy` mode (the default for *injected* sidecars —
   `webhook.injection.sidecarMode`, `webhook/config.go`) the sidecar holds no policy state itself: it's a
   thin forwarder, so compromising one sidecar exposes only that pod's own traffic, not the policy set.
   Note that the standalone `norviq-engine` Deployment is a different thing and is pinned to
@@ -151,11 +178,12 @@ not traverse the sidecar.
   `norviq.io/agent-class` label, and API keys take `agent_class`/`spiffe_id` at creation.
 
   A credential carrying **no** binding (a sidecar token minted before this shipped, or an operator/CI
-  key issued without one) is still accepted by default, so an upgrade does not fail-closed every
-  in-flight sidecar mid-rollout. That is a deliberate ratchet, not the end state — set
-  `auth.requireBoundAgentIdentity=true` once sidecars have been re-admitted and workload keys re-issued,
-  and every non-admin caller must then present a bound credential (`NRVQ-AUTH-14020`). Admin keeps the
-  cross-identity latitude it already has across namespaces (console what-if, red-team simulation).
+  key issued without one) is **rejected by default** — `auth.requireBoundAgentIdentity` ships `true`, and
+  every non-admin caller must present a bound credential (403, `NRVQ-AUTH-14020`). Upgrading from 0.1.x
+  with sidecars or keys that predate binding: set it `false` for the rollout, re-admit the sidecars (the
+  webhook stamps `agent_class` from the pod's `norviq.io/agent-class` label), re-issue workload keys with
+  an `agent_class`, then set it back. Admin keeps the cross-identity latitude it already has across
+  namespaces (console what-if, red-team simulation).
 - **OPA** — evaluates Rego against the input document `_build_input` constructs (see
   [`opa-input-schema.md`](engineering/opa-input-schema.md)). Each deployment runs OPA per-replica (the
   in-pod sidecar model, `NRVQ_OPA_URL` pointing at `localhost:8181`, or a per-process managed server in
@@ -185,11 +213,11 @@ not traverse the sidecar.
   compiler (`opa check`) against a locked-down capabilities file that strips dangerous builtins
   (`http.send`, `opa.runtime`, `net.*`, `io.*`, `rego.parse_module`, `trace`, `print`) — this is
   defense-in-depth *behind* the API-layer reject on forbidden Rego tokens, not the only gate.
-- **The database** — Postgres holds policies, audit records, and the agent registry; Redis holds
-  short-TTL evaluation cache, trust state, and rate-limit counters. Trust is always **recomputed
-  server-side from Redis on every call** — a caller-supplied `trust_score` in the request body is
-  explicitly discarded (`payload.model_dump(exclude={"trust_score"})`) so a client can never assert its
-  own trustworthiness.
+- **The database** — Postgres holds policies, audit records, the agent registry, and logout
+  revocations; Redis holds short-TTL evaluation cache, trust state, and rate-limit counters. Trust is
+  always **recomputed server-side from Redis on every call** — a caller-supplied `trust_score` in the
+  request body is explicitly discarded (`payload.model_dump(exclude={"trust_score"})`) so a client can
+  never assert its own trustworthiness.
 - **SPIFFE identity** — the trust root for *which agent this is*. In `workload-api` mode the sidecar
   fetches a real SVID from the SPIFFE Workload API and fails closed on any socket/SVID error (no
   fallback to an env-var identity). `mock` mode (env-var identity) exists for local dev/tests/attack
@@ -235,7 +263,15 @@ HS256-with-the-public-key forgery (alg-confusion):
   rather than picking one silently.
 
 Logged-out tokens are rejected server-side via a revocation check (a signature-valid but logged-out
-JWT is dead, not just client-discarded), and a token minted with `must_change=True` (the seeded
+JWT is dead, not just client-discarded). The revocation is recorded in Postgres (`revoked_tokens`)
+as well as Redis, and every API process loads every live row of that table into memory before it
+serves a request and keeps all of them (no cap; about 170 bytes per row), so a logout survives Redis
+losing its data and an API restart together — Redis is a cache for it, not the record. A logout writes
+the serving process's memory and Redis before Postgres, so the other replicas refuse the token at once
+even while Postgres is slow or unreachable. The Postgres write waits at most two seconds; one that does
+not land stays queued, is retried every ten seconds by that process's background pass, and is reported
+at ERROR if the process shuts down first. The request path never reads Postgres for this; see
+`norviq/api/session_revocation.py` for what each store being unavailable costs. A token minted with `must_change=True` (the seeded
 default admin, or any account after an admin-triggered reset) is locked to only the
 change-password/logout/`me` routes until the password is actually changed.
 
@@ -345,14 +381,22 @@ were missed:
 ## Supply chain
 
 - **OPA binary** is pinned and checksummed in the build, not pulled loose at runtime.
-- **Container images** are gated by Trivy (`build.yml` post-build scan on `main`); the SAST gate
-  (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) runs gitleaks, bandit, and semgrep
-  diff-aware against every PR — new HIGH/CRITICAL findings fail the build, never backlogged.
+- **Container images** are scanned by Trivy after they are pushed under their per-commit tag only
+  (`build.yml`, on `main` and on a release tag). A new fixable HIGH/CRITICAL finding fails the job
+  before the image is signed and before the tag people pull (`-latest`, or `<component>-<version>` on a
+  release) is moved to it, so it also stops the cosign signature and SBOM attestation and, on a release,
+  the chart and PyPI jobs that depend on it. An image that failed the scan exists in the registry only
+  under its per-commit tag. The SAST checks
+  (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) run gitleaks, bandit, and semgrep
+  diff-aware against every PR — new findings fail the check, never backlogged.
   **eslint-security** (eslint-plugin-security) additionally scans the whole `ui/src` fail-closed — any
-  finding fails the build — adding JS/TS-specific security rules (eval, unsafe-regex, child_process,
+  finding fails the check — adding JS/TS-specific security rules (eval, unsafe-regex, child_process,
   bidi-characters, …) on top of semgrep's `ui/src` pass (see
   [`security-baseline.md`](engineering/security-baseline.md) for the full triage rule and the
   whole-repo-scan ratchet plan).
+- **No check is required to merge.** `main` has no branch protection or ruleset today, so a failing
+  check reports on the PR or commit and stops nothing by itself. Making the fail-closed checks required
+  is pending, not applied.
 - **FOSSA** dependency scanning covers open-source license/security posture (badge on the repo
   README).
 - **Third-party GitHub Actions are SHA-pinned**, not tag-pinned, so a compromised upstream tag can't
@@ -360,8 +404,10 @@ were missed:
   supply-chain risk (the trivy-action project itself had a compromise). `actions/checkout`,
   `actions/setup-python`, `actions/setup-node`, `docker/*-action`, `aquasecurity/trivy-action`,
   `azure/setup-helm`, `sigstore/cosign-installer`, and `pypa/gh-action-pypi-publish` are all pinned to a
-  commit SHA. Three remain tag-pinned and are tracked follow-up: `actions/upload-artifact@v4`,
-  `bridgecrewio/checkov-action@v12`, and `fossas/fossa-action@v1.7.0`.
+  commit SHA, and so are `actions/upload-artifact`, `bridgecrewio/checkov-action`, and
+  `fossas/fossa-action`, which were the last three on a tag. The one `uses:` without a SHA is
+  `release.yml` calling the in-repo reusable workflow `./.github/workflows/build.yml`, which has no
+  upstream tag to move.
 
 ## Reporting a vulnerability
 

@@ -1,0 +1,6 @@
+# CLOMonitor metadata: https://github.com/cncf/clomonitor/blob/main/docs/checks.md#exemptions
+# Exempt a check only when it does not apply to this project, never because it is not met yet.
+
+exemptions:
+  - check: cla
+    reason: "Norviq uses the Developer Certificate of Origin instead of a Contributor License Agreement: contributions are signed off under the DCO (a Signed-off-by line) from the day the DCO check is enabled on the repository; see CONTRIBUTING.md."

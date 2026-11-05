@@ -49,5 +49,11 @@ def test_guardrail_and_pack_scopes_invalidate_namespace_wide():
     assert _invalidate("__pack__") == [("scen", None)]
 
 
+def test_saved_controls_invalidate_namespace_wide():
+    """Saving `__controls__` can REPLACE the chart's baseline for every class in the namespace (the
+    supersede in evaluator._apply_controls_supersede), so a decision cached under the chart must go."""
+    assert _invalidate("__controls__") == [("scen", None)]
+
+
 def test_concrete_class_change_stays_narrowly_scoped():
     assert _invalidate("customer-support") == [("scen", "customer-support")], "a class policy must not over-clear the ns"

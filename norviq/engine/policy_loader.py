@@ -26,6 +26,19 @@ _MAX_VERSIONS = int(getattr(settings, "policy_max_versions", 10))
 _REMEDIATION_SUFFIX = "__remediation__"
 
 
+def stored_priority(value: object) -> int:
+    """The priority a stored policy row carries, defaulting to 100 only when the column is NULL.
+
+    Every DB read path used to default the column with ``or 100``, which reads a stored 0 as 100. 0 is
+    a legal priority (the namespace band is 0-499), and ``_resolve_precedence`` lets the highest priority
+    win among enforcing layers, so a class policy saved at 0 below a namespace tier at 50 was outranked on
+    the replica that saved it and won everywhere that read it back: the embedded engine after every
+    reload, a peer replica after the sync event, any process after a restart. Both columns are
+    ``NOT NULL DEFAULT 100`` today, so the NULL branch only covers a row older than that default.
+    """
+    return 100 if value is None else int(value)
+
+
 @dataclass(slots=True)
 class PolicyVersion:
     """Policy snapshot at a specific version."""
@@ -492,6 +505,14 @@ class PolicyLoader:
         await self._cache.delete_policy(namespace, agent_class)
         await self._invalidate_eval_for_policy_scope(namespace, agent_class)  # clear stale eval-result cache
         await self._cache.publish_policy_event("delete", namespace, agent_class, version=0, origin=self._origin)
+        # The embedded engine (norviq-engine, embedded sidecars) listens on norviq:policy:invalidated and
+        # nothing else; the event above reaches only the API replicas. Without this a deleted policy kept
+        # enforcing there until a restart, and when it was a relaxation (a class allow outranking a
+        # namespace-tier block, a __pack_weaken__) the engine kept relaxing. Its reload re-reads Postgres,
+        # finds no row and unloads (`_reload_policy`).
+        pool = getattr(self._cache, "_pool", None)
+        if pool is not None:
+            await pool.publish("norviq:policy:invalidated", key)
         log.info("nrvq.policy.deleted", key=key, code="NRVQ-REG-5007")
         return True
 
@@ -503,15 +524,17 @@ class PolicyLoader:
         failure here must never crash the listener (the next event, or a restart's warm_cache, self-heals)."""
         try:
             if operation == "delete":
-                key = self._key(namespace, agent_class)
-                self._policies = {k: v for k, v in self._policies.items() if k != key}
-                self._versions = {k: v for k, v in self._versions.items() if k != key}
-                if hasattr(self._evaluator, "unload_policy"):
-                    self._evaluator.unload_policy(namespace, agent_class)
-                await self._invalidate_eval_for_policy_scope(namespace, agent_class)
-                log.info("nrvq.policy.remote_unloaded", key=key, code="NRVQ-REG-5016")
+                await self._unload_local(namespace, agent_class)
+                log.info("nrvq.policy.remote_unloaded", key=self._key(namespace, agent_class), code="NRVQ-REG-5016")
             else:  # upsert (create / apply)
-                await self.load_from_db(namespace, agent_class)  # reads the peer's authoritative DB row
+                if await self.load_from_db(namespace, agent_class) is None:  # reads the peer's authoritative row
+                    # No row: the policy was deleted after the peer's save, and its delete event is on the way.
+                    # This logged remote_reloaded anyway and kept the stale entry. Same rule as the embedded
+                    # engine's reload: no row, no entry. A DB error raises past this and never unloads.
+                    await self._unload_local(namespace, agent_class)
+                    log.info("nrvq.policy.remote_unloaded", key=self._key(namespace, agent_class),
+                             operation=operation, detail="upsert event for a policy with no row", code="NRVQ-REG-5016")
+                    return
                 # load_from_db only refreshes self._policies (current row) — it never touches
                 # self._versions. Without this, a peer's version-snapshot mode-patch (apply_to_target's
                 # history[-1].enforcement_mode = ...) only ever lands on the ORIGINATING replica, so a
@@ -568,9 +591,9 @@ class PolicyLoader:
         )
         async with self._db_engine().begin() as conn:
             row = (await conn.execute(query, {"namespace": namespace, "agent_class": agent_class})).mappings().first()
-        if not row:
+        if row is None:  # only a successful read with no row; `_reload_policy` unloads on this
             return None
-        entry = {"rego": str(row["rego_source"]), "priority": int(row["priority"] or 100),
+        entry = {"rego": str(row["rego_source"]), "priority": stored_priority(row["priority"]),
                  "enforcement_mode": str(row["enforcement_mode"] or "block")}
         self._policies = {**self._policies, key: entry}
         # C1/HA: this is the read path a PEER replica takes on an upsert event (apply_remote_event ->
@@ -636,7 +659,7 @@ class PolicyLoader:
             key = self._key(str(row["namespace"]), str(row["agent_class"]))
             if key in policies:
                 continue
-            entry = {"rego": str(row["rego_source"]), "priority": int(row["priority"] or 100),
+            entry = {"rego": str(row["rego_source"]), "priority": stored_priority(row["priority"]),
                      "enforcement_mode": str(row["enforcement_mode"] or "block")}
             policies[key] = entry
             # C1/HA: hydrate applied_at from the same DB rows on startup, so a restarted replica shows the
@@ -679,7 +702,7 @@ class PolicyLoader:
                 snapshot = PolicyVersion(
                     version=int(row["version"]),
                     rego_source=str(row["rego_source"]),
-                    priority=int(row["priority"] or 100),          # rollback fidelity across a restart
+                    priority=stored_priority(row["priority"]),          # rollback fidelity across a restart
                     enforcement_mode=str(row["enforcement_mode"] or "block"),
                     saved_by=str(row["saved_by"] or ""),
                     saved_at=row["saved_at"],
@@ -726,7 +749,7 @@ class PolicyLoader:
                 PolicyVersion(
                     version=int(row["version"]),
                     rego_source=str(row["rego_source"]),
-                    priority=int(row["priority"] or 100),
+                    priority=stored_priority(row["priority"]),
                     enforcement_mode=str(row["enforcement_mode"] or "block"),
                     saved_by=str(row["saved_by"] or ""),
                     saved_at=row["saved_at"],
@@ -746,6 +769,21 @@ class PolicyLoader:
         """Update memory map via copy-on-write swap. The in-memory entry carries enforcement_mode so
         list_policies can report it."""
         self._policies = {**self._policies, key: {"rego": rego_source, "priority": int(priority), "enforcement_mode": enforcement_mode}}
+
+    async def _unload_local(self, namespace: str, agent_class: str) -> bool:
+        """Drop one policy from THIS process only: the loader map, its version history, the evaluator index
+        and the eval results cached for its scope. Postgres and the Redis mirror are left alone, because
+        this is for a process that learned someone else deleted the row: a peer replica's delete event
+        (``apply_remote_event``) and the embedded engine's reload finding no row (``_reload_policy``).
+        Returns whether the key was loaded."""
+        key = self._key(namespace, agent_class)
+        was_loaded = key in self._policies
+        self._policies = {k: v for k, v in self._policies.items() if k != key}
+        self._versions = {k: v for k, v in self._versions.items() if k != key}
+        if hasattr(self._evaluator, "unload_policy"):
+            self._evaluator.unload_policy(namespace, agent_class)
+        await self._invalidate_eval_for_policy_scope(namespace, agent_class)
+        return was_loaded
 
     async def _invalidate_eval_for_policy_scope(self, namespace: str, agent_class: str) -> None:
         """Delete cached evaluation results affected by a policy change.
@@ -788,26 +826,43 @@ class PolicyLoader:
         log.debug("nrvq.policy.eval_cache_cleared", namespace=namespace, agent_class=agent_class,
                   invalidated_scope=target, ns_wide=ns_wide, code="NRVQ-REG-5011")
 
-    async def _reload_policy(self, namespace: str, agent_class: str) -> None:
-        """Reload a single policy from cache or DB into memory."""
-        key = f"{namespace}:{agent_class}"
+    async def _reload_policy(self, namespace: str, agent_class: str) -> dict | None:
+        """Re-read one policy after a ``norviq:policy:invalidated`` event — the embedded engine's only way
+        of learning about a policy write or delete (``SidecarProxy._on_policy_invalidated``).
 
-        cached = await self._cache.get_policy_entry(namespace, agent_class)
-        if cached:
-            rego = cached if isinstance(cached, str) else cached.get("rego", "")
-            priority = cached.get("priority", 100) if isinstance(cached, dict) else 100
-        else:
-            log.debug("nrvq.policy.reload_cache_miss", key=key, code="NRVQ-REG-5012")
-            return
+        Reads Postgres through ``load_from_db``: the same row, fields and evaluator reload a peer API replica
+        takes on an upsert (``apply_remote_event``) and a restart takes (``warm_cache``). It used to read the
+        Redis policy mirror and nothing else, which was wrong whether the mirror answered or not:
 
-        new_policies = dict(self._policies)
-        new_policies[key] = {"rego": rego, "priority": priority}
-        self._policies = new_policies
+        * A hit rebuilt the entry as ``{rego, priority}``. The mirror has never carried ``enforcement_mode``
+          (``RedisCache.set_policy`` writes rego/priority/version), so the evaluator's ``"block"`` default
+          took over and re-saving an audit-mode policy made the engine hard-block it.
+        * A miss returned on a debug line. The mirror expires after ``redis_ttl_policy_s`` (60s), and a
+          mode-only apply (``apply_to_target``, rego unchanged) publishes this event without rewriting it,
+          so switching a policy from Audit to Enforce a minute after it was saved never reached the engine,
+          which kept letting through what the operator had just told it to block — until a restart.
 
-        if hasattr(self, "_evaluator") and self._evaluator:
-            self._evaluator.reload_policy(namespace, agent_class, rego, priority=int(priority))
+        Even a mirror that carried the mode would be stale after that mode-only apply, so the reload does not
+        consult it at all; the cost is one indexed single-row SELECT per policy write.
 
-        log.info("nrvq.policy.reloaded", key=key, code="NRVQ-REG-5013")
+        No row means the policy was deleted, and the entry is unloaded, which is what a cold start builds.
+        ``delete()`` publishes this event for that reason: the engine does not hear the mutation stream the
+        API replicas use, and a deleted policy used to keep enforcing on it until a restart. A DB error is
+        not a missing row: it propagates out of ``load_from_db`` before anything is touched, the caller logs
+        it (NRVQ-SDC-3022), and the previous entry stays whole, neither half-updated nor unloaded.
+
+        Returns the reloaded entry, or None when the policy was unloaded, so the caller's log line says which
+        of the two happened.
+        """
+        key = self._key(namespace, agent_class)
+        entry = await self.load_from_db(namespace, agent_class)
+        if entry is None:
+            was_loaded = await self._unload_local(namespace, agent_class)
+            log.info("nrvq.policy.reload_unloaded", key=key, was_loaded=was_loaded, code="NRVQ-REG-5023")
+            return None
+        log.info("nrvq.policy.reloaded", key=key, priority=entry["priority"],
+                 enforcement_mode=entry["enforcement_mode"], code="NRVQ-REG-5022")
+        return entry
 
     @property
     def policy_count(self) -> int:

@@ -15,9 +15,13 @@
     "prebuild": "node scripts/patch-vendored-dompurify.mjs"
   },
   "dependencies": {
-    "@fontsource/jetbrains-mono": "^5.2.8",
     "@monaco-editor/react": "^4.7.0",
-    "d3": "^7.9.0",
+    "d3-drag": "^3.0.0",
+    "d3-force": "^3.0.0",
+    "d3-polygon": "^3.0.1",
+    "d3-selection": "^3.0.0",
+    "d3-transition": "^3.0.1",
+    "d3-zoom": "^3.0.0",
     "echarts": "^6.1.0",
     "lucide-react": "^0.511.0",
     "monaco-editor": "^0.55.1",
@@ -32,12 +36,17 @@
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
     "@testing-library/user-event": "^14.6.1",
-    "@types/d3": "^7.4.3",
+    "@types/d3-drag": "^3.0.7",
+    "@types/d3-force": "^3.0.10",
+    "@types/d3-polygon": "^3.0.2",
+    "@types/d3-selection": "^3.0.11",
+    "@types/d3-transition": "^3.0.9",
+    "@types/d3-zoom": "^3.0.8",
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^6.0.0",
-    "@vitest/ui": "^4.1.9",
-    "eslint": "^10.7.0",
+    "@vitest/ui": "^4.1.12",
+    "eslint": "^10.14.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-security": "^4.0.1",
     "jsdom": "^25.0.1",
@@ -45,11 +54,12 @@
     "shadcn": "^4.8.3",
     "tailwindcss": "^4.1.8",
     "typescript": "^5.8.3",
-    "typescript-eslint": "^8.65.0",
+    "typescript-eslint": "^8.72.1",
     "vite": "^8.1.2",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.12"
   },
   "overrides": {
-    "dompurify": "^3.4.12"
+    "dompurify": "^3.4.16",
+    "minimatch": "^11.0.1"
   }
 }

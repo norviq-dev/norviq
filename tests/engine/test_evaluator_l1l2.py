@@ -135,8 +135,9 @@ class TestRateLimitExemptionRequiresTheClassifierToAgree:
     tool name is a string the CALLER supplies — so prefixing a destructive tool bought exemption from
     the DoS backstop. Measured live on AKS: `get_delete_all_records` ran 75/75 calls with no throttle.
 
-    The name still gates, but it must now agree with `classify_tool`. Strictly narrower than before:
-    a genuine read stays exempt, a tool that was exempt only because of how it was spelled does not.
+    The name still gates, but it must now agree with `classify_tool`: a genuine read stays exempt, a
+    tool that was exempt only because of how it was spelled does not. The exempt set therefore moves
+    with the classifier — see the BACKLOG 7.10 pair at the end.
     """
 
     @staticmethod
@@ -170,3 +171,19 @@ class TestRateLimitExemptionRequiresTheClassifierToAgree:
         params = inspect.signature(OPAEvaluator._is_rate_limit_exempt).parameters
         assert list(params) == ["tool_name"], "no tool_params parameter may be added here"
         assert self._exempt("acme_widget") is False  # unresolved name -> unknown -> not exempt
+
+    def test_a_read_the_classifier_stopped_over_classifying_becomes_exempt(self):
+        """BACKLOG 7.10, the widening direction. `run` used to outrank the read it governs, so these
+        reads were `delete` and throttled under the DoS backstop like a destructive tool. They are reads
+        (`run` is the noun here — a CI run), so exempting them is the rule working, and it is why the
+        docstring no longer claims the set can only shrink."""
+        assert self._exempt("get_run_status") is True
+        assert self._exempt("list_run_logs") is True
+
+    def test_a_run_qualifier_governing_code_stays_throttled(self):
+        """...and the direction that must not widen with it. A run qualifier beside a runtime or a unit
+        of code (`_EXECUTION_OBJECTS`) keeps the exec reading, so a read-shaped prefix on a tool that
+        RUNS python and returns what it printed does not buy the exemption."""
+        assert self._exempt("get_run_command_output") is False
+        assert self._exempt("list_run_python_results") is False
+        assert self._exempt("get_execute_notebook_cells") is False

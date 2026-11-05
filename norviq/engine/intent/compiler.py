@@ -25,6 +25,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from norviq.engine.empty_literals import EMPTY_ARRAY
 from norviq.engine.intent.schema import (
     COLLECTION_FIELDS,
     NUMERIC_FIELDS,
@@ -167,6 +168,12 @@ def _lit(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(", ", ": "))
 
 
+def _list_lit(values: list[str]) -> str:
+    """A sorted list operand. The schema accepts an empty one (`"in": []`), and `[][_]` is a compile
+    error on OPA 1.21, which failed the whole intent closed — see norviq/engine/empty_literals.py."""
+    return _lit(sorted(values)) if values else EMPTY_ARRAY
+
+
 def _field_expr(field: str) -> str:
     """The input-document expression for an addressable field."""
     if field.startswith("param_paths."):
@@ -248,7 +255,7 @@ def _predicate(field: str, spec) -> list[tuple[str, str]]:
             # predicate object literal it yields one binding per element — and a complete rule with
             # more than one output is an eval_conflict_error at query time, not a compile error.
             # A single-element list hides it exactly, which is how it survived the first test pass.
-            allowed = _lit(sorted(val))
+            allowed = _list_lit(val)
             out.append((f"{field} in {sorted(val)}",
                         _guarded(field, f"count([x | x := {allowed}[_]; x == {expr_base}]) > 0")))
         elif op == "matches":
@@ -264,15 +271,15 @@ def _predicate(field: str, spec) -> list[tuple[str, str]]:
             out.append((f"{field} !matches {val}", _guarded(field, f"regex.match({_lit(val)}, {expr_base}) == false")))
         elif op == "subsetOf":
             # every element of the collection must be in the allowed set
-            allowed = _lit(sorted(val))
+            allowed = _list_lit(val)
             out.append((f"{field} subsetOf {sorted(val)}",
                         f"count([x | x := {expr_base}[_]; not _in({allowed}, x)]) == 0"))
         elif op == "noneOf":
-            denied = _lit(sorted(val))
+            denied = _list_lit(val)
             out.append((f"{field} noneOf {sorted(val)}",
                         f"count([x | x := {expr_base}[_]; _in({denied}, x)]) == 0"))
         elif op == "anyOf":
-            wanted = _lit(sorted(val))
+            wanted = _list_lit(val)
             out.append((f"{field} anyOf {sorted(val)}",
                         f"count([x | x := {expr_base}[_]; _in({wanted}, x)]) > 0"))
         elif op == "maxCount":

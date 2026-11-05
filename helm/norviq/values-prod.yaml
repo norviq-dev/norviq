@@ -4,7 +4,8 @@
 # `helm template -f values-prod.yaml`. See docs/engineering/prod-deploy-runbook.md.
 #
 # Prereqs on the target cluster: >=3 nodes; metrics-server (HPA); CloudNativePG operator (PG HA);
-# a Redis HA operator (RedisFailover CRD) — or swap redis-ha.yaml for your stack.
+# a Redis HA operator (RedisFailover CRD; the failover runs Valkey, redis.ha.image) — or swap
+# redis-ha.yaml for your stack.
 
 # Public/managed registry recommended for prod (GHCR has no Docker Hub anonymous pull-rate limit at
 # scale). Drop-in: set registry + repository, or point at your ACR. Empty imagePullSecrets = public.

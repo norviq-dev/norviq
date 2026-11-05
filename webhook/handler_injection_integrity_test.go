@@ -65,7 +65,7 @@ func TestMutateDecoySocketMountSameNameWithCommandIsDenied(t *testing.T) {
 func TestMutateBareSidecarImageUnwiredAppIsDenied(t *testing.T) {
 	cfg := LoadConfig()
 	pod := enabledPod("attacker", corev1.PodSpec{Containers: []corev1.Container{
-		{Name: "agent", Image: "attacker/agent:latest"}, // NOT wired to the socket
+		{Name: "agent", Image: "attacker/agent:latest"},   // NOT wired to the socket
 		{Name: "norviq-sidecar", Image: cfg.SidecarImage}, // real image, no command
 	}})
 	resp := sendReview(t, NewHandler(cfg), makeReviewFromPod(pod, gvkPod(), "default"))

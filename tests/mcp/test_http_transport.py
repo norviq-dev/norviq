@@ -129,6 +129,12 @@ def _make(decision: str = "allow"):
     return TestClient(app), upstream, evaluator, proxy
 
 
+def _only_the_proxys_own_list(received: list[dict]) -> bool:
+    """True when nothing but the proxy's own cold-catalog `tools/list` (if any) reached the upstream."""
+    return all(m.get("method") == "tools/list" and str(m.get("id", "")).startswith("norviq-cold-list-")
+               for m in received)
+
+
 def _rpc(method: str, params: dict | None = None, mid: int = 1) -> dict:
     return {"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}}
 
@@ -149,7 +155,9 @@ def test_blocked_call_never_reaches_the_upstream():
     body = r.json()
     assert body["result"]["isError"] is True
     assert body["result"]["_meta"]["norviq"]["gate"] == "B"
-    assert upstream.received == [], "a blocked call must not be forwarded"
+    # The proxy's OWN tools/list for the cold catalog is the only thing allowed upstream (it scans the
+    # definitions before the call is decided — see test_cold_catalog.py). The call itself never is.
+    assert _only_the_proxys_own_list(upstream.received), "a blocked call must not be forwarded"
 
 
 def test_block_is_answered_with_200_and_a_jsonrpc_error_envelope():
@@ -197,7 +205,12 @@ def test_sse_framing_fields_survive_mediation():
                        headers={"accept": "text/event-stream"}) as r:
         body = b"".join(r.iter_bytes()).decode()
     assert "event: message" in body
-    assert "id: 42" in body
+    # REWRITTEN: this asserted the server's `id: 42` reached the client. The id still survives — it is
+    # what resumption is keyed on — but the client is now handed an id the PROXY minted for it, which
+    # maps back to 42 when the client resumes (a server's own ids cannot say which stream they belong
+    # to; see `HttpProxy._mint_event_id`).
+    minted = next(line[4:] for line in body.splitlines() if line.startswith("id: "))
+    assert next(iter(proxy._event_ids.values())).get(minted)[0] == "42"  # noqa: SLF001
     assert body.rstrip().endswith("}") or "\n\n" in body
 
 
@@ -299,7 +312,7 @@ def test_a_caller_cannot_reset_its_own_gate_a_state_with_delete():
 def test_non_allow_decisions_all_withhold_the_call(decision):
     client, upstream, _, proxy = _make(decision)
     client.post("/mcp", json=_rpc("tools/call", {"name": "x", "arguments": {}}))
-    assert upstream.received == []
+    assert _only_the_proxys_own_list(upstream.received)
 
 
 def test_output_dlp_applies_on_the_http_response_path():

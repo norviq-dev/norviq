@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import * as d3 from "d3";
+import * as d3 from "./d3";
 
 export const NODE_COLORS = {
   agent: "#7C5CFC",

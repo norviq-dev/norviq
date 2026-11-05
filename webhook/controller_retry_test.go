@@ -443,4 +443,3 @@ func TestRefreshDerivedStatusIfStale_PolicyDeleteMarksStale(t *testing.T) {
 		t.Fatalf("expected handlePolicyDelete to mark derived status stale")
 	}
 }
-

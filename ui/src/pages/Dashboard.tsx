@@ -143,17 +143,17 @@ function MonitorBlockFeedEmpty({
   return (
     <div data-testid={testid} style={{ color: "var(--text-muted)", fontSize: 12.5, padding: "16px 2px", lineHeight: 1.6 }}>
       {/* NOT "nothing is blocked live", and NOT "structurally empty". Monitor softens POLICY matches only:
-          `_apply_posture` returns the decision untouched when `rule_id in _POSTURE_EXEMPT_RULES`
-          — trust_frozen, policy_load_pending, evaluator_error, evaluator_invalid_payload,
-          rate_limit_exceeded — "an admin trust freeze is an incident-response kill switch that must outrank
-          namespace posture". Those still land here as real `decision="block"` rows. Telling an operator that
+          `_apply_posture` returns the decision untouched when `rule_id` is in `_posture_exempt_rules()`
+          — trust_frozen, invalid_spiffe_identity and (with `monitor_exempt_rate_limit`, the default)
+          rate_limit_exceeded. Engine faults (evaluator_error, policy_load_pending, ...) ARE softened in
+          Monitor. The exempt ones still land here as real `decision="block"` rows. Telling an operator that
           a monitored namespace enforces NOTHING is wrong about the one control they reach for during an
-          incident, and it throws away the real information an empty feed carries: no freeze, no engine fault
-          and no throttle fired in this range. */}
+          incident, and it throws away the real information an empty feed carries: no freeze, no invalid
+          identity and no throttle fired in this range. */}
       <span style={{ color: "var(--escalate)", fontWeight: 600 }}>Monitor mode — policy matches are not blocked live.</span>{" "}
       Every policy match is rewritten to an audit row with a <span className="mono">monitor_would_block:</span> rule id,
       so <b>no policy block can appear here</b>. Only the non-policy blocks stay hard in Monitor — a trust freeze,
-      an engine fault, a rate-limit throttle — and none were recorded in this range.
+      an invalid agent identity, a rate-limit throttle — and none were recorded in this range.
       {typeof wouldBlocked === "number" && (
         <> {wouldBlocked.toLocaleString()} would-block{wouldBlocked === 1 ? "" : "s"} were logged in this range.</>
       )}
@@ -898,11 +898,11 @@ export function Dashboard() {
           // would-block number instead and links to the rows.)
           // A claim about the ENGINE, so it keys on `monitorConfirmed`, not on the settings-fallback
           // `monitorScope` (see the note on `monitorConfirmed`). And NOT "this namespace enforces none":
-          // `_POSTURE_EXEMPT_RULES` keeps trust-freeze / engine-fault / rate-limit blocks hard in Monitor,
-          // and those land in this feed.
+          // `_posture_exempt_rules()` keeps trust-freeze / invalid-identity / rate-limit blocks hard in Monitor
+          // (engine faults are softened there), and those land in this feed.
           sub={
             monitorConfirmed
-              ? "Last 10 enforced blocks — in Monitor, only non-policy ones (trust freeze, engine fault, rate limit)"
+              ? "Last 10 enforced blocks — in Monitor, only non-policy ones (trust freeze, invalid identity, rate limit)"
               : "Last 10 blocked tool calls"
           }
           // Addressable so a test can scope to the FEED. Searching the page for /blocked/i instead

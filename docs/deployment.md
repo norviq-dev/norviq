@@ -49,7 +49,7 @@ stacks, covered below.
 kubectl apply -f helm/norviq/crds/
 kubectl create namespace norviq
 kubectl create namespace my-agents          # tenant namespace; must exist before install
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 -n norviq \
   --set-json 'policyQuotaNamespaces=["my-agents"]'
 kubectl -n norviq port-forward svc/norviq-ui 8080:80   # http://localhost:8080
 ```
@@ -86,8 +86,9 @@ routed to the injector and starts ungoverned.
 Two overlays worth knowing for local work:
 
 - **`values-dev.yaml`** — fixed dev secrets (`api.secretKey`, DB/Redis passwords), `logLevel: DEBUG`,
-  and `config.enforcementMode: audit`, so a fresh dev install logs decisions instead of enforcing them
-  until you're ready.
+  and `config.enforcementMode: audit`. That setting does **not** stop the namespace baseline enforcing,
+  which it does by default from 0.2.6; for a dev install that only records, also pass
+  `--set baselineClusterPolicy.enforcementMode=audit`.
 - **`values-light.yaml`** — the smallest viable single-node footprint (one replica of everything,
   PDBs/HPAs/HA/SPIFFE off). Enforcement is byte-identical to the default chart; only replica counts,
   PDBs, and resource requests/limits change:
@@ -104,7 +105,7 @@ Companion doc: `docs/engineering/prod-deploy-runbook.md`; secrets/RBAC checklist
 
 **Prerequisites:** ≥3 nodes (so anti-affinity/spread actually spreads replicas), `metrics-server`
 (HPA reads CPU), the **CloudNativePG** operator (Postgres HA), and a **Redis HA** operator (the chart
-renders a Spotahome `RedisFailover` CR by default — swap `templates/redis-ha.yaml` +
+renders a Spotahome `RedisFailover` CR by default, running Valkey for both its redis and sentinel pods — swap `templates/redis-ha.yaml` +
 `redis.ha.serviceName` for a different stack).
 
 | Area | Chart default (`values.yaml`) | `values-prod.yaml` |
@@ -116,7 +117,7 @@ renders a Spotahome `RedisFailover` CR by default — swap `templates/redis-ha.y
 | `engine.replicas` | 1 | 2, + PDB + spread |
 | `webhook.replicas` / injection | 2 / off | 2 / on, + PDB + HPA + spread |
 | `postgresql.ha` | off (single StatefulSet) | on — CloudNativePG `Cluster` (3 instances), 20Gi |
-| `redis.ha` | off (single StatefulSet) | on — Spotahome `RedisFailover` (Sentinel, 3) |
+| `redis.ha` | off (single StatefulSet) | on — Spotahome `RedisFailover` (Sentinel, 3) running Valkey 8.1 |
 | rollout | surge (`maxSurge:1`/`maxUnavailable:0`) | same |
 | `config.requireStrongSecret` / `dbSslMode` | on / derived `require` (external/HA DB) | on / `require` (pinned) |
 | `images.*.pullPolicy` | `Always` | `IfNotPresent` (pin immutable tags) |
@@ -179,11 +180,14 @@ kubectl get mutatingwebhookconfiguration norviq-sidecar-injector \
   -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | head -c 20   # non-empty
 ```
 
-**Runtime guarantees** (already live on the dev chart, not prod-only): `initContainers` gate
-api/engine on Postgres+Redis and webhook on the API being reachable, so Helm's apply order never
-matters; `/readyz` returns 503 (drains traffic, no CrashLoop) when a backend is unreachable and
-self-heals on reconnect; `preStop` sleep + `terminationGracePeriodSeconds: 30` drain in-flight requests
-during a rollout.
+**Runtime guarantees** (already live on the dev chart, not prod-only): `initContainers` gate the
+webhook on the API being reachable, and gate api/engine on Postgres+Redis **whenever the chart can name
+the address** — the bundled datastores, or an external one with `postgresql.host` / `redis.host` set.
+With an external datastore given by `existingSecret` alone there is **no** datastore gate: the address
+is inside your Secret, which the chart cannot read at template time, so api and engine start at once
+and the order matters (see "Dependency waits" below). Once running, `/readyz` returns 503 (drains
+traffic, no CrashLoop) when a backend is unreachable and self-heals on reconnect; `preStop` sleep +
+`terminationGracePeriodSeconds: 30` drain in-flight requests during a rollout.
 
 ### What the chart actually renders
 
@@ -215,6 +219,33 @@ api/engine → Postgres and Redis, and webhook → API. Every one runs `runAsNon
 limits — so the container that runs *before* the hardened app container isn't the least-hardened thing
 in the pod, and can't drag the pod's QoS class down.
 
+The datastore waits render only when the chart knows the host. Rendered with `helm template`,
+`postgresql.enabled=false redis.enabled=false` and `existingSecret=my-pg` / `my-redis`:
+
+| Values | api | engine | webhook |
+|---|---|---|---|
+| bundled (default) | `wait-for-postgres`, `wait-for-redis` | same | `wait-for-api` |
+| `existingSecret` only | **none** | **none** | `wait-for-api` |
+| `existingSecret` + `postgresql.host=mydb.example.com` + `redis.host=mycache.example.com` | `nc -z mydb.example.com 5432`, `nc -z mycache.example.com 6379` | same | `wait-for-api` |
+
+Without the gate, api and engine wait on their own. Each retries its first connection to each store
+5 times, sleeping 1, 2, 4 and 8 s between attempts, so a store that refuses connections is given up on
+after about 15 s (measured 15.1 s against a refused port): the API logs `NRVQ-DB-9035` / `NRVQ-REG-9035`
+per retry and `NRVQ-DB-9034` / `NRVQ-REG-9034` when it gives up, the engine `NRVQ-SDC-3045` and
+`NRVQ-SDC-3046`. (The engine's Postgres retry covers only an unreachable store; a wrong password there
+fails at once.) Startup then fails and the kubelet restarts the container with its usual backoff, so a
+datastore that stays unreachable or is mistyped shows as `CrashLoopBackOff` with those log lines, not as
+a pod waiting in `Init`. The engine's Postgres retries share one 60 s deadline with its wait for the
+API to create the schema; they do not add to it (a black-holed host, where one connect attempt can
+itself take 60 s, can overrun it). A managed datastore that is already up when you install is
+unaffected.
+
+To get the wait back, set `postgresql.host` / `redis.host` (and `port`, if not 5432 / 6379) next to
+`existingSecret`. That only adds the gate: the pods still read `NRVQ_PG_URL` / `NRVQ_REDIS_URL` from your
+Secret. Keep the two in agreement — a `host` that differs from the host in the Secret's URL makes the
+gate wait on the wrong address, and a name that never resolves leaves api and engine in `Init`
+forever.
+
 **The injected sidecar gets a tmpfs at `/tmp`** — an `emptyDir` with `medium: Memory` and a 16Mi
 `sizeLimit`, mounted into the **sidecar only**, never the app container. It is required, not
 cosmetic: the sidecar runs with `readOnlyRootFilesystem`, and materialising the internal-mTLS client
@@ -222,7 +253,7 @@ cert/key needs a writable path. Without it every injected pod crash-loops. `medi
 material off disk.
 
 **Internal TLS is on by default** (`config.internalTls.enabled: true`). A Helm hook mints an internal
-CA plus the API serving cert; the API pod runs an `nginx:1.27-alpine` terminator on `:8443` and
+CA plus the API serving cert; the API pod runs an `nginx:1.30-alpine` terminator on `:8443` and
 proxies to the app over loopback (the app itself stays plain HTTP, so probes and tests are unaffected);
 the injector hands each sidecar a CA-signed client cert for mTLS. The webhook is wired to
 `https://norviq-api.norviq.svc:8443` accordingly. No operator-managed certs or CSRs.

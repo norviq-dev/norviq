@@ -31,6 +31,7 @@ markers, same `_between` shape, same "materialize into a reserved scope" flow.
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,12 +44,20 @@ log = structlog.get_logger()
 Effect = Literal["off", "monitor", "deny"]
 EFFECTS: tuple[str, ...] = ("off", "monitor", "deny")
 
-# Every control ships OBSERVING. Nothing is dropped on a fresh install; the customer sees what WOULD
-# be blocked, by which control, and promotes the ones they want once they know the blast radius.
+# The fallback for a control id the preset does not register. A registered control's default is how
+# the preset authors it (`shipped_default`); this only keeps an unknown id from ever defaulting to deny.
 DEFAULT_EFFECT: Effect = "monitor"
 
 CONTROLS_BEGIN = "# >>> CONTROLS-BEGIN"
 CONTROLS_END = "# >>> CONTROLS-END"
+# Written into every compiled region: the controls the operator set to `off`, space-separated.
+#
+# `off` compiles to NO head, so without this line a compiled module cannot say whether a control is
+# missing because the operator switched it off or because the compiler never knew it. The engine has
+# to tell those apart: once a namespace's saved controls supersede the chart's baseline
+# (`covers()`), a control missing for the second reason would be dropped without anyone choosing it.
+# A comment, so it costs OPA nothing and `parse_heads` skips it.
+CONTROLS_OFF = "# >>> CONTROLS-OFF:"
 
 # `set["control_id"] { guard }` on ONE line. The preset carries a comment saying so, because a head
 # wrapped across lines would not match here and the control would silently vanish from the compiled
@@ -69,7 +78,15 @@ _NEVER_FIRES = '{set}[id] {{ false; id := "__never__" }}'
 # and `parse_heads` is deliberately strict, so re-parsing a compiled module would explode on the
 # compiler's own output. Recognised and skipped here rather than loosened into `_HEAD_RE`: keeping the
 # head pattern tight is what makes an unreadable AUTHORED head a loud error instead of a silent "off".
-_NEVER_FIRES_RE = re.compile(r"^(blocks|escalates|audits)\[id\]\s*\{\s*false;")
+#
+# Recognised by EQUALITY with the exact lines `_render` writes, never by a prefix. It was a prefix
+# (`blocks[id] { false;`), and Rego lets one head carry several bodies, so
+# `blocks[id] { false; id := "__never__" } { input.tool_name == "send_newsletter"; id := "no_newsletter" }`
+# is a real rule that looks like the placeholder for its first nineteen characters. In a chart's
+# CONTROLS region that line was skipped as a placeholder, `_render` dropped it, `covers()` held, and
+# after a save with nothing changed the chart's block on send_newsletter came back allow/default_allow.
+# Exact, it is an unreadable head: `parse_heads` raises, and `covers()` keeps the chart as a floor.
+_NEVER_FIRES_LINES = frozenset(_NEVER_FIRES.format(set=s) for s in ("blocks", "escalates", "audits"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,24 +127,8 @@ class Control:
     # Named so the console can warn before promotion. Empty when the control has no known
     # false-positive mode worth calling out.
     caveat: str = ""
-    # WHAT THIS CONTROL DOES ON A FRESH INSTALL, per control rather than one global.
-    #
-    # `DEFAULT_EFFECT` shipped every control OBSERVING, for a stated reason: nothing is dropped before
-    # the customer knows the blast radius. That was right while the blast radius was unknown. It is now
-    # measured — `norviq/redteam/precision.py` runs a corpus of legitimate traffic through the compiled
-    # module with every control enforcing — so a control with no measured false positive can enforce on
-    # evidence instead of shipping inert.
-    #
-    # A value here is a claim that must be justifiable from TWO signals, and they are independent:
-    #   1. measured precision over `norviq/redteam/benign.py` (0 false positives on 29 measured cases);
-    #   2. the preset author's own expressed severity — which SET the control's heads register into.
-    #      `scope_violation_dangerous_tool` registers as `audits[...]`, i.e. observe-only by
-    #      construction, and shipping it at `deny` would contradict the source. That is guarded by a
-    #      test, not left to reviewer memory.
-    #
-    # Omitted -> `DEFAULT_EFFECT`, so a control added to a preset without a considered default keeps
-    # today's conservative behaviour rather than silently inheriting `deny`.
-    default_effect: Effect | None = None
+    # No default effect here: a control's default is read from how the preset AUTHORS it
+    # (`shipped_default`). This table used to carry one per control, and it disagreed with the preset.
     plane: Plane = "call"
     surface: Surface = "tool"
 
@@ -143,7 +144,6 @@ _CONTROL_COPY: dict[str, Control] = {
         "Prompt injection",
         "Catches instructions in tool parameters that try to override the agent's own instructions "
         "— 'ignore previous instructions', jailbreak phrasing, system-prompt exfiltration.",
-        default_effect="deny",
         plane="call",
     ),
     "deny_sql_injection": Control(
@@ -151,14 +151,12 @@ _CONTROL_COPY: dict[str, Control] = {
         "SQL injection",
         "Catches destructive or injected SQL in any tool's parameters, not just execute_sql — a "
         "renamed tool carrying 'drop table users' is caught too.",
-        default_effect="deny",
         plane="call",
     ),
     "deny_sql_multi_statement": Control(
         "deny_sql_multi_statement",
         "Multi-statement SQL",
         "Catches stacked statements and SQL metacharacters on execute_sql.",
-        default_effect="deny",
         plane="call",
     ),
     "deny_shell_execution": Control(
@@ -170,14 +168,12 @@ _CONTROL_COPY: dict[str, Control] = {
         "identifiers — order ids, tracking codes, session tokens — decoded to random bytes and "
         "tripped it roughly 1 in 8 times. Fixed in 0.2.1: the decoded arm matches multi-byte "
         "indicators only, and bare metacharacters need an execution-shaped tool name.",
-        default_effect="deny",
         plane="call",
     ),
     "llm06_excessive_agency": Control(
         "llm06_excessive_agency",
         "Destructive & elevated tools",
         "Blocks tools that delete or destroy, and escalates elevated ones.",
-        default_effect="deny",
         plane="call",
     ),
     "llm02_data_leakage": Control(
@@ -185,14 +181,15 @@ _CONTROL_COPY: dict[str, Control] = {
         "Secret egress",
         "Catches credentials and secrets sent to an external sink, on ANY tool name — including "
         "tool names it has never seen.",
-        default_effect="monitor",
         plane="call",
     ),
     "llm05_supply_chain": Control(
         "llm05_supply_chain",
         "Supply chain",
-        "Catches plugin/script loading from untrusted sources.",
-        default_effect="deny",
+        "Blocks every call to a tool named install_package, load_plugin, download_script or eval.",
+        caveat="Matches on the tool NAME, not the source: a pinned install from public PyPI is refused "
+        "like any other. If your agents install packages, set this to monitor or allow that tool in "
+        "your own policy.",
         plane="call",
     ),
     "dangerous_scheme": Control(
@@ -203,7 +200,6 @@ _CONTROL_COPY: dict[str, Control] = {
         "and SSRF primitive rather than a web fetch. Ordinary http/https is untouched. Some of these "
         "URLs already blocked before this control existed — but as deny_shell_execution, which "
         "attributed them to a shell-execution attempt that never happened.",
-        default_effect="deny",
         plane="call",
     ),
     "ssrf_metadata": Control(
@@ -216,7 +212,6 @@ _CONTROL_COPY: dict[str, Control] = {
         "reaches in-cluster services on 10.x/172.16-31.x constantly, so blocking those would refuse "
         "ordinary traffic. Scope them yourself with derived.destinations.internal.private if you want "
         "that rule.",
-        default_effect="deny",
         plane="call",
     ),
     "pii_detection": Control(
@@ -226,21 +221,18 @@ _CONTROL_COPY: dict[str, Control] = {
         caveat="Narrower than the name suggests: it matches US SSN-shaped values. Email addresses, "
         "phone numbers, dates of birth and passport numbers are NOT detected, so this control on "
         "its own is not sufficient for a customer-data policy.",
-        default_effect="deny",
         plane="call",
     ),
     "pci_card_numbers": Control(
         "pci_card_numbers",
         "Card numbers (PCI)",
         "Catches payment card numbers in tool parameters, by field name and by value.",
-        default_effect="deny",
         plane="call",
     ),
     "cross_tenant_access": Control(
         "cross_tenant_access",
         "Cross-tenant access",
         "Catches a call reaching for another tenant's data.",
-        default_effect="deny",
         plane="call",
     ),
     "chain_depth_limit": Control(
@@ -253,14 +245,12 @@ _CONTROL_COPY: dict[str, Control] = {
         "cross-process PEP can only forward the depth its CALLER claims, so a client that reports 0 "
         "is believed. Trust this control for SDK-instrumented workloads; treat it as advisory for "
         "proxied ones.",
-        default_effect="deny",
         plane="call",
     ),
     "base64_decoded_threat": Control(
         "base64_decoded_threat",
         "Encoded payloads",
         "Catches threats hidden behind base64, including nested encodings.",
-        default_effect="monitor",
         plane="call",
     ),
     "strict_default_block": Control(
@@ -271,14 +261,12 @@ _CONTROL_COPY: dict[str, Control] = {
         caveat="Matches on the tool NAME alone, with no regard to arguments — a read-only reporting "
         "tool called delete_candidates_report is blocked. This is the control most likely to need "
         "an exception for a legitimate tool.",
-        default_effect="monitor",
         plane="call",
     ),
     "scope_violation_dangerous_tool": Control(
         "scope_violation_dangerous_tool",
         "Out-of-scope tool use",
         "Records an agent class using a tool outside its expected scope.",
-        default_effect="monitor",
         plane="call",
     ),
     # ── the DISCOVERY plane: what the MCP proxy learned before the model saw the tool ─────────────
@@ -295,7 +283,6 @@ _CONTROL_COPY: dict[str, Control] = {
         caveat="Escalates rather than blocks, deliberately. Adopting a changed definition is a "
         "legitimate operator action — a server that ships a bug fix changes its description — and "
         "the safe default is a human looking at the diff, not a silently broken agent.",
-        default_effect="deny",
         plane="discovery",
         surface="mcp",
     ),
@@ -308,7 +295,6 @@ _CONTROL_COPY: dict[str, Control] = {
         "acting on a definition nobody has read. This exists because every OTHER Gate-A rule tests "
         "for a specific bad state, so a tool in no state at all satisfied none of them and was "
         "allowed — the checks were armed and the thing they protect was never inspected.",
-        default_effect="deny",
         plane="discovery",
         surface="mcp",
     ),
@@ -319,7 +305,6 @@ _CONTROL_COPY: dict[str, Control] = {
         "definition. This refuses the call while it waits.",
         caveat="Only fires when the proxy runs in strict pin mode. Under the default (tofu) a "
         "first-seen definition is pinned and allowed, and CHANGE is what gets enforced.",
-        default_effect="deny",
         plane="discovery",
         surface="mcp",
     ),
@@ -331,7 +316,6 @@ _CONTROL_COPY: dict[str, Control] = {
         "typed anything.",
         caveat="The scanner is a heuristic and is evadable by construction; it is the discovery-"
         "plane complement to the deterministic call-plane checks, not a replacement for them.",
-        default_effect="deny",
         plane="discovery",
         surface="mcp",
     ),
@@ -342,7 +326,6 @@ _CONTROL_COPY: dict[str, Control] = {
         "input-required pattern). This refuses to send a credential back as that answer.",
         caveat="Depends on the response classifier recognising the value as a secret; a credential "
         "in a shape the classifier does not know is not caught here.",
-        default_effect="deny",
         plane="response",
         surface="mcp",
     ),
@@ -396,15 +379,49 @@ def parse_heads(region: str) -> list[ControlHead]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if _NEVER_FIRES_RE.match(stripped):
+        if stripped in _NEVER_FIRES_LINES:
             continue  # generated placeholder, not a control
         match = _HEAD_RE.match(stripped)
-        if match is None:
+        if match is None or not _one_body(match.group(3)):
             # Loud, not skipped. A head this regex cannot read is a control that would silently
             # disappear from every compiled module — an "off" nobody chose and nobody can see.
             raise ValueError(f"unparsable line in CONTROLS region: {stripped!r}")
         heads.append(ControlHead(match.group(1), match.group(2), match.group(3).strip()))
     return heads
+
+
+def _one_body(guard: str) -> bool:
+    """Whether `guard` — the text between a head's first `{` and its last `}` — is ONE rule body.
+
+    `_HEAD_RE`'s guard is greedy, so `blocks["pii_detection"] { pii_detected } blocks["no_newsletter"]
+    { input.tool_name == "send_newsletter" }` on one line read as a single pii_detection head whose
+    guard happened to contain a second rule. OPA compiles that line as two rules. Measured with it in a
+    chart's CONTROLS region: pii_detection set to Off dropped the whole line from the re-render,
+    `covers()` held, and the chart's block/no_newsletter came back allow/default_allow — a rule
+    nobody switched off. So the braces must close exactly at the end of the line (braces inside a
+    string do not count), and a `#` outside a string, which would comment out the rest, is refused.
+    """
+    depth, quote, escaped = 0, "", False
+    for ch in guard:
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\" and quote == '"':
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            continue
+        if ch in '"`':
+            quote = ch
+        elif ch == "#":
+            return False
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and not quote
 
 
 def controls_for(preset: str) -> list[ControlHead]:
@@ -421,20 +438,46 @@ def control_ids(preset: str) -> list[str]:
     return seen
 
 
-def shipped_default(control_id: str) -> Effect:
-    """The shipped default for ONE control — its own if it declares one, else the global.
+@functools.lru_cache(maxsize=8)
+def _authored_sets(preset: str) -> dict[str, frozenset[str]]:
+    """control id -> the sets its heads register into, as the preset file authors them."""
+    sets: dict[str, set[str]] = {}
+    for head in controls_for(preset):
+        sets.setdefault(head.control_id, set()).add(head.set_name)
+    return {cid: frozenset(names) for cid, names in sets.items()}
 
-    Falling back rather than requiring an entry means a control added to a preset before anyone has
-    measured it keeps the conservative behaviour. The opposite default would silently enforce a
-    detector nobody has run a corpus against.
+
+def shipped_default(control_id: str, preset: str = "strict") -> Effect:
+    """What ONE control does when nobody has set it: what the preset's own heads do.
+
+    A `blocks[...]` or `escalates[...]` head defaults to `deny`, an `audits[...]`-only control to
+    `monitor`. That is exactly what the chart's baseline does, because the chart's baseline IS the
+    preset file. So an untouched row means the same thing in the console, in a saved controls module
+    and in the chart, and saving the controls changes only what the operator changed.
+
+    This was a table in `_CONTROL_COPY`, and it disagreed with the preset: it shipped
+    `strict_default_block`, `llm02_data_leakage` and `base64_decoded_threat` at `monitor` while the
+    preset authors all three as blocks. Harmless while the chart's baseline and the saved controls were
+    both floors (the stricter won); once saved controls superseded the chart's baseline, any save — a
+    no-op, a pure tightening — quietly turned those three from block into a record for every class in
+    the namespace. Measured on the resolver: execute_sql, get_delete_all_records, and an AWS key
+    emailed to an external address went from block to audit on a re-save of one unrelated control.
+
+    To ship a control observing, author its heads as `audits[...]` in the preset. The chart then
+    records it too, so the two cannot disagree again. The precision guard still applies to every
+    `deny` default (tests/redteam/test_benign_precision.py::test_every_deny_default_is_clean_over_the_corpus).
+
+    A control id the preset does not register gets `DEFAULT_EFFECT`.
     """
-    copy = _CONTROL_COPY.get(control_id)
-    return copy.default_effect if copy and copy.default_effect else DEFAULT_EFFECT
+    sets = _authored_sets(preset).get(control_id)
+    if not sets:
+        return DEFAULT_EFFECT
+    return "deny" if sets & {"blocks", "escalates"} else "monitor"
 
 
 def default_effects(preset: str) -> dict[str, Effect]:
     """Every control at ITS shipped default — no longer one global for all of them."""
-    return {cid: shipped_default(cid) for cid in control_ids(preset)}
+    return {cid: shipped_default(cid, preset) for cid in control_ids(preset)}
 
 
 def surface_of(control_id: str) -> Surface:
@@ -467,7 +510,7 @@ def normalize_effects(preset: str, effects: dict[str, str] | None) -> dict[str, 
     # `default_effect: "deny"` beside `effect: "monitor"`, i.e. every enforcing control read as
     # deviating from its own default while nothing enforced. Two homes disagreeing about the same
     # question, which is the defect shape this codebase keeps rediscovering.
-    resolved: dict[str, Effect] = {cid: shipped_default(cid) for cid in known}
+    resolved: dict[str, Effect] = {cid: shipped_default(cid, preset) for cid in known}
     for cid, effect in (effects or {}).items():
         if cid not in resolved:
             raise ValueError(f"unknown control for preset {preset!r}: {cid}")
@@ -511,7 +554,7 @@ def describe(preset: str, effects: dict[str, str] | None = None) -> list[dict]:
                 # PER CONTROL, not the global. The console renders "Reset to default" and a
                 # differs-from-default marker off this, so a single global value made every row claim
                 # the same default and the marker was wrong for any control that had its own.
-                "default_effect": shipped_default(cid),
+                "default_effect": shipped_default(cid, preset),
                 "plane": plane_of(cid),
                 "surface": surface_of(cid),
                 # WHAT `deny` ACTUALLY DOES for this control, which is not always "block".
@@ -543,10 +586,26 @@ def compile(preset: str, effects: dict[str, str] | None = None) -> str:  # noqa:
     the reasons table — is passed through unchanged, which is the entire safety argument for this
     feature: changing what a control DOES cannot change how it DETECTS.
     """
-    src = preset_source(preset)
-    before, region, after = _split_region(src)
     resolved = normalize_effects(preset, effects)
+    rendered = _render(preset_source(preset), resolved)
+    log.info(
+        "nrvq.api.baseline.compiled",
+        preset=preset,
+        deny=len([1 for eff in resolved.values() if eff == "deny"]),
+        monitor=len([1 for eff in resolved.values() if eff == "monitor"]),
+        off=len([1 for eff in resolved.values() if eff == "off"]),
+        code="NRVQ-API-7110",
+    )
+    return rendered
 
+
+def _render(src: str, resolved: dict[str, Effect]) -> str:
+    """The compiled module for preset text `src` with every control at its effect in `resolved`.
+
+    Split out of `compile()` so `covers()` can re-render a stored module from the chart's own text and
+    compare byte for byte, without logging a compile that never happened.
+    """
+    before, region, after = _split_region(src)
     emitted: dict[str, list[str]] = {"blocks": [], "escalates": [], "audits": []}
     for head in parse_heads(region):
         effect = resolved[head.control_id]
@@ -572,8 +631,10 @@ def compile(preset: str, effects: dict[str, str] | None = None) -> str:  # noqa:
             target = head.set_name
         emitted[target].append(f'{target}["{head.control_id}"] {{ {head.guard} }}')
 
+    off = sorted(cid for cid, eff in resolved.items() if eff == "off")
     lines: list[str] = [
         "# GENERATED by norviq/api/baseline.py — edit the control effects, not this region.",
+        f"{CONTROLS_OFF} {' '.join(off)}".rstrip(),
     ]
     for set_name in ("blocks", "escalates", "audits"):
         rules = emitted[set_name]
@@ -582,15 +643,74 @@ def compile(preset: str, effects: dict[str, str] | None = None) -> str:  # noqa:
             lines.extend(rules)
         else:
             lines.append(_NEVER_FIRES.format(set=set_name))
-
-    off = sorted(cid for cid, eff in resolved.items() if eff == "off")
-    monitored = sorted(cid for cid, eff in resolved.items() if eff == "monitor")
-    log.info(
-        "nrvq.api.baseline.compiled",
-        preset=preset,
-        deny=len([1 for eff in resolved.values() if eff == "deny"]),
-        monitor=len(monitored),
-        off=len(off),
-        code="NRVQ-API-7110",
-    )
     return f"{before}{CONTROLS_BEGIN}\n" + "\n".join(lines) + f"\n{CONTROLS_END}{after}"
+
+
+def _off_ids(region: str) -> frozenset[str] | None:
+    """The control ids a compiled region records as `off`; None when it carries no record at all."""
+    for line in region.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(CONTROLS_OFF):
+            return frozenset(stripped[len(CONTROLS_OFF) :].split())
+    return None
+
+
+def effects_of(compiled: str, chart: str) -> dict[str, Effect] | None:
+    """The effect a compiled module gives each control `chart` registers, read back from its region.
+
+    `off` from the CONTROLS_OFF record, `deny` for a control with a block or escalate head, `monitor`
+    for one whose heads are all audits. None when the module carries no CONTROLS_OFF record (it was
+    compiled before the record existed), or when a chart control is neither recorded off nor present:
+    the module then does not say what that control should do. Raises ValueError on an unreadable region.
+    """
+    _, c_region, _ = _split_region(compiled)
+    off = _off_ids(c_region)
+    if off is None:
+        return None
+    present: dict[str, set[str]] = {}
+    for head in parse_heads(c_region):
+        present.setdefault(head.control_id, set()).add(head.set_name)
+    effects: dict[str, Effect] = {}
+    for head in parse_heads(_split_region(chart)[1]):
+        cid = head.control_id
+        if cid in off:
+            effects[cid] = "off"
+        elif present.get(cid, set()) & {"blocks", "escalates"}:
+            effects[cid] = "deny"
+        elif present.get(cid):
+            effects[cid] = "monitor"
+        else:
+            return None
+    return effects
+
+
+def covers(compiled: str, chart: str) -> bool:
+    """True when `compiled` is exactly what THIS compiler renders from `chart` for some effects.
+
+    The engine asks this before letting a namespace's saved controls (`<ns>:__controls__`) supersede
+    the chart's baseline (`<ns>:__baseline__`). Superseding is only honest when the controls module
+    is the chart's own module with an effect on every control, so the module's effects are read back
+    (`effects_of`) and the chart's own text is re-rendered with them; the two must be byte-identical.
+    Anything it cannot read is a `False`, which keeps the chart's baseline as a floor. That one
+    comparison refuses:
+
+    * a chart on another preset (`moderate` and `permissive` have no CONTROLS region) or its own rego;
+    * a chart control the module never saw, any difference outside the region (the controls were
+      compiled from a different preset file than the chart's), and an extra head under a control the
+      module keeps at Monitor or Enforce. An extra head under a control the module switches OFF is not
+      refused: the re-render drops it with the control, as compile() drops every head under an Off id,
+      so it compares equal and the chart is superseded. That is the meaning of Off — every head
+      registered under the id — and it is measured (chart alone block/pii_detection on an added
+      pii_detection arm; pii_detection Off, allow/default_allow), not an oversight;
+    * a module compiled before CONTROLS_OFF existed, or by any compiler whose output differs from this
+      one's — v0.2.5's modules among them, Off or not. The API re-renders every namespace's saved
+      controls from their stored effects at startup (baseline_router.rematerialize_controls), so a
+      stale module is replaced rather than left deciding.
+    """
+    try:
+        effects = effects_of(compiled, chart)
+        if not effects:
+            return False
+        return _render(chart, effects) == compiled
+    except (ValueError, KeyError):
+        return False

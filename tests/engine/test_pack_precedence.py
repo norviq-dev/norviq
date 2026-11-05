@@ -57,8 +57,16 @@ def test_pack_alone_allow_resolves_to_allow() -> None:
 
 
 def test_non_pack_precedence_unchanged() -> None:
-    # no pack candidate -> ordinary highest-priority precedence is untouched.
-    assert _winner([_r("ns:cs", "block", 100), _r("ns:__baseline__", "allow", 900)]) == "allow"
+    # no pack candidate -> ordinary highest-priority precedence between BASE tiers is untouched.
+    # This used `ns:__baseline__` as the higher tier and asserted its allow at 900 beat a class block at
+    # 100. Baselines are tighten-only floors from 0.2.6 (tests/engine/test_baseline_is_a_floor.py), so
+    # that is now exactly what must NOT happen; the base-tier rule is checked between two real base tiers.
+    assert _winner([_r("ns:cs", "block", 100), _r("namespace:ns", "allow", 900)]) == "allow"
+    assert _winner([_r("ns:cs", "block", 900), _r("namespace:ns", "allow", 100)]) == "block"
+
+
+def test_a_baseline_allow_never_beats_a_base_block() -> None:
+    assert _winner([_r("ns:cs", "block", 100), _r("ns:__baseline__", "allow", 900)]) == "block"
 
 
 # --- the per-namespace pack override is the SAME tighten-only overlay class ---

@@ -387,6 +387,34 @@ Real, pre-existing behaviours the MCP surface made visible. None is caused by th
    `derived.verb == "delete"` blocks the one tool the class is meant to use. The product already has
    the right answer — the `tool_verb_overrides` promotion lifecycle — and the scenario exercises it
    rather than weakening the policy. Worth reviewing whether `run` alone should imply *critical*.
+
+   **Correction and status (BACKLOG 7.10).** The promotion lifecycle was not the right answer: the
+   evaluator consults a promotion only when the name classifier returns `unknown`, so it never
+   reached this tool. Fixed in the classifier instead — `run`/`execute`/`invoke` are qualifiers that
+   take the verb of the operation they govern (`run_query` → `read`, still graded critical), and keep
+   the exec reading when they govern nothing the lexicon knows or govern code (`run`, `run_report`,
+   `run_command_get_output` → `delete`/critical). So `run` alone does still imply critical. The
+   scenario's promotion step was removed; its check now reads which rule fired.
+
+   The old `delete` had also been refusing every write sent through `run_query`/`execute_query`
+   under the rules that ask for `verb == "read"` (the read-only intent template, the MCP registry's
+   and the integration guardrail's unapproved-write rules), and the baselines' destructive-SQL
+   detector does not know UPDATE, INSERT, GRANT or ALTER. So a run qualifier that yields to a read
+   reports `read` only when the payload is POSITIVELY a read: no statement/mutation keyword token in
+   any string, keys or values, at any depth. Anything else fails closed to the pre-7.10 reading — a
+   destructive keyword → `delete`, any other mutation keyword → `write`. A first cut instead enumerated
+   the write *shapes* it recognised and fell to `read` on the rest; an independent review proved on a
+   real PostgreSQL 16 that the writes it had not enumerated — comment/literal obfuscation
+   (`SELECT '--'; /* x */UPDATE/**/SET`), `DO` blocks, data-modifying CTEs, T-SQL `DELETE customers`,
+   MySQL `INSERT … SET`, `LOAD`/`REASSIGN`/`SHUTDOWN`/`BULK`/`RESTORE`, and non-SQL Cypher, GraphQL,
+   Mongo and ES writes (a Memgraph MCP server names its Cypher tool `run_query`) — all executed and all
+   classified `read`, then passed the three controls. The deny-list does not depend on parsing SQL: a
+   keyword anywhere, inside a comment or a literal, is enough to refuse. A tool WITHOUT the qualifier
+   (`query`, `sql_query`) still reports `read` whatever it carries — the pre-existing limit of a name
+   classifier, and the reason the SQL allowlist template exists. The cost, accepted and no worse than
+   90b9f49 (which classified every `run_*` name `delete`): a SELECT whose literal carries a bare keyword
+   word (`'login; password reset'`), `SELECT … FOR UPDATE`, and free-text search prose with a keyword
+   classify non-read.
 2. **Verb promotion is not instant across replicas.** `warm_verb_overrides` runs at API startup and
    again only on the replica that served the promote POST — there is no pub/sub and no periodic
    refresh, while the chart defaults to 2 API replicas. Measured convergence was within ~10 s, which

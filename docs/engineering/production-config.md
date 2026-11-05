@@ -60,8 +60,13 @@ kubectl get secret norviq-secrets -n norviq \
 `baselineClusterPolicy.enabled` is `true` by default and renders **one baseline policy per namespace
 listed in `policyQuotaNamespaces`** — which ships **empty**. The chart therefore **fails the render**
 until you list your tenant namespaces (or explicitly set `baselineClusterPolicy.enabled=false`),
-rather than silently installing with zero baselines. Each baseline ships in `audit`
-(`baselineClusterPolicy.enforcementMode`); set `block` to enforce it.
+rather than silently installing with zero baselines. Each baseline enforces from 0.2.6
+(`baselineClusterPolicy.enforcementMode: block`; it was `audit` through 0.2.5). To turn it off: every
+namespace with `--set baselineClusterPolicy.enforcementMode=audit` (not a namespace whose Baseline
+controls were saved: with the default `strict` preset those replace the chart's baseline and run in `block`); one namespace with Monitor
+(`PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}`); one control from the
+console's Baseline controls panel (`PUT /api/v1/baseline/controls`). Each records the call instead of
+refusing it, except a control switched Off — see [Concepts → Turning the shipped baseline off](../concepts.md#turning-the-shipped-baseline-off).
 
 ```bash
 helm upgrade --install norviq ./helm/norviq \
@@ -128,10 +133,12 @@ Verify: `kubectl get clusterrolebinding | grep norviq-`.
   exports for durable evidence.
 
 ## 7. Enforcement posture
-- `config.enforcementMode: block` (default; not `audit`) for real enforcement.
+- `config.enforcementMode: block` (default). It decides whether `config.noPolicyDecision: deny` can
+  block; it does not soften the baseline or any policy, so it is not how the baseline is turned off.
 - `config.noPolicyDecision: allow` (default) — a namespace with **no** matching policy allows the call
   under the named `default_allow` rule. Set `deny` to refuse uncovered namespaces in block mode; with
-  the defaults (and the §3b baselines in `audit`) an unconfigured tenant is observed, not enforced.
+  the defaults, a tenant namespace listed in `policyQuotaNamespaces` is enforced by its §3b baseline,
+  and one that is not listed has no baseline and is allowed.
 - Confirm seeded policies cover every tenant `(namespace, agent_class)` you run.
 - `config.opaMode: server` (default) runs OPA as the long-lived sidecar; `subprocess` forks per call
   and exists only as a rollback path.

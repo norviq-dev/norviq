@@ -31,6 +31,28 @@ def test_fleet_push_reserved_scope_rejected() -> None:
             c.close()
 
 
+def test_fleet_push_to_any_cluster_managed_scope_rejected() -> None:
+    """`__controls__` above all: a cluster's saved controls REPLACE its chart baseline, so a fleet push to
+    that key could switch the baseline off on every spoke. The hub reserved only __baseline__ and
+    __pack__, so it was accepted and bundled."""
+    for scope in ("__controls__", "__egress__", "__mcp__", "__pack_override__", "__pack_weaken__"):
+        c = _client(FakeFleetSession())
+        try:
+            r = c.post("/api/v1/fleet/policies", json=_author_body(agent_class=scope), headers=_headers(role="admin"))
+            assert r.status_code == 422, scope
+        finally:
+            c.close()
+
+
+def test_every_scope_the_policy_api_manages_is_reserved_from_the_fleet() -> None:
+    """One list drifting from the other is how __controls__ got through: POST /policies refused it and
+    the fleet did not."""
+    from norviq.api.routers import policies
+    from norviq.fleet.bundle import RESERVED_SCOPES
+
+    assert set(policies._MANAGED_SCOPES) | {"__baseline__"} <= RESERVED_SCOPES
+
+
 def test_fleet_wide_push_requires_confirm() -> None:
     # Env-scoped (no cluster_id -> matches >1 cluster) without confirm -> 422; with confirm -> 200.
     c = _client(FakeFleetSession())
@@ -69,6 +91,10 @@ def test_resolve_excludes_reserved_scope() -> None:
     out = _resolve_for_cluster([pol("baseline", "__baseline__"), pol("pack", "__pack__"), pol("ok", "bot")], cluster)
     classes = {o["agent_class"] for o in out}
     assert classes == {"bot"} and "__baseline__" not in classes and "__pack__" not in classes
+    from norviq.fleet.bundle import RESERVED_SCOPES
+
+    every = [pol(scope, scope) for scope in sorted(RESERVED_SCOPES)] + [pol("ok", "bot")]
+    assert {o["agent_class"] for o in _resolve_for_cluster(every, cluster)} == {"bot"}
 
 
 def test_author_requires_admin() -> None:

@@ -18,7 +18,8 @@ user receives:
 Checks are COLLECTED, not fatal: one run reports every failure it finds rather than stopping at the
 first, because finding one bug per release cycle is the loop this exists to break.
 
-    scripts/verify_release.py                 # full run, cluster deleted afterwards
+    scripts/verify_release.py                 # upgrade path from the newest published chart <= this one
+    scripts/verify_release.py --upgrade-from none   # fresh install instead, by explicit choice
     scripts/verify_release.py --keep          # leave the cluster up to poke at a failure
     scripts/verify_release.py --skip-create   # reuse a cluster from a previous --keep run
 """
@@ -34,7 +35,9 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,11 +47,34 @@ REPO = "ghcr.io/norviq-dev/norviq-engine"
 CHART_REPO = "ghcr.io/norviq-dev/charts/norviq"
 NS, TENANT = "norviq", "agents"
 POLICY = "nrvq-verify-guard"
+# The bundled single-instance store (templates/redis-statefulset.yaml), the same pod name in every release.
+STORE_POD, STORE_CONTAINER = "norviq-redis-0", "redis"
+# How long the store must stay up between the two samples check_store_after_upgrade takes.
+STORE_STABLE_S = 15
 # Only ever used against a throwaway kind cluster this script created and deletes.
 VERIFY_PASSWORD = "verify-release-not-a-real-secret-9137"
 
 # Every kubectl/helm call in this repo needs it on macOS; harmless on Linux runners.
 ENV_EXTRA = {"GODEBUG": "netdns=go"}
+
+# What a STOCK install answers for the gate's identity (TENANT, class chatbot, no class policy). From
+# 0.2.6 the chart's namespace baseline enforces: the strict preset as authored, enforcementMode block,
+# every control at its shipped default (20 act on the call, scope_violation_dangerous_tool records), so
+# execute_sql is refused by strict_default_block. Through 0.2.5 the baseline ran in audit and the same
+# call read audit + policy_audit_would_block:strict_default_block. (tool, params, decision, rule_id)
+# tests/release/test_verify_release_expectations.py runs these through the real resolver, so a default
+# the gate does not follow fails there rather than on release day.
+STOCK_PROBES = [
+    ("search_kb", {"q": "refund policy"}, "allow", "default_allow"),
+    ("execute_sql", {"query": "SELECT * FROM users"}, "block", "strict_default_block"),
+]
+# The per-control way off and back, for the same execute_sql call: (effects PUT to /baseline/controls,
+# decision, rule_id). Monitor must RECORD under the bare rule id (the saved controls replace the chart's
+# copy; a chart that kept deciding would still block), and the default must block again.
+CONTROL_ROUND_TRIP = [
+    ({"strict_default_block": "monitor"}, "audit", "strict_default_block"),
+    ({}, "block", "strict_default_block"),
+]
 
 results: list[tuple[str, bool, str]] = []
 
@@ -86,15 +112,44 @@ def wait_until(fn, timeout: int, interval: float = 2.0) -> bool:
     return False
 
 
+# How long a stock probe may wait for the chart's baseline to reach the engine. On a fresh install the
+# baseline exists before the first probe; on an UPGRADE helm changes the baseline NrvqPolicy (0.2.5
+# shipped it in audit, 0.2.6 in block) and the controller syncs it to the API asynchronously, a few
+# seconds after `helm --wait` returns. The probe still has to see exactly the expected decision and
+# rule; it only stops asserting inside that window. The time it took is reported.
+STOCK_CONVERGE_S = 90
+
+
+def await_decision(evaluate, tool: str, params: dict, want: str, want_rule: str,
+                   timeout: float = STOCK_CONVERGE_S, interval: float = 3.0) -> tuple[bool, str, str, float]:
+    """Evaluate until the decision is (want, want_rule) or the deadline passes.
+    Returns (matched, last decision, last rule_id, seconds waited)."""
+    start = time.monotonic()
+    got, rule = "", ""
+    while True:
+        d = evaluate(tool, params)
+        got, rule = str(d.get("decision") or ""), str(d.get("rule_id") or "")
+        if got == want and want_rule in rule:
+            return True, got, rule, time.monotonic() - start
+        if time.monotonic() - start >= timeout:
+            return False, got, rule, time.monotonic() - start
+        time.sleep(interval)
+
+
 # ---------------------------------------------------------------------------------------------
 # stage 1 — build the artifact a release would publish
 # ---------------------------------------------------------------------------------------------
 def stamp(version: str, workdir: Path) -> Path:
     """A copy of the chart, versioned and pinned to real registry digests — release.yml's own step.
 
-    Digests come from the `<comp>-latest` tags built by build.yml on main, so this pins the same
-    bytes a release cut from this commit would. The POINT is the digest form: `@sha256:...` is what
-    the checked-in chart never carries and what the shipped one always does.
+    Digests come from the `<comp>-latest` tags built by build.yml on MAIN. That is the right SHAPE
+    but not necessarily the right BYTES: release.yml builds every image from the tagged commit, and a
+    release branch is ahead of main, so `<comp>-latest` can be the previous code. The 0.2.6 run on
+    PR #123 tested main's api/engine (revision 46f04c7, without f12e627's saved controls or 1a199c4's
+    one-trust-cost-per-retried-refusal) and failed on exactly the behaviour those commits add. So the shape checks below judge the
+    stamped chart as-is, and the install then runs the candidate builds passed with --candidate-image.
+    The POINT here is the digest form: `@sha256:...` is what the checked-in chart never carries and
+    what the shipped one always does.
     """
     chart = workdir / "norviq"
     shutil.copytree(CHART, chart)
@@ -115,6 +170,12 @@ def check_stamped_shape(ctx: str, chart: Path) -> None:
 
     floating = re.findall(rf"{re.escape(REPO)}:[^\"'\s]+", res.stdout)
     check("no floating image tags in the stamped chart", not floating, f"{sorted(set(floating))[:3]}")
+    # Third-party images too, with the gate release.yml runs: the line above only ever looked at
+    # Norviq's repository and passed a chart with opa, valkey, postgres, nginx, busybox and curl on tags.
+    import check_image_pins  # noqa: PLC0415 — sibling script; scripts/ is sys.path[0] when run directly
+
+    bare = [ref for _n, ref in check_image_pins.unpinned(check_image_pins.find_refs(res.stdout))]
+    check("every image in the stamped chart is digest-pinned", not bare, f"{sorted(set(bare))[:3]}")
 
     m = re.search(r"NRVQ_SIDECAR_IMAGE\s*\n\s*value:\s*\"([^\"]+)\"", res.stdout)
     check("injected sidecar is digest-pinned", bool(m and "@sha256:" in m.group(1)),
@@ -124,23 +185,58 @@ def check_stamped_shape(ctx: str, chart: Path) -> None:
 # ---------------------------------------------------------------------------------------------
 # stage 2 — install it the way automation does
 # ---------------------------------------------------------------------------------------------
-def install(ctx: str, chart: Path, webhook_image: str = "") -> bool:
+# Norviq's own components, each built from this tree by release.yml (via build.yml) at the tag.
+COMPONENTS = ("engine", "api", "ui", "webhook", "bootstrap")
+
+
+def parse_candidate_images(specs: Iterable[str]) -> dict[str, str]:
+    """`COMP=IMAGE` pairs -> {comp: image}. Refuses anything this script could not actually run.
+
+    Only the TAG reaches the chart (see candidate_overrides), so an image outside the chart's own
+    repository would be silently replaced by `<REPO>:<its tag>` — a different binary under the same
+    label. That is refused here rather than discovered as a confusing pass.
+    """
+    images: dict[str, str] = {}
+    for spec in specs:
+        comp, sep, image = spec.partition("=")
+        if not sep or comp not in COMPONENTS:
+            raise ValueError(f"--candidate-image {spec!r}: want COMP=IMAGE with COMP one of {', '.join(COMPONENTS)}")
+        repo, colon, tag = image.rpartition(":")
+        if not colon or repo != REPO or not tag or "@" in image:
+            raise ValueError(f"--candidate-image {spec!r}: the image must be tagged {REPO}:<tag> "
+                             "(the chart overrides only the tag) and must already be `kind load`ed")
+        if comp in images and images[comp] != image:
+            raise ValueError(f"--candidate-image: {comp} given twice ({images[comp]} and {image})")
+        images[comp] = image
+    return images
+
+
+def candidate_overrides(images: dict[str, str]) -> list[str]:
+    """`helm --set` flags that run the locally built candidate images instead of the pinned ones.
+
+    Only the TAG is overridden, so each candidate image must already be tagged under the chart's own
+    repository (build it as ghcr.io/norviq-dev/norviq-engine:<tag> and `kind load` it). Clearing the
+    digest is what lets the tag win; leaving it set keeps the pinned image and silently tests the WRONG
+    binary — the exact failure mode this script exists to prevent. pullPolicy must drop to
+    IfNotPresent as well: the chart ships `Always`, which makes the kubelet ignore the `kind load`ed
+    image and try to pull a tag that exists on no registry.
+    """
+    extra: list[str] = []
+    for comp in COMPONENTS:
+        if comp in images:
+            tag = images[comp].rpartition(":")[2]
+            extra += ["--set", f"images.{comp}.tag={tag}", "--set", f"images.{comp}.digest=",
+                      "--set", f"images.{comp}.pullPolicy=IfNotPresent"]
+    return extra
+
+
+def install(ctx: str, chart: Path, images: dict[str, str] | None = None) -> bool:
     """--wait --atomic, because that is what CI/GitOps use and what deadlocked before 0.1.6."""
     for ns in (NS, TENANT):
         kubectl(ctx, "create", "namespace", ns)
     kubectl(ctx, "label", "namespace", TENANT, "norviq-injection=enabled", "--overwrite")
 
-    extra: list[str] = []
-    if webhook_image:
-        # Only the TAG is overridden, so the candidate image must already be tagged under the chart's
-        # own repository (build it as ghcr.io/norviq-dev/norviq-engine:<tag> and `kind load` it).
-        # Clearing the digest is what lets the tag win; leaving it set keeps the pinned image and
-        # silently tests the WRONG binary — the exact failure mode this script exists to prevent.
-        # pullPolicy must drop to IfNotPresent as well: the chart ships `Always`, which makes the
-        # kubelet ignore the `kind load`ed image and try to pull a tag that exists on no registry.
-        tag = webhook_image.rpartition(":")[2]
-        extra = ["--set", f"images.webhook.tag={tag}", "--set", "images.webhook.digest=",
-                 "--set", "images.webhook.pullPolicy=IfNotPresent"]
+    extra = candidate_overrides(images or {})
 
     # Deliberately NO config.dbSslMode: the candidate chart derives it from the datastore in use, and a
     # gate that overrides it would never prove that a pure-defaults install can start. That is exactly
@@ -255,42 +351,37 @@ def check_enforcement(ctx: str) -> str:
 
         identity = {"namespace": TENANT, "agent_class": "chatbot",
                     "spiffe_id": f"spiffe://norviq/ns/{TENANT}/sa/chatbot", "workload": "chatbot"}
-        # A STOCK install ships all 14 baseline controls on `monitor`, so a high-risk tool is
-        # RECORDED, not refused: `audit` + `policy_audit_would_block:strict_default_block`. This
-        # check asserted `block`, which was the contract BEFORE the allow-by-default work, and it
-        # failed the release gate on correct behaviour.
-        #
-        # Relaxing it to `audit` alone would be worse than the stale expectation, because this gate
-        # exists to prove the artifact ENFORCES — and "the control fired but nothing was stopped" is
-        # exactly the false assurance this product's own findings are about. So both halves are
-        # checked: the shipped default RECORDS, and the same call BLOCKS once the operator promotes
-        # the control. That is the monitor -> promote story the product actually ships.
+        # A STOCK install refuses a high-risk tool name (STOCK_PROBES): the namespace baseline enforces
+        # from 0.2.6. This gate exists to prove the artifact ENFORCES, so the default is checked as a
+        # block, and then the per-control way off is checked to reach the engine and come back
+        # (CONTROL_ROUND_TRIP): a gate that only ever saw the block could not tell an artifact whose
+        # console switch does nothing from one that works, and during 0.2.6 it did nothing (Off and
+        # Monitor still came back block / deny_shell_execution) until saved controls replaced the
+        # chart's copy.
         def _evaluate(tool: str, params: dict) -> dict:
             return _api(port, "/api/v1/evaluate", token,
                         {"tool_name": tool, "tool_params": params, "agent_identity": identity})
 
-        for tool, params, want, want_rule in [
-            ("search_kb", {"q": "refund policy"}, "allow", "default_allow"),
-            ("execute_sql", {"query": "SELECT * FROM users"}, "audit", "strict_default_block"),
-        ]:
+        for tool, params, want, want_rule in STOCK_PROBES:
             try:
-                d = _evaluate(tool, params)
-                got, rule = d.get("decision"), str(d.get("rule_id") or "")
+                ok, got, rule, waited = await_decision(_evaluate, tool, params, want, want_rule)
                 # The rule_id matters as much as the decision: an `audit` carrying `default_allow`
                 # would mean NOTHING fired, which is a miss wearing a detection's clothing.
-                check(f"evaluate {tool} -> {want} ({want_rule})",
-                      got == want and want_rule in rule, f"got {got} ({rule})")
+                check(f"evaluate {tool} -> {want} ({want_rule})", ok,
+                      f"got {got} ({rule})" + (f" after {waited:.0f}s" if waited >= 1 else ""))
             except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
                 check(f"evaluate {tool} -> {want}", False, str(exc))
 
         # …and it must actually stop the call once promoted, or the gate would pass an artifact that
         # can only ever observe.
         #
-        # A 404 here is NOT a failure. This script exercises the RELEASE ARTIFACT — images built from
-        # `<comp>-latest` on MAIN (see stamp() above) — so the API under test can legitimately predate
-        # an endpoint that exists on the branch proposing the change. `PUT /baseline/controls` arrived
-        # with the toggleable-controls work and is not on main yet, so it 404s here and would on any
-        # PR that adds an endpoint its own gate then calls. Failing on that would make this gate red
+        # A 404 here is NOT a failure. When the API is NOT passed as a --candidate-image (a manual run),
+        # the image under test is `<comp>-latest` from MAIN (see stamp() above), so it can legitimately
+        # predate an endpoint that exists on the branch proposing the change. verify-release.yml passes
+        # the PR's own API build, so there the router is always present and this is a real check.
+        # `PUT /baseline/controls` arrived with the toggleable-controls work and was not on main when
+        # this was written, so it 404'd on main's image and would on any PR that adds an endpoint its
+        # own gate then calls, when run without that PR's API. Failing on that would make this gate red
         # for every such change and teach people to ignore it.
         #
         # It is reported as a SKIP with the reason, not silently swallowed: the moment main carries
@@ -316,28 +407,35 @@ def check_enforcement(ctx: str) -> str:
         except (urllib.error.URLError, OSError, json.JSONDecodeError):
             pass  # transport trouble: fall through and let the PUT report it
 
-        try:
-            _api(port, "/api/v1/baseline/controls", token,
-                 {"namespace": TENANT, "effects": {"strict_default_block": "deny"}}, method="PUT")
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404 and not router_present:
-                print("  [SKIP] promote-to-deny: this artifact has no /baseline/controls router at all "
-                      "(released images are built from main) — becomes a real check once main has it")
+        for effects, want, want_rule in CONTROL_ROUND_TRIP:
+            label = f"execute_sql -> {want} ({want_rule}) with baseline controls {effects or 'at the defaults'}"
+            try:
+                _api(port, "/api/v1/baseline/controls", token, {"namespace": TENANT, "effects": effects},
+                     method="PUT")
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404 and not router_present:
+                    print("  [SKIP] baseline controls: this artifact has no /baseline/controls router at all "
+                          "(released images are built from main) — becomes a real check once main has it")
+                    return token
+                # Router present but the PUT 404'd, or any other status: that is a real failure.
+                check(label, False, f"HTTP {exc.code}" + ("" if router_present else " (and GET also 404)"))
                 return token
-            # Router present but the PUT 404'd, or any other status: that is a real failure.
-            check("promote strict_default_block to deny", False,
-                  f"HTTP {exc.code}" + ("" if router_present else " (and GET also 404)"))
-            return token
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-            check("promote strict_default_block to deny", False, str(exc))
-            return token
-        try:
-            d = _evaluate("execute_sql", {"query": "SELECT * FROM users"})
-            got = d.get("decision")
-            check("execute_sql BLOCKS once strict_default_block is promoted to deny",
-                  got == "block", f"got {got} ({d.get('rule_id')})")
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-            check("execute_sql BLOCKS once strict_default_block is promoted to deny", False, str(exc))
+            except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+                check(label, False, str(exc))
+                return token
+            # Exact rule id: a chart baseline that kept deciding in audit would read
+            # policy_audit_would_block:strict_default_block. Polled briefly, because the evaluate can land
+            # on the other API replica, which learns of the save over the policy stream.
+            seen: dict = {}
+
+            def _settled(effects_want: tuple[str, str] = (want, want_rule)) -> bool:
+                try:
+                    seen.update(_evaluate("execute_sql", {"query": "SELECT * FROM users"}))
+                except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+                    seen.update(decision="error", rule_id=str(exc))
+                return (seen.get("decision"), str(seen.get("rule_id") or "")) == effects_want
+
+            check(label, wait_until(_settled, 15, 1.0), f"got {seen.get('decision')} ({seen.get('rule_id')})")
         return token
     finally:
         pf.terminate()
@@ -567,17 +665,106 @@ def _uninstall_and_assert_clean(ctx: str) -> None:
 # ---------------------------------------------------------------------------------------------
 # stage 2u — the operation every EXISTING user performs
 # ---------------------------------------------------------------------------------------------
-def previous_published_version(current: str) -> str:
-    """The highest released tag below `current`, from git.
+# `auto` used to read `git tag` and pick the highest tag that was not the candidate's own version. It
+# went wrong three ways, and the first one meant the upgrade path had never run in CI:
+#
+#   * CI's checkout is shallow and carries no tags, so the list was empty. On PR #122 (chart 0.2.5) the
+#     job logged "(no earlier release to upgrade from — running the fresh-install path)" and reported
+#     success. That is how the 0.2.5 -> 0.2.6 store crash (tests/helm/test_bundled_store_upgrade.py)
+#     reached a release candidate without CI ever running an upgrade.
+#   * "not equal" is not "older". It skipped the published 0.2.5 when the candidate was an unbumped
+#     0.2.5, which is still a real upgrade of a real artifact. It would also pick a NEWER tag for an
+#     older candidate and test a downgrade.
+#   * A tag is not a published chart. v0.1.0 and v0.2.0 shipped no chart at all (CHANGELOG.md).
+#
+# So the list now comes from the registry `install_published` pulls from. Only published releases
+# count, the candidate's own version included, and finding none is an error rather than a quiet switch
+# to the fresh-install path.
+_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
 
-    Not from the registry: `helm` cannot list OCI tags, and the git tags are what the releases were
-    cut from, so they cannot disagree with what was published without something already being wrong.
+
+class UpgradeSourceError(RuntimeError):
+    """`--upgrade-from auto` could not name a published release. Never a reason to run the fresh path."""
+
+
+def _version_key(version: str) -> tuple[int, int, int, int] | None:
+    """(major, minor, patch, 1 for a release / 0 for a prerelease), or None for a non-SemVer tag.
+
+    The last field orders a prerelease below its release (0.2.6-rc.1 < 0.2.6), which is all the ordering
+    that is needed: prereleases are never picked as an upgrade source, only compared against as a candidate.
     """
-    res = run("git", "-C", str(ROOT), "tag", "--list", "v*", "--sort=-v:refname")
-    for tag in (ln.strip().lstrip("v") for ln in res.stdout.splitlines() if ln.strip()):
-        if tag != current:
-            return tag
-    return ""
+    m = _SEMVER.match(version.strip().removeprefix("v"))
+    if not m:
+        return None
+    return int(m[1]), int(m[2]), int(m[3]), 0 if m[4] else 1
+
+
+def select_upgrade_source(candidate: str, published: Iterable[str]) -> str:
+    """The newest published RELEASE that is <= `candidate`, or "" if there is none.
+
+    Equal counts. An unbumped candidate upgraded from the published artifact with the same number is still
+    an upgrade, and it is the one every existing user of that number performs. Prereleases are skipped
+    because nobody runs one as the cluster they upgrade from. Registry tags that are not versions
+    (cosign's `sha256-<digest>`, `artifacthub.io`) are ignored.
+    """
+    ceiling = _version_key(candidate)
+    if ceiling is None:
+        raise ValueError(f"candidate version {candidate!r} is not SemVer")
+    releases = [(key, tag) for tag in published
+                if (key := _version_key(tag)) is not None and key[3] == 1 and key <= ceiling]
+    return max(releases)[1] if releases else ""
+
+
+def published_chart_versions(repo: str = CHART_REPO) -> list[str]:
+    """Every tag of the published chart, read from the OCI registry (anonymous pull token).
+
+    `helm` has no command that lists OCI tags, but the registry API does, and it lists exactly what
+    `helm install oci://... --version X` can fetch.
+    """
+    host, _, path = repo.partition("/")
+    token_url = f"https://{host}/token?scope=repository:{path}:pull&service={host}"
+    with urllib.request.urlopen(token_url, timeout=30) as r:  # noqa: S310 — fixed https registry URL
+        token = json.loads(r.read().decode())["token"]
+    tags: list[str] = []
+    url = f"https://{host}/v2/{path}/tags/list?n=1000"
+    while url:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 — fixed https registry URL
+            tags += json.loads(r.read().decode()).get("tags") or []
+            nxt = re.search(r'<([^>]+)>;\s*rel="next"', r.headers.get("Link", ""))
+        url = urllib.parse.urljoin(f"https://{host}", nxt.group(1)) if nxt else ""
+    return tags
+
+
+def resolve_upgrade_source(requested: str, candidate: str,
+                           list_published: Callable[[], list[str]] | None = None) -> str:
+    """Turn `--upgrade-from` into a version to install first, or "" for the fresh-install path.
+
+    Only an explicit `none` gives "". `auto` either names a published release or raises, and so does an
+    empty value: `--upgrade-from ""` (an unset CI variable, say) used to fall through as the version ""
+    and reach the fresh-install path, which is the silent switch this function exists to refuse.
+    """
+    if not requested.strip():
+        raise UpgradeSourceError("--upgrade-from is empty. Pass auto, none, or a published version.")
+    if requested == "none":
+        return ""
+    if requested != "auto":
+        return requested
+    try:
+        published = (list_published or published_chart_versions)()
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+        raise UpgradeSourceError(f"could not list the published chart versions at oci://{CHART_REPO}: {exc}") from exc
+    try:
+        source = select_upgrade_source(candidate, published)
+    except ValueError as exc:
+        raise UpgradeSourceError(str(exc)) from exc
+    if not source:
+        releases = sorted((t for t in published if (k := _version_key(t)) and k[3] == 1), key=_version_key)
+        raise UpgradeSourceError(
+            f"no published release <= {candidate} at oci://{CHART_REPO} "
+            f"(published releases: {', '.join(releases) or 'none'}). Nothing was upgraded, so nothing about "
+            f"the upgrade path is known. Pass --upgrade-from none to verify a fresh install deliberately.")
+    return source
 
 
 def install_published(ctx: str, version: str) -> bool:
@@ -597,6 +784,208 @@ def install_published(ctx: str, version: str) -> bool:
     ok = res.returncode == 0 and "STATUS: deployed" in res.stdout
     return check(f"install the previous release ({version}) from OCI", ok,
                  "" if ok else (res.stderr or res.stdout)[-400:])
+
+
+def retire_tenant_policy(ctx: str) -> bool:
+    """Remove the pre-upgrade tenant policy once its survival has been asserted, before stage 3.
+
+    Stage 3 asserts decisions for one identity in TENANT, and those expectations are what a STOCK install
+    answers. The fresh path never has a tenant policy live there (stage 4 creates one, for the uninstall).
+    The upgrade path does: stage 2 created POLICY (strict, block, priority 400, a whole-namespace target,
+    stored at `<TENANT>:namespace:<TENANT>`) so the upgrade could be shown to keep it. Left in place it
+    is a higher-priority enforcing tier than either probe stage 3 writes, so the engine correctly answers
+    with it: the baseline-controls switch cannot relax a tenant's own strict policy (execute_sql stays
+    block / strict_default_block), and the propagation probe at 200 is outranked (search_kb stays allow on
+    BOTH replicas, which reads as a propagation failure). The two paths must assert against the same
+    state, so the policy goes away the way a tenant would remove it, and stage 3 waits for it to be gone.
+
+    Gone means the CR no longer exists: the controller drops its finalizer once the API has deleted the
+    policy (and the delete reached every replica over the policy stream), so a CR that is still there
+    means the engine may still be enforcing it. Stage 3 still polls its own decisions after this.
+    """
+    kubectl(ctx, "delete", "nrvqpolicy", POLICY, "-n", TENANT, "--ignore-not-found", "--wait=false")
+
+    def gone() -> bool:
+        r = kubectl(ctx, "get", "nrvqpolicy", POLICY, "-n", TENANT, "-o", "name")
+        return r.returncode != 0 and "NotFound" in (r.stderr or "")
+
+    t0 = time.monotonic()
+    ok = wait_until(gone, 120)
+    return check("the pre-upgrade tenant policy is removed before the stock probes", ok,
+                 f"took {int(time.monotonic() - t0)}s" if ok else "the CR is still present after 120s")
+
+
+def _api_pods(ctx: str) -> list[str]:
+    """API pods that are not on their way out (a rollout lists the terminating ones too)."""
+    r = kubectl(ctx, "get", "pods", "-n", NS, "-l", "app.kubernetes.io/component=api", "-o", "json")
+    try:
+        items = json.loads(r.stdout).get("items") or []
+    except json.JSONDecodeError:
+        return []
+    return [p["metadata"]["name"] for p in items if not p["metadata"].get("deletionTimestamp")]
+
+
+def seed_bundled_store(ctx: str) -> bool:
+    """Write to the bundled store of the release being upgraded FROM, and get it onto the volume.
+
+    The upgrade path used to install N-1 and upgrade straight away, with nothing ever written to the
+    store, and that hid exactly the failure it needed to find. 0.2.5's Redis 7.4 leaves an RDB-12 dump on
+    norviq-redis-pvc, and 0.2.6's Valkey 8.1 exits on it (measured live on 2026-10-30; see
+    tests/helm/test_bundled_store_upgrade.py).
+
+    A login and a logout are the most ordinary writes a user makes, and the logout leaves a `revoked:`
+    entry in the store. SAVE then writes the dump that any install running for an hour with one change
+    already has (Redis's default `save 3600 1`), so the run does not depend on the shutdown save landing.
+    Keys and dump size are asserted, not assumed: a seed that silently wrote nothing would make every
+    store check after the upgrade pass for the wrong reason.
+    """
+    r = kubectl(ctx, "get", "secret", "norviq-secrets", "-n", NS,
+                "-o", "jsonpath={.data.NRVQ_AUTH_ADMIN_PASSWORD}")
+    pods = _api_pods(ctx)
+    if not r.stdout.strip() or not pods:
+        return check("seed the pre-upgrade store (login + logout)", False,
+                     "admin password secret not readable" if pods else "no API pod")
+    password = base64.b64decode(r.stdout.strip()).decode()
+    with _PortForward(ctx, pods[0], 18103) as pf:
+        try:
+            tok = _api(pf.port, "/api/v1/auth/login", body={"username": "admin", "password": password})
+            token = tok.get("access_token") or tok.get("token") or ""
+            # Allowed while the seeded admin is still `must_change`: logout validates the token itself.
+            _api(pf.port, "/api/v1/auth/logout", token, method="POST")
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            return check("seed the pre-upgrade store (login + logout)", False, str(exc))
+
+    # REDISCLI_AUTH, not `-a`: the password stays out of argv, as the StatefulSet itself is careful to do.
+    r = kubectl(ctx, "exec", STORE_POD, "-n", NS, "-c", STORE_CONTAINER, "--", "sh", "-c",
+                'export REDISCLI_AUTH="$REDIS_PASSWORD"; echo "keys=$(redis-cli DBSIZE)"; '
+                'echo "save=$(redis-cli SAVE)"; echo "rdb=$(wc -c < /data/dump.rdb)"')
+    got = dict(ln.split("=", 1) for ln in r.stdout.splitlines() if "=" in ln)
+    keys = int(got["keys"]) if got.get("keys", "").strip().isdigit() else 0
+    rdb = int(got["rdb"]) if got.get("rdb", "").strip().isdigit() else 0
+    return check("the pre-upgrade store holds data and has saved it to its volume",
+                 keys >= 1 and got.get("save", "").strip() == "OK" and rdb > 0,
+                 f"{keys} key(s), SAVE {got.get('save', '?').strip()}, dump.rdb {rdb} bytes"
+                 + ("" if r.returncode == 0 else f" — {r.stderr.strip()[-200:]}"))
+
+
+def _candidate_store_image(chart: Path) -> str:
+    out = run("helm", "template", "norviq", str(chart), "--set-json", f'policyQuotaNamespaces=["{TENANT}"]',
+              "--show-only", "templates/redis-statefulset.yaml").stdout
+    m = re.search(r'image:\s*"([^"]+)"', out)
+    return m.group(1) if m else ""
+
+
+def check_store_after_upgrade(ctx: str, chart: Path) -> None:
+    """The store's pod must run the candidate's image, be Ready, and STAY up.
+
+    Judged whether or not `helm upgrade` reported success. A store that exits on the old store's files is
+    what makes `--wait` time out, and the timeout alone does not say why. In the live 0.2.5 -> 0.2.6 run
+    the only line that did was in this pod's log: "Can't handle RDB format version 12".
+
+    Sampled twice, STORE_STABLE_S apart. Both samples must be healthy, and the second must be the SAME pod
+    (metadata.uid) running the SAME container (containerID) as the first. The container has no readiness
+    probe, so it reads Ready the moment it starts, and a server that exits while loading its dump is briefly
+    Ready between restarts. restartCount catches a container that restarted in place, but it starts again at
+    0 on a new pod, so a store pod that was replaced inside the window (evicted, or deleted by a crash-looping
+    StatefulSet's controller) looked healthy on restartCount alone; the uid and containerID catch it.
+    """
+    want = _candidate_store_image(chart)
+
+    def sample() -> dict:
+        r = kubectl(ctx, "get", "pod", STORE_POD, "-n", NS, "-o", "json")
+        try:
+            pod = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return {"ready": False, "image": "", "restarts": -1, "uid": "", "container": ""}
+        cs = next((c for c in pod.get("status", {}).get("containerStatuses") or []
+                   if c.get("name") == STORE_CONTAINER), {})
+        image = next((c["image"] for c in pod["spec"]["containers"] if c["name"] == STORE_CONTAINER), "")
+        return {"ready": bool(cs.get("ready")), "image": image, "restarts": int(cs.get("restartCount", 0)),
+                "uid": pod.get("metadata", {}).get("uid", ""), "container": cs.get("containerID", "")}
+
+    def healthy(s: dict) -> bool:
+        return s["ready"] and s["image"] == want and s["restarts"] == 0
+
+    wait_until(lambda: healthy(sample()), 120, interval=3)
+    first = sample()
+    time.sleep(STORE_STABLE_S)
+    second = sample()
+    same = first["uid"] == second["uid"] and first["container"] == second["container"]
+    ok = bool(want) and healthy(first) and healthy(second) and same
+    detail = f"{second['image'] or '?'} ready={second['ready']} restarts={second['restarts']}"
+    if not same:
+        detail += (f"; replaced within {STORE_STABLE_S}s (pod {first['uid'][:8] or '?'} -> {second['uid'][:8] or '?'}, "
+                   f"container {first['container'][-12:] or '?'} -> {second['container'][-12:] or '?'})")
+    if not ok:
+        logs = kubectl(ctx, "logs", STORE_POD, "-n", NS, "-c", STORE_CONTAINER, "--previous", "--tail=4")
+        if logs.returncode != 0:
+            logs = kubectl(ctx, "logs", STORE_POD, "-n", NS, "-c", STORE_CONTAINER, "--tail=4")
+        detail += f" (want {want or 'an image from the candidate chart'}) — " + " | ".join(
+            ln.strip() for ln in logs.stdout.splitlines()[-4:])
+    check("the store's pod runs the candidate image, is Ready, and was neither restarted nor replaced", ok, detail)
+
+
+def _current_api_pods(ctx: str) -> list[str]:
+    """API pods of the Deployment's CURRENT ReplicaSet, never an old one still draining.
+
+    Matched on pod-template-hash of the ReplicaSet carrying the Deployment's own revision. A pod's phase
+    or deletionTimestamp cannot tell an old pod from a new one in the moment between the old
+    ReplicaSet's scale-down and the pod's removal, and an old pod answering /readyz is the false pass
+    this check must not give.
+    """
+    def items(*args: str) -> list[dict]:
+        try:
+            return json.loads(kubectl(ctx, "get", *args, "-n", NS, "-o", "json").stdout).get("items") or []
+        except json.JSONDecodeError:
+            return []
+
+    try:
+        deploy = json.loads(kubectl(ctx, "get", "deploy", "norviq-api", "-n", NS, "-o", "json").stdout)
+    except json.JSONDecodeError:
+        return []
+    revision = (deploy.get("metadata", {}).get("annotations") or {}).get("deployment.kubernetes.io/revision")
+    hashes = {
+        rs["metadata"]["labels"].get("pod-template-hash")
+        for rs in items("rs", "-l", "app.kubernetes.io/component=api")
+        if (rs["metadata"].get("annotations") or {}).get("deployment.kubernetes.io/revision") == revision
+        and any(o.get("kind") == "Deployment" and o.get("name") == "norviq-api"
+                for o in rs["metadata"].get("ownerReferences") or [])
+    } - {None}
+    return [p["metadata"]["name"] for p in items("pods", "-l", "app.kubernetes.io/component=api")
+            if (p["metadata"].get("labels") or {}).get("pod-template-hash") in hashes
+            and not p["metadata"].get("deletionTimestamp")]
+
+
+def check_api_after_upgrade(ctx: str) -> None:
+    """The API Deployment fully rolled out, and a pod of the NEW ReplicaSet saying on /readyz that it
+    reaches the store.
+
+    `kubectl rollout status` is the completion test. It waits for observedGeneration, updated, available
+    and total replicas to agree, which means no old replica is still counted. The first version compared
+    readyReplicas with updatedReplicas, which can agree while old pods still serve, and then picked any
+    non-terminating API pod for /readyz, which could be an old one mid-rollout.
+    """
+    rollout = kubectl(ctx, "rollout", "status", "deployment/norviq-api", "-n", NS, "--timeout=180s",
+                      timeout=240)
+    rolled = rollout.returncode == 0
+    payload: dict = {}
+    pods = _current_api_pods(ctx) if rolled else []
+    if pods:
+        with _PortForward(ctx, pods[0], 18104) as pf:
+            try:
+                payload = _api(pf.port, "/readyz")
+            except urllib.error.HTTPError as exc:  # 503 still carries the per-dependency payload
+                try:
+                    payload = json.loads(exc.read().decode())
+                except (json.JSONDecodeError, OSError):
+                    payload = {"status": f"HTTP {exc.code}"}
+            except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+                payload = {"status": f"unreachable: {exc}"}
+    last = (rollout.stdout or rollout.stderr).strip().splitlines()[-1:] or ["no output"]
+    check("the API is Ready after the upgrade and reaches the store",
+          rolled and bool(pods) and payload.get("redis") is True,
+          f"rollout: {last[0][:160]}; /readyz on {pods[0] if pods else 'no current-revision pod'}: "
+          f"{payload or 'not reached'}")
 
 
 def snapshot(ctx: str) -> dict[str, str]:
@@ -625,13 +1014,9 @@ def snapshot(ctx: str) -> dict[str, str]:
     }
 
 
-def upgrade_to_candidate(ctx: str, chart: Path, webhook_image: str = "") -> bool:
+def upgrade_to_candidate(ctx: str, chart: Path, images: dict[str, str] | None = None) -> bool:
     """--reset-then-reuse-values: the command the README and both runbooks tell operators to use."""
-    extra: list[str] = []
-    if webhook_image:
-        tag = webhook_image.rpartition(":")[2]
-        extra = ["--set", f"images.webhook.tag={tag}", "--set", "images.webhook.digest=",
-                 "--set", "images.webhook.pullPolicy=IfNotPresent"]
+    extra = candidate_overrides(images or {})
 
     t0 = time.monotonic()
     res = helm(ctx, "upgrade", "norviq", str(chart), "-n", NS, "--reset-then-reuse-values",
@@ -641,7 +1026,8 @@ def upgrade_to_candidate(ctx: str, chart: Path, webhook_image: str = "") -> bool
                  f"{int(time.monotonic() - t0)}s" if ok else (res.stderr or res.stdout)[-400:])
 
 
-def check_upgrade_preserved(ctx: str, chart: Path, before: dict[str, str]) -> None:
+def check_upgrade_preserved(ctx: str, chart: Path, before: dict[str, str],
+                            images: dict[str, str] | None = None) -> None:
     after = snapshot(ctx)
 
     # Rotating either of these strands a working install: see snapshot()'s note. Compared by value,
@@ -658,12 +1044,16 @@ def check_upgrade_preserved(ctx: str, chart: Path, before: dict[str, str]) -> No
     # "Move all four image tags together" is a warning in getting-started because a partial upgrade
     # leaves the OLD policy enforcing while every version string reports the new one. Assert it
     # instead of warning about it: nothing may still be running an image the candidate does not pin.
+    # Rendered with the SAME candidate-image overrides the upgrade used, and tag refs counted as well as
+    # digests: a component running a locally built candidate is on a tag, and an old pod still on the
+    # previous release's digest must show up here either way.
+    ref = rf"{re.escape(REPO)}(?:@sha256:[0-9a-f]{{64}}|:[A-Za-z0-9._-]+)"
     rendered = run("helm", "template", "norviq", str(chart), "--set-json",
-                   f'policyQuotaNamespaces=["{TENANT}"]', "--set", "webhook.injection.enabled=true").stdout
-    expected = set(re.findall(rf"{re.escape(REPO)}@sha256:[0-9a-f]{{64}}", rendered))
-    running = set(re.findall(rf"{re.escape(REPO)}@sha256:[0-9a-f]{{64}}",
-                             kubectl(ctx, "get", "pods", "-n", NS, "-o",
-                                     "jsonpath={range .items[*]}{range .spec.containers[*]}{.image} {end}{end}").stdout))
+                   f'policyQuotaNamespaces=["{TENANT}"]', "--set", "webhook.injection.enabled=true",
+                   *candidate_overrides(images or {})).stdout
+    expected = set(re.findall(ref, rendered))
+    running = set(re.findall(ref, kubectl(ctx, "get", "pods", "-n", NS, "-o",
+                                          "jsonpath={range .items[*]}{range .spec.containers[*]}{.image} {end}{end}").stdout))
     stale = running - expected
     check("no pod is left on a pre-upgrade image", not stale, f"{sorted(stale)[:2]}")
 
@@ -677,18 +1067,30 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cluster", default="nrvq-verify")
     ap.add_argument("--version", default="", help="version to stamp (default: the repo's own)")
-    ap.add_argument("--webhook-image", default="",
-                    help="a locally built webhook image (already `kind load`ed) to run INSTEAD of the "
-                         "pinned one. The rest of the chart stays digest-pinned, so this tests a "
-                         "candidate webhook against the sidecar image a real release would inject.")
+    ap.add_argument("--candidate-image", action="append", default=[], metavar="COMP=IMAGE",
+                    help="a locally built image of one of Norviq's components (" + ", ".join(COMPONENTS) +
+                         "), tagged under " + REPO + " and already `kind load`ed, to run INSTEAD of the "
+                         "pinned one. Repeatable. The images a release ships are built from the tagged "
+                         "commit, not from main, so a release candidate is only verified when every "
+                         "component it changes is passed here; anything not passed stays on the "
+                         "digest-pinned `<comp>-latest` from main.")
+    ap.add_argument("--webhook-image", default="", help="shorthand for --candidate-image webhook=IMAGE")
     ap.add_argument("--upgrade-from", default="auto", metavar="VERSION",
                     help="Verify the UPGRADE path instead of a fresh install: install this published "
                          "version from OCI, seed state, then upgrade to the candidate. 'auto' (the "
-                         "default) picks the highest released tag below the candidate; 'none' runs "
-                         "the fresh-install path only.")
+                         "default) picks the newest release published to the chart registry that is <= "
+                         "the candidate, equal included, and FAILS if there is none; 'none' runs the "
+                         "fresh-install path only.")
     ap.add_argument("--keep", action="store_true", help="leave the cluster up for debugging")
     ap.add_argument("--skip-create", action="store_true", help="reuse an existing cluster")
     args = ap.parse_args()
+
+    try:
+        images = parse_candidate_images(
+            [*args.candidate_image, *([f"webhook={args.webhook_image}"] if args.webhook_image else [])])
+    except ValueError as exc:
+        print(f"\nFAIL  {exc}", file=sys.stderr)
+        return 2
 
     for tool in ("kind", "helm", "kubectl", "docker"):
         if not shutil.which(tool):
@@ -702,8 +1104,21 @@ def main() -> int:
 
         version = chk.collect()["helm/norviq/Chart.yaml:version"]
 
+    # Resolved before any cluster exists: a run that cannot name what it upgrades from should fail in
+    # seconds, not after building a cluster to run a different test in.
+    try:
+        from_version = resolve_upgrade_source(args.upgrade_from, version)
+    except UpgradeSourceError as exc:
+        print(f"\nFAIL  --upgrade-from {args.upgrade_from}: {exc}", file=sys.stderr)
+        return 1
+
     ctx = f"kind-{args.cluster}"
-    print(f"\nverifying the RELEASE ARTIFACT for {version} in kind cluster {args.cluster}\n")
+    print(f"\nverifying the RELEASE ARTIFACT for {version} in kind cluster {args.cluster}")
+    print(f"path: upgrade from the published {from_version}" if from_version
+          else "path: fresh install (--upgrade-from none)")
+    print("candidate images: " + (", ".join(f"{c}={images[c]}" for c in COMPONENTS if c in images) or "none")
+          + "; " + (", ".join(c for c in COMPONENTS if c not in images) or "nothing")
+          + " from the pinned <comp>-latest (main)\n")
 
     if not args.skip_create:
         run("kind", "delete", "cluster", "--name", args.cluster, timeout=300)
@@ -718,14 +1133,6 @@ def main() -> int:
             chart = stamp(version, Path(td))
             check_stamped_shape(ctx, chart)
 
-            from_version = args.upgrade_from
-            if from_version == "auto":
-                from_version = previous_published_version(version)
-                if not from_version:
-                    print("  (no earlier release to upgrade from — running the fresh-install path)")
-            elif from_version == "none":
-                from_version = ""
-
             if from_version:
                 # The upgrade path REPLACES the fresh install rather than running after it: a release
                 # is installed fresh by new users and upgraded into by every existing one, and the
@@ -736,14 +1143,20 @@ def main() -> int:
                 started = install_published(ctx, from_version)
                 if started:
                     create_tenant_policy(ctx)
+                    seed_bundled_store(ctx)
                     before = snapshot(ctx)
                     print(f"\nstage 2u — upgrade {from_version} -> {version}")
-                    started = upgrade_to_candidate(ctx, chart, args.webhook_image)
+                    started = upgrade_to_candidate(ctx, chart, images)
+                    # Run whether or not the upgrade reported success: when it times out, these are
+                    # the checks that say which component did not come back, and why.
+                    check_store_after_upgrade(ctx, chart)
+                    check_api_after_upgrade(ctx)
                     if started:
-                        check_upgrade_preserved(ctx, chart, before)
+                        check_upgrade_preserved(ctx, chart, before, images)
+                        retire_tenant_policy(ctx)
             else:
                 print("\nstage 2 — install it the way automation does")
-                started = install(ctx, chart, args.webhook_image)
+                started = install(ctx, chart, images)
 
             if started:
                 print("\nstage 3 — use it")

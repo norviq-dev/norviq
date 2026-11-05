@@ -24,18 +24,19 @@ image by immutable digest, so what you deploy is exactly what the release publis
 lives *inside* the chart, so pull and untar once to get `values-prod.yaml` on disk:
 
 ```bash
-helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 --untar
+helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 --untar
 # -> ./norviq/{Chart.yaml,values.yaml,values-prod.yaml,...}
 ```
 
 Every `./norviq` path below refers to that untarred chart. To install without the overlay you can skip
-the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5` directly.
+the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6` directly.
 
 ## Prerequisites (multi-node)
 - **≥3 nodes** (so podAntiAffinity / topologySpread actually spread replicas).
 - **metrics-server** installed (HPA reads CPU/mem).
 - **CloudNativePG operator** installed (Postgres HA renders a `postgresql.cnpg.io/v1 Cluster`).
-- **A Redis HA operator** — `values-prod` renders a Spotahome `RedisFailover`. The chart also
+- **A Redis HA operator** — `values-prod` renders a Spotahome `RedisFailover` (`norviq-valkey-ha`,
+  Valkey 8.1 for the redis and sentinel pods; set by `redis.ha.image`). The chart also
   renders the **master Service** (`redis.ha.serviceName`) itself, selecting the operator's
   `redisfailovers-role: master` pod label; the operator provisions only a sentinel Service, so
   without that the HA hostname resolved to nothing. Failover-tested on a live cluster: master killed
@@ -60,7 +61,7 @@ the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --versio
 | engine replicas / PDB | 1 / off | HA floor 2 / minAvailable 1 + HPA + spread |
 | webhook | 2, injection **off** | HA floor 2 + PDB + HPA + spread + injection **on** |
 | Postgres | single StatefulSet | CloudNativePG `Cluster` (3) — operator required |
-| Redis | single StatefulSet | `RedisFailover` (Sentinel, 3) + a chart-rendered master Service — operator required |
+| Redis | single StatefulSet | `RedisFailover` on Valkey (Sentinel, 3) + a chart-rendered master Service — operator required |
 | DB / Redis password | shipped dev defaults | **blank — you must supply them** (see below) |
 | strong-secret guard / DB TLS | already on / already `require` | unchanged (on / `require`) |
 
@@ -194,13 +195,22 @@ so spans are never silently dropped into a void. Metrics (above) are independent
 ## Air-gapped / private registry
 
 Norviq's own images use `images.registry` (default `ghcr.io/norviq-dev/`). The third-party images
-(opa, redis, postgres, the tls-proxy nginx, the cert-bootstrap job, the helm-test curl) are mirrored
-with `global.imageRegistry`:
+(opa, valkey, postgres, the tls-proxy nginx, the wait-for busybox, the helm-test curl, and the CNPG
+operand when `postgresql.ha.enabled`) are mirrored with `global.imageRegistry`:
 ```bash
 --set images.registry="myregistry.example.com/norviq/" \
---set global.imageRegistry="myregistry.example.com"     # prepended to the six upstream images
+--set global.imageRegistry="myregistry.example.com"     # prepended to every upstream image
 ```
-Mirror the upstreams into your registry preserving their path (`.../openpolicyagent/opa`, `.../redis`, …).
+Mirror the upstreams into your registry preserving their path (`.../openpolicyagent/opa`,
+`.../valkey/valkey`, …) **and their digest**. The chart pins each third-party image by its multi-arch
+index digest (`global.thirdPartyImageDigests`) and keeps that digest after the mirror prefix, so copy
+with a tool that preserves it:
+```bash
+crane copy postgres:16-alpine myregistry.example.com/postgres:16-alpine     # or: skopeo copy --all
+```
+`docker pull` + `docker push` re-pushes a single platform under a new digest, and the pinned ref then
+fails with `manifest unknown`. If your mirror was filled that way, drop the pins instead:
+`--set global.thirdPartyImageDigests=null`.
 
 ## Verify the deploy
 ```bash

@@ -108,6 +108,18 @@ async def init_db() -> None:
     log.info("nrvq.db.connected", pool_size=settings.pg_pool_size, code="NRVQ-DB-9000")
 
 
+async def ping_db() -> None:
+    """Open one connection and run `SELECT 1`: the API's first real contact with Postgres.
+
+    `init_db` builds the engine lazily and connects to nothing, so this is what the startup retry in
+    norviq/api/main.py wraps. Raises whatever the driver raises (refused, unresolvable, timeout, auth).
+    """
+    if _engine is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    async with _engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+
+
 # Schema init contends across EVERY api process, not every pod. The chart runs api.workers: 4 across
 # api.replicas: 2, so eight processes call create_tables() at once and seven of them queue on one
 # advisory lock — while the connection carries the ordinary NRVQ_DB_COMMAND_TIMEOUT (10s by default).
@@ -331,6 +343,8 @@ async def ensure_schema_compatibility() -> None:
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
         # SECURITY (trust fail-open fix): durable freeze/cap so a Redis flush can't lift a kill-switch.
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT false",
+        # Monotonic fence tokens for admin trust store writes (norviq/api/routers/agents.py::_fence_token).
+        "CREATE SEQUENCE IF NOT EXISTS agent_trust_fence_seq",
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS trust_cap DOUBLE PRECISION",
     )
     # Same treatment as create_tables, and for the same reason — the timeout simply moved one function

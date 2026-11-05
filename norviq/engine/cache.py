@@ -22,6 +22,11 @@ log = structlog.get_logger()
 POLICY_EVENTS_CHANNEL = "norviq:policy_events"
 # Live audit fan-out across API workers/replicas — see publish_audit_record.
 AUDIT_RECORDS_CHANNEL = "norviq:audit_records"
+# Outside the `revoked:` prefix on purpose, so a SCAN of the denylist never mistakes it for an entry and
+# a 0.2.5 replica, which reads `revoked:<sha256>` only, can never collide with it.
+REVOCATION_SEED_MARKER = "norviq:revocations_seeded"
+# Commands per pipelined round trip when the API reads or rewrites the whole denylist.
+_REVOKED_BATCH = 1000
 
 
 def _hash_seg(segment: str) -> str:
@@ -564,6 +569,58 @@ class RedisCache:
         """Logout denylist: True if this token hash was revoked and has not yet expired."""
         return await self._client().get(f"revoked:{token_hash}") is not None
 
+    async def revocation_seed_marker_present(self) -> bool:
+        """False once Redis has lost its data since the API last rebuilt the denylist from Postgres.
+
+        The marker has no TTL, so it lives exactly as long as the dataset it vouches for: a Redis that
+        restarts without its RDB, fails over to an empty replica, or is flushed comes back without it.
+        One GET per process per sync pass — never on a request."""
+        return bool(await self._client().exists(REVOCATION_SEED_MARKER))
+
+    async def scan_revoked_tokens(self) -> dict[str, int]:
+        """Every live denylist entry as {token_hash: remaining_ttl_s}. Read once when an API process
+        boots and again after a data loss — never per request — so one SCAN of the keyspace is
+        affordable. What the entries are worth is the caller's call: they are imported as revocations.
+        The TTLs are read in pipelined batches: one round trip per key took 1.61s at 10.4k keys."""
+        client = self._client()
+        keys = [key async for key in client.scan_iter(match="revoked:*", count=1000)]
+        found: dict[str, int] = {}
+        for i in range(0, len(keys), _REVOKED_BATCH):
+            batch = keys[i : i + _REVOKED_BATCH]
+            async with client.pipeline(transaction=False) as pipe:
+                for key in batch:
+                    await pipe.ttl(key)
+                ttls = await pipe.execute()
+            for key, ttl in zip(batch, ttls):
+                if ttl and ttl > 0:  # -2: gone since the SCAN; -1: no TTL, which this module never writes
+                    found[key.removeprefix("revoked:")] = int(ttl)
+        return found
+
+    async def reseed_revoked_tokens(self, entries: dict[str, int]) -> None:
+        """Write {token_hash: ttl_s} back into the denylist and set the marker, in one pipelined round
+        trip. Redis is not the durable record any more, but the engine's remote-caller path and a
+        rolled-back 0.2.5 replica read nothing else, so a wiped Redis has to be put back for them."""
+        await self._write_revoked(entries, marker=True)
+
+    async def revoke_tokens(self, entries: dict[str, int]) -> None:
+        """Write {token_hash: ttl_s} into the denylist in one pipelined round trip WITHOUT the marker.
+        For the logouts one API process holds that Postgres does not have yet: they vouch for nothing
+        but themselves, and the marker means the whole denylist is present."""
+        await self._write_revoked(entries, marker=False)
+
+    async def _write_revoked(self, entries: dict[str, int], *, marker: bool) -> None:
+        """In batches, so a reseed of the whole denylist is not one unbounded pipeline; the marker goes
+        last, after every entry has been written, because it vouches for all of them."""
+        client = self._client()
+        items = list(entries.items())
+        for i in range(0, len(items), _REVOKED_BATCH):
+            async with client.pipeline(transaction=False) as pipe:
+                for token_hash, ttl_s in items[i : i + _REVOKED_BATCH]:
+                    await pipe.set(f"revoked:{token_hash}", "1", ex=max(1, int(ttl_s)))
+                await pipe.execute()
+        if marker:
+            await client.set(REVOCATION_SEED_MARKER, "1")
+
     async def set_ns_settings(self, namespace: str, fields: dict) -> None:
         """Mirror a namespace's RAW persisted settings override into Redis so the engine
         hot path can resolve per-ns posture without a per-eval DB read (the evaluator holds only this cache, and
@@ -586,3 +643,138 @@ class RedisCache:
     async def clear_trust_override(self, spiffe_id: str) -> None:
         """Remove the admin trust cap (score cleared / set to 1.0 / frozen)."""
         await self._client().delete(f"agent_trust_override:{spiffe_id}")
+
+    # The owner fence on every admin trust store write (norviq/api/routers/agents.py::update_trust and the boot
+    # warm). Each writer claims agent_trust_owner:<id> under the agent's lock, then writes through a script that
+    # does nothing unless it still owns the agent. A write that outlives its lock — cut off by a timeout while
+    # already on the wire, or from a request whose connection dropped — can then never land over a writer that
+    # took over. A missing owner key (a flush, an eviction) fences everyone off: the next claim restores it.
+    _OWNER_TTL_MS = 30_000
+    FENCE_APPLIED, FENCE_LOST, FENCE_MISSING = 1, 0, -1
+    _FENCED_CONTROL_LUA = """
+local owner = redis.call('GET', KEYS[1])
+if not owner then return -1 end
+if owner ~= ARGV[1] then return 0 end
+if ARGV[2] == '1' then redis.call('SET', KEYS[2], '1') else redis.call('DEL', KEYS[2]) end
+if ARGV[3] ~= '' then redis.call('SET', KEYS[3], ARGV[3]) else redis.call('DEL', KEYS[3]) end
+if ARGV[4] ~= '' then redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[5]) end
+return 1
+"""
+    # The boot warm's write: ADDS what Postgres holds (a freeze, else a cap) and deletes nothing, fenced the same way.
+    _FENCED_WARM_LUA = """
+local owner = redis.call('GET', KEYS[1])
+if not owner then return -1 end
+if owner ~= ARGV[1] then return 0 end
+if ARGV[2] == '1' then redis.call('SET', KEYS[2], '1') elseif ARGV[3] ~= '' then redis.call('SET', KEYS[3], ARGV[3]) end
+return 1
+"""
+
+    # The fence token is MONOTONIC: an admin writer takes it from a Postgres sequence while holding the agent's
+    # lock (norviq/api/routers/agents.py::_fence_token), so a later lock holder always has a larger token. A
+    # claim only ever raises the owner; a writer whose lock died and whose claim lands late carries the smaller
+    # token, is refused, and its fenced write is then a no-op (review round 6: a random token let such a late
+    # claim win over a freeze committed with 200 in between). A claim without a token (a freeze stealing the
+    # fence while it cannot get the lock) keeps the last lock holder's token and adds a steal count (see
+    # _CLAIM_LUA). An owner value this release cannot parse (an older release's) counts as token 0; a non-numeric
+    # token (no product writer sends one) is not ordered and replaces the owner, as before.
+    # The owner value is "<L>" or "<L>:<S>": L is the last lock-holding writer's sequence token, S counts freezes
+    # that stole the fence since. A lock-holding claim (a token) wins iff it is newer than L, or it IS L and nothing
+    # stole since; it sets "<token>". A steal (no token) keeps L and bumps S, so the writer it took the fence from
+    # is fenced off, while every later lock holder (a larger sequence token) still wins: steals never move the
+    # owner ahead of the global sequence, so K steals cannot starve the writers after them (review round 7).
+    # Parsing is strict (review round 8): L and S are digit strings, anything else is token 0. Tokens are compared
+    # as digit strings (length, then text), never as Lua numbers, so no value loses precision or turns into
+    # "inf" or an exponent. S is incremented as a number; it counts steals within one owner TTL and stays tiny.
+    _CLAIM_LUA = """
+local cur = redis.call('GET', KEYS[1])
+local function canon(d)
+  d = string.gsub(d, '^0+', '')
+  if d == '' then return '0' end
+  return d
+end
+local function older(a, b)
+  if #a ~= #b then return #a < #b end
+  return a < b
+end
+local token = ARGV[1]
+local last, stolen = '0', 0
+if cur then
+  local l, s = string.match(cur, '^(%d+):(%d+)$')
+  if l and #s <= 9 then
+    last, stolen = canon(l), tonumber(s)
+  elseif string.match(cur, '^%d+$') then
+    last = canon(cur)
+  end
+end
+if token == '' then
+  token = last .. ':' .. string.format('%d', stolen + 1)
+elseif string.match(token, '^%d+$') then
+  local t = canon(token)
+  if older(t, last) or (t == last and stolen > 0) then return false end
+  token = t
+end
+redis.call('SET', KEYS[1], token, 'PX', ARGV[2])
+return token
+"""
+
+    async def claim_admin_trust_owner(
+        self, spiffe_id: str, token: int | str | None, ttl_ms: int | None = None
+    ) -> str | None:
+        """Make ``token`` the agent's admin writer if it is not older than the current one, and return it; None when
+        a newer writer owns the agent. ``token`` None steals: it keeps the last lock holder's token and adds one
+        to the steal count ("<L>:<S+1>", see _CLAIM_LUA). ``ttl_ms`` (default 30 s) must outlast the writer's
+        whole operation, or its own write finds the key gone."""
+        result = await self._client().eval(
+            self._CLAIM_LUA, 1, f"agent_trust_owner:{spiffe_id}", "" if token is None else str(token),
+            str(ttl_ms or self._OWNER_TTL_MS),
+        )
+        if result is None or result is False:
+            return None
+        return result.decode() if isinstance(result, bytes) else str(result)
+
+    async def apply_admin_trust_control_if_owner(
+        self, spiffe_id: str, token: int | str, *, frozen: bool, cap: float | None, display: TrustScore | None = None
+    ) -> int:
+        """Write one agent's whole admin control state — freeze flag, cap, and optionally the displayed score —
+        atomically, and only while ``token`` owns the agent. Returns FENCE_APPLIED, FENCE_LOST (another writer
+        owns it) or FENCE_MISSING (the owner key is gone, so the store's state is unknown). One script, so a
+        freeze-to-cap change never has an instant with neither, as separate DEL and SET commands did."""
+        keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}",
+                f"trust:{spiffe_id}"]
+        args = [str(token), "1" if frozen else "0", "" if cap is None else str(float(cap)),
+                "" if display is None else display.model_dump_json(),
+                str(self._jitter_ttl(settings.redis_ttl_trust_s))]
+        return int(await self._client().eval(self._FENCED_CONTROL_LUA, len(keys), *keys, *args))
+
+    async def warm_admin_trust_controls(
+        self, token: int | str, entries: list[tuple[str, bool, float | None]], rounds: int = 3
+    ) -> list[int]:
+        """The boot warm's batch: claim every agent for ``token``, then add each agent's freeze or cap through the
+        fence, in two pipelines. A cut-off attempt's late writes are no-ops once an admin write re-claims.
+
+        The caller holds the batch's Postgres locks, so no LIVE admin writer can own these agents: a lost or
+        missing fence here is a dead writer's late claim (a SET cut off on the wire that landed after the warm's
+        claim). Those agents are re-claimed and re-added, up to ``rounds`` times (a freeze steal since the warm's
+        claim keeps the warm fenced off: the agent reports lost and the caller retries it with a newer token); the outcomes returned are the last ones, so the caller can see any
+        agent that still did not take its control."""
+        client = self._client()
+        outcomes = [self.FENCE_LOST] * len(entries)
+        for _ in range(rounds):
+            pending = [i for i, outcome in enumerate(outcomes) if outcome != self.FENCE_APPLIED]
+            if not pending:
+                break
+            async with client.pipeline(transaction=False) as pipe:
+                for i in pending:
+                    await pipe.eval(self._CLAIM_LUA, 1, f"agent_trust_owner:{entries[i][0]}", str(token),
+                                    str(self._OWNER_TTL_MS))
+                await pipe.execute()
+            async with client.pipeline(transaction=False) as pipe:
+                for i in pending:
+                    spiffe_id, frozen, cap = entries[i]
+                    keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}",
+                            f"agent_trust_override:{spiffe_id}"]
+                    await pipe.eval(self._FENCED_WARM_LUA, 3, *keys, str(token), "1" if frozen else "0",
+                                    "" if cap is None else str(float(cap)))
+                for i, result in zip(pending, await pipe.execute()):
+                    outcomes[i] = int(result)
+        return outcomes

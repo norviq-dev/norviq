@@ -126,7 +126,7 @@ function Donut({ size, coveragePct }: { size: number; coveragePct: number }) {
       <circle cx="21" cy="21" r="15.9" fill="none" stroke="#1c1c1f" strokeWidth="5" />
       <circle cx="21" cy="21" r="15.9" fill="none" stroke={ENFORCED} strokeWidth="5" strokeDasharray={r.green} strokeDashoffset={r.greenOff} transform="rotate(-90 21 21)" strokeLinecap="round" />
       <circle cx="21" cy="21" r="15.9" fill="none" stroke={GAP} strokeWidth="5" strokeDasharray={r.amber} strokeDashoffset={r.amberOff} transform="rotate(-90 21 21)" />
-      <text x="21" y="24.4" textAnchor="middle" fontSize="9.5" fontWeight={800} fill="#ededf0" fontFamily="Outfit, system-ui, sans-serif">
+      <text x="21" y="24.4" textAnchor="middle" fontSize="9.5" fontWeight={800} fill="#ededf0" style={{ fontFamily: "var(--font-sans)" }}>
         {label}
       </text>
     </svg>
@@ -454,7 +454,7 @@ export function Compliance() {
   const detailLoading = activeCoverage.loading && !data;
 
   return (
-    <div className="page-enter" style={{ color: "#ededf0", fontFamily: "'Outfit', system-ui, sans-serif" }}>
+    <div className="page-enter" style={{ color: "#ededf0", fontFamily: "var(--font-sans)" }}>
       {/* DEGRADED BANNER — bound to the real coverage fetch error state. */}
       {apiDegraded && (
         <div
@@ -1298,7 +1298,7 @@ function TechniqueDetail({
           </span>
         </div>
       </div>
-      <div style={{ fontFamily: "ui-monospace, 'JetBrains Mono', monospace", fontSize: 12, color: MUTED, margin: "5px 0 14px" }}>
+      <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: MUTED, margin: "5px 0 14px" }}>
         {t.technique_id}
       </div>
       {t.description && <div style={{ fontSize: 13, color: "#a2a2aa", lineHeight: 1.6 }}>{t.description}</div>}

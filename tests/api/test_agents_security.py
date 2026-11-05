@@ -18,8 +18,8 @@ from types import SimpleNamespace
 import jwt
 from fastapi.testclient import TestClient
 
-from norviq.api.db.session import get_session
 from norviq.api.main import create_app
+from norviq.api.routers.agents import get_admin_db
 from norviq.config import settings
 from norviq.sdk.core.trust import TrustScore
 
@@ -101,20 +101,32 @@ def test_admin_reads_namespaceless_agent() -> None:
 
 
 def _session_override(app, row):
-    class _FakeSession:
-        async def execute(self, _stmt):
-            return SimpleNamespace(scalar_one_or_none=lambda: row)
+    """DELETE runs on the admin-write connection (agents.get_admin_db), which holds the agent's lock."""
+    mapping = None if row is None else {"namespace": row.namespace, "frozen": row.frozen, "trust_cap": row.trust_cap}
 
-        async def delete(self, _row) -> None:
-            return None
+    class _FakeConn:
+        async def execute(self, _stmt, _params=None):
+            return SimpleNamespace(
+                mappings=lambda: SimpleNamespace(first=lambda: mapping), scalar=lambda: True, rowcount=1
+            )
 
         async def commit(self) -> None:
             return None
 
-    async def _override():
-        yield _FakeSession()
+        async def rollback(self) -> None:
+            return None
 
-    app.dependency_overrides[get_session] = _override
+        async def close(self) -> None:
+            return None
+
+        async def invalidate(self) -> None:
+            return None
+
+    class _FakeDb:
+        async def connect(self):
+            return _FakeConn()
+
+    app.dependency_overrides[get_admin_db] = lambda: _FakeDb()
 
 
 def test_deregister_rejects_foreign_target_cluster() -> None:
@@ -122,7 +134,7 @@ def test_deregister_rejects_foreign_target_cluster() -> None:
     Before the fix the guard was absent, so the delete proceeded to the registry (404 here). served
     cluster defaults to 'local' (fleet_cluster_id unset), so 'cluster-b' never matches."""
     app, client = _client(set())
-    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))  # row exists => old code would 200, not 409
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a", frozen=False, trust_cap=None))  # row exists => old code would 200, not 409
     resp = client.request(
         "DELETE",
         f"/api/v1/agents/{NS_AGENT}",
@@ -134,7 +146,7 @@ def test_deregister_rejects_foreign_target_cluster() -> None:
 def test_deregister_local_intent_still_works() -> None:
     """No target header (local intent) => the guard is a no-op and the delete proceeds."""
     app, client = _client(set())
-    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a", frozen=False, trust_cap=None))
     resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
     assert resp.status_code == 200
     body = resp.json()
@@ -240,7 +252,7 @@ def test_deregister_removes_the_agents_node_from_the_asset_graph() -> None:
     store = _FakeStore()
     app.state.evaluator = evaluator
     app.state.graph_store = store
-    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a", frozen=False, trust_cap=None))
 
     resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
 
@@ -260,7 +272,7 @@ def test_deregister_reports_false_when_the_agent_had_no_graph_node() -> None:
     app, client = _client(set())
     app.state.evaluator = _FakeEvaluator(_FakeGraph(set()))
     app.state.graph_store = _FakeStore()
-    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a", frozen=False, trust_cap=None))
 
     resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
 
@@ -279,7 +291,7 @@ def test_deregister_still_succeeds_when_the_graph_prune_raises() -> None:
     app, client = _client(set())
     app.state.evaluator = _Exploding(_FakeGraph({NS_AGENT}))
     app.state.graph_store = _FakeStore()
-    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a", frozen=False, trust_cap=None))
 
     resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
 

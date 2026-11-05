@@ -272,6 +272,58 @@ _EXEC_TOKENS = frozenset({
     "actuate", "trip", "detonate", "fire", "launch", "reboot", "restart", "shutdown", "halt", "detach",
 })
 _reg(Verb.DELETE, RiskLevel.CRITICAL, *sorted(_EXEC_TOKENS))
+
+# ...and of those, the three that name NO operation of their own. `run X`, `execute X`, `invoke X` all
+# mean "carry out X": the token after them is the operation, and they add nothing to it. `run_query`
+# runs a query exactly as `query`, `sql_query` and `read_query` do — all three already classified
+# `read` — and ranking `run` above the read it governs made the verb of a SELECT depend on which
+# synonym the tool's author picked. Measured, before this set existed: run_query, run_search,
+# run_sql_query, run_lookup, execute_query, get_run_status and list_run_logs all reported `delete`, so
+# a policy gating on `derived.verb == "delete"` refused them, and an admin promotion could not reach
+# them because a resolved name beats a promotion (7.10).
+#
+# That rank was not worthless, though, and dropping it alone gave something away: its `delete` also
+# refused every UPDATE/INSERT/GRANT/ALTER sent through run_query under the rules that ask for
+# `verb == "read"`. So a qualifier that yields keeps `read` only when the payload is POSITIVELY a read,
+# and fails closed to the pre-7.10 reading otherwise — see `_payload_write_signal` and the end of
+# classify_tool.
+#
+# The rest of _EXEC_TOKENS are not qualifiers in this sense and keep their rank. `shell`, `bash`,
+# `sh`, `cmd`, `eval`, `exec`, `spawn`, `system` name an interpreter the call hands a string to —
+# that IS the operation, whatever the string is for, so `shell_get_env` stays a code execution. The
+# lifecycle tokens (`restart`, `shutdown`, `launch`, …) are operations on a running system. The split
+# is the one both baselines already draw: their `exec_name_tokens` (the names on which a shell
+# metacharacter counts as injection) carry `exec`/`eval`/`shell` and deliberately not
+# `run`/`execute`/`invoke`. Measured through both: a prose `;` in a note blocks `exec_report` and
+# `shell_report` as `deny_shell_execution` and allows `run_report`, `execute_report`, `invoke_report`.
+_RUN_QUALIFIERS = frozenset({"run", "execute", "invoke"})
+
+# What a qualifier can be told to run that makes the call a code execution after all. Only consulted
+# when a qualifier is present, so `get_script` / `get_command_invocation` (reads of a definition) are
+# untouched; it keeps `run_command_get_output` and `execute_script_read_result` the exec they are
+# instead of the read their trailing token would otherwise make them. The vocabulary is the baselines'
+# `exec_name_tokens` that the lexicon above does not already carry, plus `script`/`code`/`program`,
+# the commonest objects of `run_` in real tool names, and the plurals the tokenizer does not fold.
+#
+# Over-inclusion here can only keep a name at the classification it had before the qualifier rule —
+# `run_code_search` still reports `delete` — never add a refusal; under-inclusion lets an executing
+# tool with a read token in its name report `read`. So it errs wide.
+#
+# The second and third lines are the runtimes and the units of code they run. The first line alone
+# left `run_python_get_output`, `run_javascript_get_result`, `run_powershell_get`, `run_node_list`,
+# `run_sandbox_get_output`, `run_repl_read`, `run_cell_get_output`, `run_notebook_get_output`,
+# `execute_process_read_output`, `execute_snippet_view` and `invoke_lambda_get_result` reporting
+# `read` — each one runs code and hands back what it printed, which is exactly the shape the trailing
+# read token disguises. `test` because a test suite is code the call runs: `run_load_test` read as a
+# `load` (the lexicon's read token) and reported `read`.
+_EXECUTION_OBJECTS = frozenset({
+    "command", "commands", "script", "scripts", "code", "program", "programs",
+    "subprocess", "terminal", "console", "zsh",
+    "python", "python3", "js", "javascript", "typescript", "node", "nodejs", "deno", "powershell", "pwsh",
+    "ruby", "perl", "php", "lua", "process", "processes", "kernel", "sandbox", "repl",
+    "notebook", "notebooks", "cell", "cells", "snippet", "snippets", "lambda", "function", "functions",
+    "test", "tests",
+})
 # writes / mutations
 _reg(Verb.WRITE, RiskLevel.HIGH,
      "write", "update", "insert", "put", "upsert", "patch", "modify", "set", "create", "add", "append",
@@ -334,22 +386,40 @@ _VERB_ORDER = {Verb.DELETE: 3, Verb.SEND: 2, Verb.WRITE: 1, Verb.READ: 0, Verb.U
 # QUALIFIERS below SEND without demoting the destruction tokens with them.
 _ENFORCEMENT_ORDER = {Verb.DELETE: 4, Verb.SEND: 3, Verb.WRITE: 1, Verb.READ: 0, Verb.UNKNOWN: -1}
 
-# An exec qualifier ranks between SEND and WRITE: below the egress token it merely accompanies
-# (`run_export` is an export), above a bare read it governs (`run_query` executes arbitrary SQL and is
-# emphatically not a read).
+# An exec token ranks between SEND and WRITE: below the egress token it merely accompanies
+# (`run_export` is an export), above a read or write it governs (`shell_get_env` hands a string to a
+# shell and is not a read).
 _EXEC_QUALIFIER_RANK = 2
 
+# A RUN qualifier (`_RUN_QUALIFIERS`) ranks below every token that names an operation, READ included:
+# it is the reported verb only when nothing else in the name says what is being run — `run`,
+# `run_report`, `run_job`, `execute_sql`, `invoke_lambda` — and there it is still `delete`/critical,
+# because a name that says "something is executed" and nothing more must not read as harmless. Below
+# _ENFORCEMENT_ORDER's READ (0); UNKNOWN shares the number but is never a match.
+_RUN_QUALIFIER_RANK = -1
 
-def _enforcement_rank(verb: "Verb", from_exec_token: bool) -> int:
+
+def _enforcement_rank(verb: "Verb", token: str | None, executes_code: bool) -> int:
     """How strongly this single match claims the right to BE the reported verb.
+
+    `token` is the name token that matched, or None for a match recovered from the payload.
+    `executes_code` is whether the name ALSO says the thing being run is code (_EXECUTION_OBJECTS).
 
     An exec token is evidence about how the call runs, not about what it does, so it must not outrank
     a token that names the operation. Ranking it as a full DELETE is what erased the send evidence;
     ranking SEND above DELETE outright (the first attempt at this fix) instead erased the DELETE
     evidence for every ordinary `delete_email` / `remove_webhook` / `revoke_share`, which the console's
     capability inventory and the perimeter template's "attempted a delete" reason both read.
+
+    A run qualifier goes one step further down, beneath READ, for the reason recorded on
+    _RUN_QUALIFIERS — unless the name says it runs code, in which case it is an exec token like any
+    other and keeps that rank.
     """
-    return _EXEC_QUALIFIER_RANK if from_exec_token else _ENFORCEMENT_ORDER[verb]
+    if token in _RUN_QUALIFIERS and not executes_code:
+        return _RUN_QUALIFIER_RANK
+    if token in _EXEC_TOKENS:
+        return _EXEC_QUALIFIER_RANK
+    return _ENFORCEMENT_ORDER[verb]
 
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
@@ -406,6 +476,118 @@ def _classify_params(tool_params: object) -> tuple[Verb, RiskLevel] | None:
     return None
 
 
+# ── Is the payload POSITIVELY a read? (BACKLOG 7.10, fail-closed) ─────────────────────────────────
+#
+# A run qualifier that yielded to a read token (`run_query`, `execute_query`, `run_cypher_query`) may
+# report `read` ONLY when the payload proves it: no string anywhere carries a statement/mutation
+# keyword. Anything else keeps the pre-7.10 reading — DELETE/critical for a destructive keyword,
+# WRITE for any other mutation keyword — so nothing 90b9f49 (every run_* = delete) blocked is allowed
+# now unless it is genuinely a read.
+#
+# WHY A KEYWORD DENY-LIST AND NOT A STATEMENT READER. The first cut of this fix enumerated the write
+# SHAPES it recognised (UPDATE needs SET, DROP needs an object kind, …) and fell to `read` on anything
+# it did not recognise. An independent review ran the gap on a real PostgreSQL 16 and on three MCP
+# dialects: `SELECT '--'; /* x */UPDATE/**/users/**/SET/**/role='admin'`, `DO E'…EXECUTE …'`,
+# `WITH x AS (UPDATE … RETURNING 1) SELECT 1`, `DELETE customers` (T-SQL, no FROM), `INSERT … SET`
+# (MySQL), LOAD/REASSIGN/IMPORT/SHUTDOWN/KILL/BULK/RESTORE/BACKUP/INSTALL/RESET/PURGE, Cypher
+# `MATCH … DETACH DELETE`, GraphQL `mutation { deleteUser }`, Mongo `deleteMany`, an ES `script` — all
+# EXECUTED as writes and all classified `read`, then allowed by the three `verb == "read"` controls.
+# A reader that enumerates writes fails open on the write it has not yet seen. So the test is inverted:
+# prove READ, deny everything else. The proof does not depend on parsing SQL — a keyword appearing
+# ANYWHERE, inside a comment or a literal or a `$$…$$` body, is enough to deny.
+#
+# TOKENS. Each string is split on non-alphanumerics and camelCase boundaries, and the token set is
+# checked. Underscore is NOT a split boundary, deliberately against the letter of the review: splitting
+# it reclassifies the review's own keep-as-read columns `update_count`, `result_set`, `delete_flag` and
+# the delivery column `drop_off`, whose segments are keywords. Kept whole they do not match, while the
+# camelCase split still catches `deleteMany`/`findOneAndUpdate`/`bulkWrite` and the non-alphanumeric
+# split still catches `/**/UPDATE/**/`, `DETACH DELETE` and `mutation {`. The few ES REST endpoints
+# that carry a leading-underscore keyword (`_update`, `_delete_by_query`, `_bulk`) are listed as whole
+# tokens, and KEYS are scanned as well as values, so the ES `script` operator (a key, with no keyword
+# in its value) is caught. Residual, accepted: a write verb packed into a single snake_case value with
+# no camelCase, no delimiter and not an ES endpoint (`force_update_now`) reads as a read — but real SQL
+# and real API payloads carry delimiters, and the key/camelCase paths cover the real operation names.
+#
+# PRECISION, STATED. Past-tense column words (`created`, `updated`, `deleted`) are not the keywords
+# (`create`, `update`, `delete`), so `created_at`/`updated_at`/`deleted` stay read. `settings`,
+# `description`, `mindset`, `payload`, `download`, `address` are single tokens that are not keywords.
+# The cost, accepted and matching 90b9f49's own behaviour for these names: a SELECT with a standalone
+# keyword WORD in a literal (`WHERE subject = 'login; password reset'` → `reset`; `FOR UPDATE` →
+# `update`), and free-text search prose carrying a keyword (`"how do I reset…"`, `"call mom"`) classify
+# non-read. None is a regression against 90b9f49, which classified every run_* name delete regardless
+# of payload; it is a loss of the precision the first (failed) cut bought by failing open.
+#
+# WHAT STAYS READ AND IS NOT CHECKED. `query` / `sql_query` (no run qualifier) report `read` whatever
+# they carry — the pre-existing limit of a name classifier, and why the SQL-allowlist template exists.
+# A base64-wrapped statement is not decoded here (the baselines' base64 detector covers the shell case).
+
+# Destructive statement keywords -> delete/critical (the pre-7.10 reading for a run_<read> name).
+_PAYLOAD_DESTRUCTIVE = frozenset({
+    "delete", "drop", "truncate", "destroy", "remove", "purge", "erase", "wipe", "revoke", "kill",
+    "shutdown", "reassign", "detach", "terminate", "deprovision", "discard", "flush", "reconfigure",
+    "dbcc", "restore", "backup", "reset", "exec", "execute", "call", "do", "sp", "xp",
+    "_delete_by_query", "delete_by_query",
+})
+# Other mutation keywords -> write. Covers SQL DML/DDL/DCL, Cypher, GraphQL, Mongo and ES write ops.
+_PAYLOAD_WRITE = frozenset({
+    "update", "insert", "set", "create", "alter", "merge", "replace", "upsert", "copy", "load",
+    "grant", "into", "lock", "notify", "vacuum", "cluster", "reindex", "refresh", "comment", "rename",
+    "install", "import", "bulk", "add", "modify", "write", "mutation", "script",
+    "_update", "_bulk", "_update_by_query", "update_by_query",
+})
+_PAYLOAD_KEYWORDS = _PAYLOAD_DESTRUCTIVE | _PAYLOAD_WRITE
+# The longest keyword decides: `_delete_by_query` is destructive even though it contains `delete`.
+
+
+_HAS_UPPER_RE = re.compile(r"[A-Z]")
+
+
+def _payload_tokens(text: str) -> set[str]:
+    """Lowercased tokens of one string: split on camelCase boundaries and on every non-alphanumeric
+    run EXCEPT underscore, which stays inside a token (so `update_count` is one token, `deleteMany` is
+    two). Whole snake_case tokens are also returned, so a listed endpoint like `_delete_by_query` can
+    match as itself."""
+    # The camelCase pass only matters when there is an uppercase letter; the `[A-Z]` test short-circuits
+    # (C-level) so an all-lowercase payload — the common and the large case — takes a single split.
+    spaced = _CAMEL_RE.sub(" ", text) if _HAS_UPPER_RE.search(text) else text
+    return {t.lower() for t in re.split(r"[^A-Za-z0-9_]+", spaced) if t}
+
+
+def _payload_write_signal(tool_params: object) -> "Verb | None":
+    """The strongest write signal in ANY string of `tool_params` — keys and values, at any depth — or
+    None when no string carries a statement/mutation keyword (the payload is positively a read).
+
+    Iterative with a visited set, so a deeply nested body cannot raise RecursionError on the enforcement
+    path and an in-process caller's self-referencing dict cannot spin it."""
+    worst: Verb | None = None
+    stack: list[object] = [tool_params]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (dict, list, tuple)):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+        if isinstance(node, str):
+            toks = _payload_tokens(node)
+            if toks & _PAYLOAD_DESTRUCTIVE:
+                return Verb.DELETE
+            if worst is None and toks & _PAYLOAD_WRITE:
+                worst = Verb.WRITE
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(k, str):
+                    ktoks = _payload_tokens(k)
+                    if ktoks & _PAYLOAD_DESTRUCTIVE:
+                        return Verb.DELETE
+                    if worst is None and ktoks & _PAYLOAD_WRITE:
+                        worst = Verb.WRITE
+                stack.append(v)
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return worst
+
+
 def classify_tool(tool_name: str, tool_params: object = None) -> tuple[Verb, RiskLevel | None]:
     """Dynamic (verb, risk) for ANY tool — cloud, opensource, control-plane — with no source-registry
     dependency. Tokenizes the name, matches whole verb tokens against the lexicon, recognises control-plane
@@ -432,8 +614,30 @@ def classify_tool(tool_name: str, tool_params: object = None) -> tuple[Verb, Ris
     `exec`, `eval`, `restart` say the call is executed, not what it does to data — so `run_export` is an
     export and `restart_sync` is a sync, and letting the qualifier BE the verb throws away the only
     token in the name that named an operation. Demoting the qualifier is therefore enough, and it is all
-    that is done: `_EXEC_TOKENS` rank below SEND (the token they accompany) but still above READ (the
-    token they govern — `run_query` executes arbitrary SQL and is not a read).
+    that is done: `_EXEC_TOKENS` rank below SEND (the token they accompany) but still above READ and
+    WRITE (`shell_get_env` is a shell, not a read).
+
+    The three RUN qualifiers go further, beneath READ: `run`/`execute`/`invoke` name no operation at
+    all, so `run_query` is the query it runs and `run_update` the update. Ranking `run` above READ
+    bought a `delete` verb on every `run_<read>` tool and no way for an admin promotion to correct it
+    (BACKLOG 7.10). A qualifier with nothing to govern (`run`, `run_report`, `execute_sql`), or
+    governing code (`run_command_get_output`), keeps the exec reading.
+
+    What the old rank DID buy, and must not be given back with it: `run_query` executes whatever
+    statement it is handed, so its `delete` refused an UPDATE, INSERT, GRANT or ALTER sent through it
+    under every rule that asks for `verb == "read"` (the read-only intent template's allow arm, the MCP
+    registry's and the integration guardrail's unapproved-write rules). The baselines' destructive-SQL
+    detector does not replace that: it knows DROP/DELETE/TRUNCATE and nothing that merely writes. So a
+    run qualifier that yielded to a READ keeps that `read` ONLY when the payload is POSITIVELY a read —
+    no statement/mutation keyword in any string, keys or values, at any depth (`_payload_write_signal`).
+    Anything else FAILS CLOSED to the pre-7.10 reading: a destructive keyword -> delete, any other
+    mutation keyword -> write. A select through `run_query` stays `read`; an UPDATE is `write`; a DROP,
+    a Cypher `DETACH DELETE`, a GraphQL `mutation { deleteUser }` or a comment-obfuscated
+    `/* x */UPDATE/**/SET` is delete or write and refused. A qualifier that already resolved to WRITE
+    (`run_update`) is only ever RAISED by the payload (a DROP makes it delete), never lowered to read.
+    `query` and `sql_query`, which never had the qualifier, are untouched — the payload is consulted
+    only where the NAME itself says it runs something, and with no payload the name's `read` stands (a
+    name-only caller — the console, the rate limiter, the asset graph — gets `read`, which is the fix).
 
     Ranking SEND above DELETE outright would fix the same seven names and break far more. `delete_email`,
     `remove_webhook`, `delete_mail`, `revoke_share`, `expire_share`, `purge_mail_queue` and
@@ -447,8 +651,8 @@ def classify_tool(tool_name: str, tool_params: object = None) -> tuple[Verb, Ris
     `invoke_send_pipeline` as critical, it just no longer tells the policy the call sends nothing."""
     tokens = _tokenize_tool(tool_name)
     tset = set(tokens)
-    # (verb, risk, came-from-an-exec-qualifier)
-    matches: list[tuple[Verb, RiskLevel, bool]] = []
+    # (verb, risk, the name token that matched — None when recovered from the payload)
+    matches: list[tuple[Verb, RiskLevel, str | None]] = []
 
     # control-plane actuation: an actuation noun + a control verb ⇒ critical (open_breaker, set_valve).
     #
@@ -465,22 +669,38 @@ def classify_tool(tool_name: str, tool_params: object = None) -> tuple[Verb, Ris
     for t in tokens:
         hit = _VERB_LEXICON.get(t)
         if hit:
-            matches.append((hit[0], hit[1], t in _EXEC_TOKENS))
+            matches.append((hit[0], hit[1], t))
 
+    # NOT consulted for a name that matched only a run qualifier. `run` / `run_report` already resolved
+    # (to the exec reading), and letting an agent-supplied `{"query": "select 1"}` turn that into `read`
+    # would trade the name for a payload the caller chooses even more freely — the hole the evaluator's
+    # rate-limit exemption documents. The payload may fill in a name that says nothing; it may not
+    # talk a name that says "executes" down.
     if not matches:
         params_hit = _classify_params(tool_params)
         if params_hit:
             # Recovered from the payload, not from a qualifier token: a DROP statement in `run_report`'s
             # params is the operation itself and must rank as one.
-            matches.append((params_hit[0], params_hit[1], False))
+            matches.append((params_hit[0], params_hit[1], None))
 
     if not matches:
         return Verb.UNKNOWN, None
-    # The grade is the worst any matched token carries — an exec token still makes the call critical.
+    # The grade is the worst any matched token carries — an exec token still makes the call critical,
+    # and that includes a run qualifier that lost the VERB ranking: `run_query` reports `read` and is
+    # still shown critical, the same split `run_export` (send, critical) already makes.
     risk = max((m[1] for m in matches), key=lambda r: _RISK_ORDER[r])
     # The verb is the one enforcement can act on. Ties inside a rank fall back to _VERB_ORDER so the
     # result stays deterministic for a name that matched two tokens of the same enforcement weight.
-    verb = max(matches, key=lambda m: (_enforcement_rank(m[0], m[2]), _VERB_ORDER[m[0]]))[0]
+    executes_code = bool(tset & _EXECUTION_OBJECTS)
+    verb = max(matches, key=lambda m: (_enforcement_rank(m[0], m[2], executes_code), _VERB_ORDER[m[0]]))[0]
+    # A run qualifier yielded to the read or write it governs (it outranks both otherwise). Fail closed:
+    # it may stay `read` only if the payload proves a read, and whatever it says, the verb only ever
+    # moves UP from here. With no payload the name's reading stands — name-only callers get the fix's
+    # `read`; the enforcement path always carries tool_params, which is where the smuggled write is.
+    if tool_params is not None and verb in (Verb.READ, Verb.WRITE) and tset & _RUN_QUALIFIERS:
+        stated = _payload_write_signal(tool_params)
+        if stated is not None and _VERB_ORDER[stated] > _VERB_ORDER[verb]:
+            verb = stated
     return verb, risk
 
 

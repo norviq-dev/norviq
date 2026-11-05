@@ -1,0 +1,172 @@
+# OpenSSF Security Insights, schema v2.2.0: https://github.com/ossf/security-insights-spec
+# Update header.last-updated when this file changes, and header.last-reviewed at each release.
+header:
+  schema-version: 2.2.0
+  last-updated: '2026-11-04'
+  last-reviewed: '2026-11-04'
+  url: https://raw.githubusercontent.com/norviq-dev/norviq/main/security-insights.yml
+
+project:
+  name: Norviq
+  homepage: https://norviq.dev
+  roadmap: https://github.com/norviq-dev/norviq/blob/main/ROADMAP.md
+  administrators:
+    - name: Santosh Kumar Puppala
+      affiliation: Independent
+      email: opensource@norviq.dev
+      social: https://github.com/Santoshkumarpuppala
+      primary: true
+  repositories:
+    - name: norviq
+      url: https://github.com/norviq-dev/norviq
+      comment: |
+        The engine, API, SDK, MCP proxy, console UI, admission webhook and Helm chart.
+  documentation:
+    quickstart-guide: https://docs.norviq.dev/getting-started/
+    detailed-guide: https://docs.norviq.dev
+    code-of-conduct: https://github.com/norviq-dev/norviq/blob/main/CODE_OF_CONDUCT.md
+    release-process: https://github.com/norviq-dev/norviq/blob/main/docs/engineering/release-runbook.md
+    support-policy: https://github.com/norviq-dev/norviq/blob/main/SECURITY.md#supported-versions
+    signature-verification: https://github.com/norviq-dev/norviq/blob/main/docs/engineering/release-runbook.md#verify-after-publishing
+  vulnerability-reporting:
+    reports-accepted: true
+    bug-bounty-available: false
+    contact:
+      name: Norviq security
+      email: security@norviq.dev
+      primary: true
+    policy: https://github.com/norviq-dev/norviq/blob/main/SECURITY.md
+    in-scope:
+      - The enforcement engine and policy evaluation path (norviq/engine, OPA integration)
+      - The API and authentication/authorization (norviq/api)
+      - The admission webhook and sidecar injection (webhook/)
+      - The console UI (ui/)
+      - The Helm chart and default configuration (helm/)
+      - The agent SDK (norviq/sdk)
+      - The MCP proxy (norviq/mcp)
+    out-of-scope:
+      - Vulnerabilities in third-party dependencies with no Norviq-specific exposure
+      - Findings that require a pre-existing cluster-admin compromise
+      - Denial of service from unbounded self-inflicted configuration
+    comment: |
+      Report privately, preferably through the repository's GitHub private vulnerability reporting
+      form (https://github.com/norviq-dev/norviq/security/advisories/new). If that form is not
+      available, email security@norviq.dev. Do not open a public issue.
+
+repository:
+  url: https://github.com/norviq-dev/norviq
+  status: active
+  bug-fixes-only: false
+  accepts-change-request: true
+  accepts-automated-change-request: true   # Dependabot version and security updates, .github/dependabot.yml
+  no-third-party-packages: false
+  core-team:
+    - name: Santosh Kumar Puppala
+      affiliation: Independent
+      email: opensource@norviq.dev
+      social: https://github.com/Santoshkumarpuppala
+      primary: true
+  license:
+    url: https://github.com/norviq-dev/norviq/blob/main/LICENSE
+    expression: Apache-2.0
+  documentation:
+    contributing-guide: https://github.com/norviq-dev/norviq/blob/main/CONTRIBUTING.md
+    dependency-management-policy: https://github.com/norviq-dev/norviq/blob/main/SECURITY.md#dependency-management
+    governance: https://github.com/norviq-dev/norviq/blob/main/GOVERNANCE.md
+    review-policy: https://github.com/norviq-dev/norviq/blob/main/GOVERNANCE.md#how-code-lands
+    security-policy: https://github.com/norviq-dev/norviq/blob/main/SECURITY.md
+  release:
+    automated-pipeline: true
+    changelog: https://github.com/norviq-dev/norviq/blob/main/CHANGELOG.md
+    distribution-points:
+      - uri: oci://ghcr.io/norviq-dev/charts/norviq
+        comment: Helm chart, cosign-signed, pinning every image by digest.
+      - uri: https://artifacthub.io/packages/helm/norviq/norviq
+        comment: Artifact Hub listing of the Helm chart.
+      - uri: ghcr.io/norviq-dev/norviq-engine
+        comment: |
+          Container images, tagged <component>-<version> (engine, api, ui, webhook, bootstrap).
+          Each is cosign-signed and carries an SPDX SBOM attestation.
+      - uri: pkg:pypi/norviq
+        comment: Python package, published with PyPI Trusted Publishing.
+      - uri: https://github.com/norviq-dev/norviq/releases
+        comment: |
+          GitHub Release per tag, carrying the wheel, sdist, chart .tgz and an SPDX SBOM of the
+          tagged source, each with a keyless Sigstore bundle (<file>.sigstore.json).
+    attestations:
+      - name: Image SBOM
+        location: https://github.com/norviq-dev/norviq/blob/main/README.md#sbom
+        predicate-uri: https://spdx.dev/Document
+        comment: |
+          An SPDX JSON SBOM per image, attached to the image digest as a cosign attestation
+          (type spdxjson). The README section gives the verify command.
+  security:
+    assessments:
+      self:
+        comment: |
+          No formal security self-assessment has been written yet. The threat model, trust
+          boundaries and non-goals are in docs/security-model.md.
+        evidence: https://github.com/norviq-dev/norviq/blob/main/docs/security-model.md
+    champions:
+      - name: Santosh Kumar Puppala
+        email: opensource@norviq.dev
+        primary: true
+    tools:
+      - name: FOSSA
+        type: SCA
+        rulesets: [default]
+        comment: Fails CI on a known dependency vulnerability, except the exceptions listed in SECURITY.md.
+        integration: {adhoc: true, ci: true, release: false}
+        results: {}
+      - name: Trivy
+        type: container
+        rulesets: [default]
+        comment: |
+          Scans each built image. A fixable HIGH or CRITICAL finding that is not in
+          .trivyignore.yaml fails the build before the image is signed.
+        integration: {adhoc: true, ci: true, release: true}
+        results: {}
+      - name: gitleaks
+        type: secret
+        rulesets: [.gitleaks.toml]
+        comment: Scans the commit range of each pull request and push to main.
+        integration: {adhoc: true, ci: true, release: false}
+        results: {}
+      - name: bandit
+        type: SAST
+        rulesets: [default]
+        comment: Medium and high severity, on changed Python files.
+        integration: {adhoc: true, ci: true, release: false}
+        results: {}
+      - name: semgrep
+        type: SAST
+        rulesets: [auto]
+        comment: >-
+          The fail-closed gate runs the auto ruleset at ERROR severity on norviq/ and ui/src,
+          diff-aware against the pull request base. A separate run with p/python and
+          p/owasp-top-ten is report-only and fails nothing.
+        integration: {adhoc: true, ci: true, release: false}
+        results: {}
+      - name: eslint-plugin-security
+        type: SAST
+        rulesets: [ui/eslint.config.js]
+        comment: Scans the whole of ui/src.
+        integration: {adhoc: true, ci: true, release: false}
+        results: {}
+      - name: pip-audit
+        type: SCA
+        rulesets: [default]
+        comment: Report-only.
+        integration: {adhoc: true, ci: true, release: false}
+        results: {}
+      - name: Dependabot
+        type: SCA
+        rulesets: [.github/dependabot.yml]
+        comment: Weekly version-update pull requests for Python, npm, Go, GitHub Actions and Docker base images.
+        integration: {adhoc: false, ci: true, release: false}
+        results: {}
+      - name: OpenSSF Scorecard
+        type: other
+        rulesets: [default]
+        integration: {adhoc: true, ci: true, release: false}
+        results: {}

@@ -5,29 +5,80 @@ Norviq and its users safe.
 
 ## Reporting a vulnerability
 
-**Please do not open a public GitHub issue for security reports.**
+**Please do not open a public GitHub issue, discussion or pull request for a security report.**
 
 Report privately through either channel:
 
-- **GitHub Private Vulnerability Reporting** — on this repository, go to the **Security** tab →
-  **Report a vulnerability**. This is the preferred channel.
-- **Email** — `security@norviq.dev`. Encrypt with our PGP key if the report is sensitive (key available
-  on request).
+- **GitHub private vulnerability reporting (preferred)** — use the repository's **Security** tab →
+  **Report a vulnerability**, or open <https://github.com/norviq-dev/norviq/security/advisories/new>
+  directly. A report made this way, the discussion and the fix stay private until the advisory is
+  published.
+- **Email** — `security@norviq.dev`. Use this channel if the form is not available to you, or if you
+  prefer email.
 
-Please include, where possible:
+If you have had no acknowledgement within 3 business days, send a short note through the other channel.
+
+### What to include
 
 - A description of the issue and its impact.
-- The affected component (engine, API, webhook, console UI, Helm chart, SDK) and version / commit.
+- The affected component (engine, API, webhook, console UI, Helm chart, SDK, MCP proxy) and version /
+  commit.
 - Steps to reproduce, or a proof-of-concept.
-- Any suggested remediation.
+- The configuration that matters (Helm values you changed, `config.spiffeMode`, whether sidecar
+  injection is enabled), with secrets removed.
+- Whether you plan to publish your findings, and when.
+- Any suggested remediation, and how you would like to be credited.
+
+## Security response team
+
+Reports go to the maintainer listed in [MAINTAINERS.md](MAINTAINERS.md). Norviq has one maintainer, so
+that person is the whole response team: there is no separate security team.
 
 ## What to expect
 
 - **Acknowledgement** within **3 business days**.
-- An initial assessment and severity rating within **10 business days**.
-- We practice **coordinated disclosure**: we'll agree on a disclosure timeline with you, fix the issue,
-  and credit you in the advisory unless you prefer to remain anonymous.
-- Please give us a reasonable window to release a fix before any public disclosure.
+- An initial assessment and severity rating (CVSS) within **10 business days**. If we conclude the
+  report is not a vulnerability, we say why.
+- Updates as the fix progresses, and a fix date agreed with you before anything is published.
+- Credit in the advisory, unless you prefer to remain anonymous.
+
+## Disclosure process
+
+We practice coordinated disclosure:
+
+1. **Triage.** We confirm the issue, work out which versions are affected and rate its severity.
+2. **Fix.** The fix is developed and reviewed privately.
+3. **CVE.** We request a CVE id through the GitHub security advisory for the report.
+4. **Release.** The fix ships in a new patch release of the supported line (see
+   [Supported versions](#supported-versions)). The release notes and [CHANGELOG.md](CHANGELOG.md) say that
+   the release contains security fixes and link the advisory.
+5. **Advisory.** The GitHub security advisory is published when the release is out.
+
+### Embargo
+
+- Details stay private until the fixed release is published, for **at most 90 days** from the report.
+  If a fix needs longer, we agree an extension with the reporter before the 90 days run out.
+- If the issue is already public or is being exploited, we may release and disclose sooner, and we
+  tell the reporter first.
+- We ask reporters to keep the details private for the same period.
+- There is no pre-disclosure list: no user or distributor is told before the advisory is published.
+
+## Security bulletins
+
+Security advisories are published at <https://github.com/norviq-dev/norviq/security/advisories>. To be
+told about a security release, watch the repository on GitHub (**Watch** → **Custom** → **Releases**):
+each release's notes say whether it contains security fixes.
+
+## Supported versions
+
+Norviq is pre-1.0. Security fixes land on `main` and ship in the next release of the latest minor line.
+Earlier releases are not patched: upgrade to the latest release to get a fix.
+
+| Version | Supported |
+|---|---|
+| 0.2.x, latest patch release | Yes |
+| Earlier 0.2.x patch releases | No, upgrade to the latest 0.2.x |
+| 0.1.x and earlier | No |
 
 ## Scope
 
@@ -39,6 +90,7 @@ In scope:
 - The console UI (`ui/`).
 - The Helm chart and default configuration (`helm/`).
 - The agent SDK (`norviq/sdk`).
+- The MCP proxy (`norviq/mcp`).
 
 Out of scope (report to the upstream project instead):
 
@@ -46,11 +98,6 @@ Out of scope (report to the upstream project instead):
   automated scanning; a dependency CVE that Norviq materially exposes **is** in scope).
 - Findings that require a pre-existing cluster-admin compromise.
 - Denial of service from unbounded self-inflicted configuration.
-
-## Supported versions
-
-Norviq is pre-1.0. Security fixes are released against the latest `main`. Pin to a released tag and
-watch releases for security updates.
 
 ## Hardening posture
 
@@ -60,15 +107,48 @@ For operators, the current threat-model notes and operator responsibilities are 
 the production checklist (`api.secretKey`, `config.requireStrongSecret`, TLS, image provenance, and the
 sidecar-injection trust model) in [`docs/configuration.md`](docs/configuration.md) before deploying.
 
+## Dependency management
+
+How dependencies are taken in:
+
+- **Python.** Declared in `pyproject.toml` and locked in `uv.lock`. The api and engine images install
+  `.[spiffe]` with pip, which does not read `uv.lock`, so a version floor a shipped package needs is
+  declared in `[project] dependencies` (see the `cryptography` note below).
+- **Console UI.** Declared in `ui/package.json` and locked in `ui/package-lock.json`; the image build
+  runs `npm ci`.
+- **Admission webhook.** `webhook/go.mod` and `webhook/go.sum`.
+- **Container images.** The released chart pins every image by digest, including third-party ones
+  (`global.thirdPartyImageDigests` in `helm/norviq/values.yaml`); `scripts/check_image_pins.py` fails
+  the release otherwise.
+- **GitHub Actions.** Third-party actions are pinned to a commit SHA.
+
+How they are checked and updated:
+
+- The FOSSA gate (`.github/workflows/fossa.yml`) fails on a known vulnerability in the Python, Node or
+  Go graph, except the exceptions listed below. `pip-audit` and `npm audit` run in
+  `.github/workflows/security.yml`, report-only for now.
+- Each image is scanned by Trivy after it is built (`.github/workflows/build.yml`). A fixable HIGH or
+  CRITICAL finding that is not in `.trivyignore.yaml` fails the build before the image is signed or
+  tagged.
+- Dependabot (`.github/dependabot.yml`) proposes weekly version updates for the Python, npm and Go
+  dependencies, GitHub Actions and the Dockerfile base images; each update is a pull request that
+  goes through the same review and CI as any other. The Helm chart's third-party images are pinned
+  by digest and bumped by hand. A vulnerable dependency with a fixed release is bumped, not accepted; one that cannot be bumped is listed below
+  with the reason, and the list is reviewed each release.
+
 ## Accepted dependency exceptions
 
 Our FOSSA dependency-vulnerability gate (`.github/workflows/fossa.yml`) fails CI on any known dependency
 CVE. The exceptions below are the only vulnerabilities we knowingly carry, and each is listed because a
 version bump cannot close it today — a CVE a bump *can* fix is bumped, not listed here (e.g. the
-`werkzeug>=3.1.6` constraint in `pyproject.toml`, which resolves to 3.1.8 and closes CVE-2025-66221 /
-CVE-2026-21860 / CVE-2026-27199, and the `mcp>=1.28.1,<2` floor on the `crewai`/`frameworks` extras,
-which closes CVE-2026-59950 — a WebSocket server transport that validated neither `Host` nor `Origin`).
-The allow-list in the gate is kept in lockstep with this table.
+`werkzeug>=3.1.9` constraint in `pyproject.toml`, which closes CVE-2025-66221 / CVE-2026-21860 /
+CVE-2026-27199 / CVE-2026-102598, and the `mcp>=1.30.0,<2` floor on the `crewai`/`mcp`/`frameworks`
+extras, which closes CVE-2026-59950 — a WebSocket server transport that validated neither `Host` nor
+`Origin` — and CVE-2026-59951 / CVE-2026-116684 / -116685 / -116686. The other optional-extra floors
+added on 2026-10-30 (litellm, pillow, filelock, dnspython, oauthlib, langgraph, crewai) are listed with
+their CVEs in `pyproject.toml`).
+The gate's allow-list — `ACCEPTED` in `scripts/check_fossa_issues.py` — names exactly the ids in this
+table's first column, and `tests/test_check_fossa_issues.py` fails the build when the two differ.
 
 Where a floor is declared is a decision, not a formality: `mcp` is a **direct** dependency of an extra
 we declare, so its floor lives in `[project.optional-dependencies]` where `pip install '.[crewai]'`
@@ -78,8 +158,18 @@ therefore the FOSSA scan, but *not* a pip install. See the `cryptography` note b
 that distinction decides whether a shipped image is actually patched.
 
 FOSSA scans **three** dependency graphs, and it is worth being explicit about which, because auditing
-only one gives false confidence: Python (`pyproject.toml` + `uv.lock`), Node (`ui/package.json`), and Go
-(`webhook/go.mod`). `pip-audit` alone covers the first.
+only one gives false confidence: Python (the closure the images install, `.[spiffe]`, exported from
+`uv.lock` into `requirements-runtime.txt` by the workflow), Node (`ui/package.json`), and Go
+(`webhook/go.mod`). `pip-audit` alone covers the first. For ten weeks the CI job scanned only two:
+`.fossa.yml` named the Python target `type: pip`, which is not a fossa-cli type, so nothing matched and
+every run read "2 projects scanned". It is `setuptools` now. Before the scan, the workflow checks that
+every line of the export is in a form fossa-cli's requirements parser reads (it drops the lines it
+cannot parse without a warning) and that the packages that must ship are among them. After it, the
+workflow fails if any of the three graphs is missing from the scan summary. The optional extras are
+outside this scan by design. The report-only `deps-audit` job in `.github/workflows/security.yml`
+exports each one (`uv export --extra <name>`) and runs pip-audit on it, ignoring only the ids in the
+table below, and `tests/test_deps_audit.py` fails when `pyproject.toml` declares an extra that job does
+not audit. The floors that close what it finds are in `pyproject.toml`.
 
 The Python graph is scoped by `[tool.uv] environments` to the interpreters this project claims (3.11 /
 3.12 — see `classifiers`; both images are `python:3.12-slim`). That is a security decision, not a
@@ -91,25 +181,22 @@ of it is installable by anyone, nothing builds or tests it, and yet the gate sco
 a dependency graph that ships nowhere is not extra rigour; it costs real attention and buys nothing.
 Widen the setting when 3.13/3.14 are supported for real — tested and in `classifiers` — not before.
 
-The first three entries below are **not in any shipped container image** — `Dockerfile.api` and
-`Dockerfile.engine` install `.[spiffe]` and nothing else, and `webhook/Dockerfile` is a Go binary on
-`distroless/static` with no Python at all — because they live exclusively in the **optional SDK
-framework-adapter extras** (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`), which a deployment
-must explicitly opt into.
+The Python entries below (litellm, chromadb, semantic-kernel) are **not in any shipped container image**
+— `Dockerfile.api` and `Dockerfile.engine` install `.[spiffe]` and nothing else, and `webhook/Dockerfile`
+is a Go binary on `distroless/static` with no Python at all — because they live exclusively in the
+**optional SDK framework-adapter extras** (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`),
+which a deployment must explicitly opt into. The k8s.io row is in a shipped binary, the webhook, and is
+carried because the matches are spurious, not because the code is absent.
 
-The React Router entry is different and should not be read as one of those: it **is** in a shipped image,
-the console bundle built by `Dockerfile.ui`. It is carried because the vulnerable code path does not
-exist in this application, not because the dependency is absent. That is a weaker form of "not
-exploitable" than the other three, so it is scheduled for a real fix (see the note under the table)
-rather than treated as permanently accepted.
-
-**`cryptography>=48.0.1`** is the other such floor, and unlike `werkzeug` it *is* in the shipped image —
+**`cryptography>=50.0.0`** is the other such floor, and unlike `werkzeug` it *is* in the shipped image —
 so it is declared in `[project] dependencies`, not in `[tool.uv] constraint-dependencies`. The images
 install with **pip**, which reads neither `uv.lock` nor uv's constraints; a floor kept only in the uv
 config would have left the published images on a vulnerable version while every local check looked green.
 It closes **GHSA-537c-gmf6-5ccf** (HIGH, CVSS 7.5): `cryptography` wheels statically link OpenSSL, and
 every wheel below 48.0.1 bundles the OpenSSL affected by the
-[2026-06-09 advisory](https://openssl-library.org/news/secadv/20260609.txt). `cryptography` reaches us
+[2026-06-09 advisory](https://openssl-library.org/news/secadv/20260609.txt). The floor was then raised
+from 48.0.1 to 50.0.0 for CVE-2026-69247, which affects 49.0.0 and has no 49.x fix; `pyopenssl>=26.4.0`
+is declared alongside it because 26.3.0 caps `cryptography<50`. `cryptography` reaches us
 transitively through `pyjwt`, `spiffe`, `azure-identity` and `pyopenssl`, so it is on the JWT-verification
 and SPIFFE paths rather than in an optional extra.
 
@@ -121,52 +208,38 @@ take `.[spiffe]`, and `framework-compat.yml` installs one framework at a time.
 
 | CVE | Package (source) | Why unfixable-by-bump | Why not exploitable here |
 |-----|------------------|-----------------------|--------------------------|
-| CVE-2024-6825 | `litellm` (via `crewai[litellm]`) | Not closable by a bump — 1.96.1 is the newest release and publishes **no wheel for Python >= 3.11**, this project's floor, so `uv lock` refuses it and pins 1.96.0. | Reaches the tree only through the **optional** `norviq[crewai]` extra and is in **no shipped image** — `Dockerfile.api` / `Dockerfile.engine` install `.[spiffe]` only. Re-check when litellm ships a cp311 wheel above 1.96.1. |
-| CVE-2026-45829 | `chromadb` (via `crewai`) | No fixed release exists — the latest version is still affected. | It is a pre-auth RCE in the **ChromaDB HTTP server**; CrewAI uses chromadb as an **embedded client**, so the vulnerable server path is never started. |
-| CVE-2026-26030 | `semantic-kernel` | The fix (`>=1.39.4`) pulls a **pre-release** `azure-ai-agents` dependency, which we will not ship in a lockfile. | RCE is in the `InMemoryVectorStore` filter-lambda path, which the Norviq semantic-kernel adapter does not use. |
-| CVE-2026-25592 | `semantic-kernel` | This is a **.NET** CVE (fixed in .NET Core `1.71.0`); FOSSA maps it onto the pip package, where no release clears it. | The affected `[KernelFunction] DownloadFileAsync` helper exists only in the .NET SDK, not the Python package we depend on. |
-| GHSA-qwww-vcr4-c8h2 | `react-router` / `react-router-dom` (console UI) | Fixed only in **8.3.0**, which requires **React >= 19.2.7** and **Node >= 22.22.0** and drops `react-router-dom` entirely — a React 18→19 migration, not a bump. Downgrading is not an escape either: the only versions below the affected range (`>=7.12.0 <8.3.0`) are back inside the **7.17.0-and-below** range of the advisories this entry replaces. | The flaw is a CSRF bypass in **RSC mode**, letting an action execute before a 400 response. The console never enters RSC mode: [`ui/src/main.tsx`](ui/src/main.tsx) renders with `ReactDOM.createRoot` under a plain `BrowserRouter`, there is no server runtime, no `@vitejs/plugin-rsc`, no `unstable_RSC*` API in `ui/src`, and `Dockerfile.ui` builds a static bundle served by nginx. |
+| CVE-2024-6825 | `litellm` (via `crewai[litellm]`) | There is no bump to make. The advisory (GHSA-53gh-p8jc-7rg8) covers litellm **1.40.3.dev2 through 1.40.12**; the lock is at **1.100.4**. FOSSA matched it against 1.96.x, i.e. without that upper bound, so this is a spurious match carried like the k8s.io row. (The old reason here — "1.96.1 is the newest release and has no cp311 wheel" — went stale: 1.100.4 ships cp310-abi3 wheels. The bump to it closed litellm's real advisories on 1.96.0, CVE-2026-84377 and CVE-2026-114612.) | Outside the advisory's affected range. Also reachable only through the **optional** `norviq[crewai]` extra and in **no shipped image**. |
+| CVE-2026-45829, CVE-2026-45830, CVE-2026-45831, CVE-2026-45833 | `chromadb` (via `crewai`) | No fixed release exists — 1.5.9, the latest, is affected by all four. | All four are in the **ChromaDB HTTP server**: a pre-auth (45829) and an authenticated (45833) code injection through `trust_remote_code` on the collections endpoints, and two missing tenant checks in the server's authorization layer (45830; `SimpleRBACAuthorizationProvider` for 45831). CrewAI uses chromadb as an **embedded client**, so no server, endpoint or authorization provider is ever started. |
+| CVE-2026-26030 | `semantic-kernel` | The fix (`>=1.39.4`), like every release after the locked 1.36.0 up to the current 1.46.0, requires `azure-ai-agents>=1.2.0b3`. No stable `azure-ai-agents` 1.2 exists (1.1.0 is the newest stable, 1.2.0b6 the newest pre-release, checked 2026-10-30), and we will not ship a pre-release in a lockfile. | RCE is in the `InMemoryVectorStore` filter-lambda path. The Norviq semantic-kernel adapter imports nothing from `semantic_kernel` at all: it is an invocation filter that duck-types the context object. |
+| CVE-2026-25592 | `semantic-kernel` | The advisory describes the **.NET** SDK (fixed in `Microsoft.SemanticKernel.Plugins.Core` 1.71.0), but its PyPI record (GHSA-2ww3-72rp-wpp4) marks the pip package fixed in 1.39.3. That release needs the same pre-release `azure-ai-agents` as the row above. | The affected `SessionsPythonPlugin` `DownloadFileAsync` helper is .NET code; the Norviq adapter uses no semantic-kernel plugin of either language. |
+| CVE-2018-1002105, CVE-2019-11250, CVE-2020-8565 | `k8s.io/apimachinery`, `k8s.io/client-go` (admission webhook) | A bump cannot satisfy a match that has no upper bound. FOSSA flags these against any v0.x; the webhook pins **v0.37.0**, twenty minors past the latest fix (client-go 0.17.0 / 0.19.6). | The code has never had them. Per the advisory database, CVE-2018-1002105 is against `kubernetes/kubernetes` < 1.12.3 — an API-server aggregation bug, not a library; the other two are client-go credential-logging bugs fixed in 0.17.0 and 0.19.6. Spurious matches, reviewed each release like the rest. |
 
 These are reviewed each release; we will drop an exception and bump the moment upstream ships a fixed
 release reachable without a pre-release dependency.
 
-**React Router is a scheduled fix, not a permanent exception.** The other three entries are blocked on
-upstream; this one is blocked only on our own migration effort, which is a different kind of reason and
-should not be allowed to age quietly into "accepted". Two things would change the calculus immediately
-and should be treated as a trigger to prioritise the React 19 / router v8 migration:
-
-- the console gaining **any** server-side rendering, prerendering, or React Server Components step,
-  which would put the vulnerable path into the executed code — the reason for the exception disappears
-  the moment that changes, and it is the kind of change that arrives as a performance or SEO
-  improvement rather than as a security decision;
-- the project moving to React 19 for an unrelated reason, which removes the migration cost entirely.
-
-Until then the residual risk is bounded: the console is authenticated, served as static assets, and the
-advisory requires an RSC request flow that no code path here produces.
-
-> **This entry was rewritten when the router was upgraded 6.30.4 → 7.18.2**, which closed
-> CVE-2026-53668 / -53669 / -53666 (`GHSA-337j-9hxr-rhxg` and the two open-redirect advisories) —
-> those were the three the FOSSA gate was actually failing on, and 6.30.4 was the last 6.x, so there
-> was no patch on that line. The upgrade needed **no code changes**: the console uses only
-> `MemoryRouter`/`BrowserRouter`, `Routes`/`Route`, `Link`/`NavLink`, `Navigate`, `useNavigate`,
-> `useLocation` and `useSearchParams` — no data-router APIs, no loaders/actions, no `json()`/`defer()`,
-> and no splat routes for `v7_relativeSplatPath` to affect.
+> **The React Router row (`GHSA-qwww-vcr4-c8h2`) was removed on 2026-10-30, because 7.18.2 is no longer
+> inside it.** The row said the RSC-mode CSRF bypass was fixed only in 8.3.0 (a React 19 migration). The
+> advisory has since been revised to `>=7.12.0 <7.18.2`, which makes the pinned 7.18.2 the first
+> patched release (npm advisory feed, 2026-10-30). `npm audit --omit=dev` on `ui/` reports 0, and FOSSA's
+> 2026-10-27 scan of the console raised no vulnerability issue. An exception for a version the
+> advisory no longer covers only disarms the gate if the advisory is revised back.
 >
-> A NOTE ON WHY THE GATE WENT RED ANYWAY, because it cost time: the old React Router row was written
-> into this table but **never added to `ACCEPTED_CVES` in `.github/workflows/fossa.yml`**, so the gate
-> kept failing on a vulnerability this document had already accepted. The two are supposed to be in
-> lockstep and were not. The gate now matches **GHSA ids as well as CVE ids** — this advisory has no
-> CVE assigned, so a CVE-only matcher could never have accepted it.
+> One lesson from that row's history still holds. It was once written into this table but never into
+> the gate's allow-list, so the gate kept failing on a vulnerability this document had already accepted.
+> That is why the allow-list matches **GHSA ids as well as CVE ids** (that advisory had no CVE), and
+> why a test now holds the table and the allow-list to the same set.
 
-The three Python entries are also marked **Ignored** in the FOSSA project UI (reason: *vulnerable code
-not in execute path*, scoped to this project and the current dependency versions), so FOSSA's own
-"Security Analysis" check reflects this acceptance rather than a bare red. Because that ignore is
-version-scoped, a future bump of `chromadb` or `semantic-kernel` re-surfaces the CVE for review —
-matching the exit condition above.
+The Python entries were marked **Ignored** in the FOSSA project UI (reason: *vulnerable code not in
+execute path*, scoped to this project and the dependency versions of the time), so FOSSA's own "Security
+Analysis" check reflected this acceptance rather than a bare red. Because that ignore is version-scoped,
+a bump re-surfaces the CVE for review, and the 2026-10-30 relock does exactly that: chromadb moved
+1.1.1 → 1.5.9 and litellm 1.96.0 → 1.100.4, and the table now lists three chromadb CVEs
+(45830/45831/45833) it did not list before. A maintainer with FOSSA access has to re-review all of them
+in the UI.
 
 **`GHSA-337j-9hxr-rhxg` is not what the "Security Analysis" badge reports, and it is worth being precise
 about that, because assuming otherwise wasted real time.** `npm audit` and FOSSA do not draw from the
-same advisory database, so the same lockfile yields different findings. React Router shows up in
+same advisory database, so the same lockfile yields different findings. React Router showed up in
 `npm audit`; the FOSSA badge was reporting **`GHSA-mh99-v99m-4gvg` in `brace-expansion` 5.0.7** (HIGH,
 CVSS 7.5 — DoS via unbounded expansion), a transitive dependency of `minimatch`. That one had a patch
 fix and was simply bumped to 5.0.8, not accepted. Two lessons: reading one scanner's output tells you

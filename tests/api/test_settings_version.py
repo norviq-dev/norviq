@@ -121,6 +121,33 @@ def test_version_single_source() -> None:
     assert body["license"] == "Apache-2.0"
 
 
+def test_openapi_version_is_the_installed_package_version() -> None:
+    """The app's own version was the literal "0.1.0" while the package shipped 0.2.x, so /openapi.json
+    and /docs disagreed with GET /api/v1/version. Both now come from the package metadata."""
+    from importlib import metadata
+
+    installed = metadata.version("norviq")
+    app = create_app()
+    assert app.version == installed
+    assert app.openapi()["info"]["version"] == installed
+    client, _ = _client(row=None)
+    served = client.get("/api/v1/version", headers={"Authorization": f"Bearer {_token()}"}).json()
+    assert served["version"] == app.version
+
+
+def test_openapi_version_falls_back_when_metadata_is_missing(monkeypatch) -> None:
+    """Running from a tree that is not installed must still build the app, not raise."""
+    from importlib import metadata
+
+    from norviq.api.routers import version as version_router
+
+    def _missing(_name: str) -> str:
+        raise metadata.PackageNotFoundError("norviq")
+
+    monkeypatch.setattr(version_router.metadata, "version", _missing)
+    assert create_app().version == "0.0.0+unknown"
+
+
 def test_settings_requires_auth() -> None:
     client, _ = _client(row=None)
     assert client.get("/api/v1/settings").status_code in (401, 403)

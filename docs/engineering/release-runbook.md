@@ -3,8 +3,9 @@
 
 How Norviq is released, what is irreversible, and what a human has to do that CI cannot.
 
-A release is **one git tag**. Pushing `vX.Y.Z` builds the four images, publishes the Helm chart, and
-uploads the Python package. There is no other trigger — no branch push and no manual dispatch
+A release is **one git tag**. Pushing `vX.Y.Z` builds the five images, publishes the Helm chart,
+uploads the Python package, and attaches the signed wheel, sdist, chart and SBOM to the GitHub
+Release. There is no other trigger — no branch push and no manual dispatch
 publishes anything.
 
 ## What a tag does
@@ -17,9 +18,25 @@ push tag vX.Y.Z
         ├── chart     needs: images
         │             stamp Chart.yaml, resolve each image digest, pin images.<c>.digest,
         │             lint, render, package, push OCI, cosign sign, VERIFY the signature
-        └── pypi      needs: images + chart   (inline — see the note below)
-                      version gate -> build -> twine check -> wheel gate -> PyPI (Trusted Publishing)
+        ├── pypi      needs: images + chart   (inline — see the note below)
+        │             version gate -> build -> twine check -> wheel gate -> PyPI (Trusted Publishing)
+        ├── release-sbom     contents: read only
+        │                    SPDX SBOM of the tagged source
+        ├── release-sign     needs: chart + pypi + release-sbom   (id-token: write only)
+        │                    cosign sign-blob every asset -> VERIFY each bundle
+        └── github-release   needs: release-sign   (contents: write only, gh CLI, no checkout)
+                             attach wheel, sdist, chart .tgz, SBOM and their .sigstore.json bundles
 ```
+
+The GitHub Release jobs run after PyPI because nothing they do is irreversible: if one fails, re-run
+the failed jobs. If no GitHub Release exists for the tag, `github-release` creates it as a draft with
+short notes that point at CHANGELOG.md, attaches the assets, and then publishes it. Those notes carry
+a fixed marker line (an HTML comment), so a re-run that finds a draft this workflow created publishes
+it. If a Release already exists, the job adds the assets and leaves the notes alone. A draft made by
+hand (no marker) is never published by the job: it gets the assets and the job fails with an error
+saying so, so an unpublished Release cannot go unnoticed. A published Release with immutable releases
+on cannot take new assets, so in that case the job fails too; see step 2b of "Cutting the release"
+below.
 
 `chart` depends on `images` so the chart can never be published referencing images that do not
 exist. That ordering is only expressible between jobs of one workflow, which is why `build.yml` is
@@ -188,6 +205,12 @@ CI cannot do these — they need an account login.
    (`repositoryID`) and push the ownership artifact per that file's header comments. Chart.yaml
    already carries the Artifact Hub annotations.
 
+3. **Immutable releases.** Know whether the repository has immutable releases turned on
+   (*Settings* → *General* → *Releases*). With it on, a Release published before `release.yml`
+   finishes cannot take the signed assets and `github-release` fails; step 2b of "Cutting the
+   release" says how to avoid that. TODO(the maintainer): confirm whether immutable releases is on for
+   norviq-dev/norviq.
+
 ## Cutting the release
 
 Set this once and every command below follows. It is a variable rather than a literal on purpose:
@@ -203,18 +226,44 @@ export VERSION=0.1.3          # the version you are cutting
 # 1. versions agree (this is also gate 0 in CI, but fail locally first)
 python3 scripts/check_release_versions.py "$VERSION"
 
+# 1b. third-party notices: ui/THIRD_PARTY_NOTICES.txt must match ui/package-lock.json (see
+#     "Third-party notices" below). If the check fails, or the file does not exist yet, run the
+#     script without --check, review the diff and commit the file NOW: every commit this step causes
+#     must come before step 2, so that the SHA step 2 verifies is the SHA you tag. If you commit
+#     anything after step 2, run step 2 again on the new SHA.
+(cd ui && npm ci) && python3 scripts/ui_third_party_notices.py --check
+
+# 1c. security fixes: if the release contains any, its CHANGELOG entry says so and links each
+#     advisory, committed before step 2 like 1b. The GitHub Release notes for the tag must say the
+#     same and link the same advisories: write them as a draft Release in step 2b.
+
 # 2. exercise the ARTIFACT, not the source. Throwaway kind cluster: stamps the chart by digest
 #    exactly as release.yml does, then installs, uses (sidecar injection + a real allow and block),
 #    and uninstalls it, checking nothing is stranded.
-#    Default is the UPGRADE path — install the previous release from OCI, seed a tenant policy, then
-#    upgrade in and assert the generated credentials and PVCs survived and nothing is still running a
-#    pre-upgrade image. That is what existing users do; a fresh install is what new ones do, and the
-#    two break differently, so run both. CI runs them as a matrix.
-python3 scripts/verify_release.py                      # upgrade path (auto-detects N-1)
+#    Default is the UPGRADE path — install the newest published release <= the chart version from
+#    OCI (equal included; it fails if there is none), seed a tenant policy and a login/logout into
+#    the bundled store, then upgrade in and assert the store and the API came back, the generated
+#    credentials and PVCs survived, and nothing is still running a pre-upgrade image. That is what
+#    existing users do; a fresh install is what new ones do, and the two break differently, so run
+#    both. CI runs them as a matrix.
+#    Run locally, it installs main's `<comp>-latest` images unless you build the candidate's own and
+#    pass each one: `docker build -t ghcr.io/norviq-dev/norviq-engine:api-verify -f Dockerfile.api .`,
+#    `kind load docker-image ... --name <cluster>`, then `--candidate-image api=<that ref>` (repeat for
+#    engine, ui, webhook, bootstrap). A release is built from the tag, so main's images are not it.
+python3 scripts/verify_release.py                      # upgrade path (newest published <= the chart)
 python3 scripts/verify_release.py --upgrade-from none  # fresh install
 # or, both in parallel on a runner:
 gh workflow run verify-release.yml
 # every check must pass before you tag
+
+# 2b. GitHub Release: do NOT publish a vX.Y.Z Release by hand before release.yml finishes; its
+#     github-release job creates and publishes it with short notes pointing at CHANGELOG.md. To
+#     write the notes yourself (always, for a release with security fixes: see 1c), create the
+#     Release as a DRAFT for the tag; the job attaches the signed assets to the draft, leaves it
+#     unpublished and warns about it (an annotation and a note in the job summary). Check every
+#     job is green, then publish the draft.
+#     With immutable releases on, a Release published early cannot take the assets and the job
+#     fails.
 
 # 3. tag and push
 git tag -a "v$VERSION" -m "Norviq v$VERSION"
@@ -234,6 +283,18 @@ number, so the bump is a mechanical follow-the-errors loop rather than a search 
 It runs as gate 0 of the release *and* as a unit test on every PR, so drift is caught by the PR that
 introduces it — not by a tag you cannot take back.
 
+### Third-party notices
+
+Step 1b above checks the console's notices file; nothing in CI does this yet.
+`scripts/ui_third_party_notices.py` builds `ui/THIRD_PARTY_NOTICES.txt` from `ui/package-lock.json`
+and the packages `npm ci` installed: the licence, NOTICE and third-party-notice files of every non-dev
+package. With `--check` it exits 1 when the file is missing or differs from what it would write.
+
+`NOTICE` is maintained by hand, also before you tag. If `uv.lock`, `ui/package-lock.json` or
+`webhook/go.mod` changed since the last release, re-check which shipped dependencies carry a NOTICE
+file (the Python runtime closure the api and engine images install, the non-dev console packages, and
+the modules `go list -deps` links into the webhook) and update the matching section of `NOTICE`.
+
 ## Verify after publishing
 
 ```bash
@@ -248,6 +309,11 @@ cosign verify "ghcr.io/norviq-dev/norviq-engine:api-$VERSION" \
   --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/build.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
+# each image's SPDX SBOM is a cosign attestation on its digest, signed by the same identity
+cosign verify-attestation --type spdxjson "ghcr.io/norviq-dev/norviq-engine:api-$VERSION" \
+  --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/build.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+
 # the released chart must pin digests, never floating tags
 helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version "$VERSION" \
   --set-json 'policyQuotaNamespaces=["default"]' | grep 'image:' | grep norviq-engine
@@ -255,6 +321,13 @@ helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version "$VERSION"
 
 # package
 pip download "norviq==$VERSION" --no-deps -d /tmp/nrvq && unzip -l /tmp/nrvq/*.whl | grep opa-capabilities
+
+# GitHub Release assets (wheel, sdist, chart .tgz, SBOM), each with a Sigstore bundle
+gh release download "v$VERSION" -R norviq-dev/norviq -D "/tmp/nrvq-gh-$VERSION"
+( cd "/tmp/nrvq-gh-$VERSION" && for f in *; do case "$f" in *.sigstore.json) continue;; esac
+  cosign verify-blob "$f" --bundle "$f.sigstore.json" \
+    --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com || exit 1; done )
 ```
 
 ## The docs pin a version too

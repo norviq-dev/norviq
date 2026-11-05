@@ -29,7 +29,14 @@ and this spike does not pretend to have validated it. Client-supplied identity i
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
+import hashlib
+import http.cookiejar
+import json
+import time
+import uuid
+import weakref
 from typing import Any, AsyncIterator
 
 import httpx
@@ -42,7 +49,7 @@ from starlette.routing import Route
 from norviq.config import settings
 from norviq.engine.identity import SPIFFEResolver
 from norviq.mcp import protocol as P
-from norviq.mcp.firewall import McpFirewall, MediationResult
+from norviq.mcp.firewall import Correlation, McpFirewall, MediationResult
 from norviq.mcp.pins import ControlPlanePinStore, PinRegistry, build_store, effective_store_kind
 from norviq.mcp.servers import ControlPlaneServerStore
 from norviq.sdk.client.engine import PolicyEngineClient
@@ -57,6 +64,25 @@ _HOP_HEADERS = frozenset({
     "content-length", "transfer-encoding", "connection", "keep-alive",
     "host", "upgrade", "te", "trailer", "proxy-authorization", "proxy-authenticate",
 })
+# Cap on the answer to the proxy's own `tools/list` (cold catalog). The same bound the stdio driver
+# puts on one JSON-RPC line: far above a real catalogue, and it keeps a server from streaming without
+# end into memory while a client's call waits.
+_OWN_LIST_MAX_BYTES = 8 * 1024 * 1024
+# Refusals of server requests posted back upstream at once, and how long one may take. The pool has 32
+# connections and the client's own requests need them.
+_MAX_POST_BACKS = 8
+_POST_BACK_TIMEOUT_S = 10.0
+# Resumption bookkeeping, per attested caller (`_EventIds`). A resume with an evicted id resumes
+# nothing (its responses are dropped), which is the fail-closed direction.
+_MAX_EVENT_IDS = 4096                       # entries per caller
+_MAX_EVENT_IDS_PER_STREAM = 64              # one stream cannot evict the others' entries
+_MAX_EVENT_ID_BUDGET = 1024 * 1024          # bytes of server event ids held per caller
+# Longest server SSE event id the proxy will remember. Ids are opaque cursors; a 4 MB one is not.
+_MAX_SERVER_EVENT_ID_BYTES = 256
+# The client headers the proxy's own `tools/list` carries: what identifies the connection, nothing
+# that describes the call that triggered it. See `HttpProxy._upstream_lister`.
+_MCP_METHOD_HEADER = "mcp-method"
+_LIST_HEADER_ALLOWLIST = frozenset({"authorization", "mcp-session-id", "mcp-protocol-version"})
 
 
 class HttpProxy:
@@ -73,6 +99,14 @@ class HttpProxy:
         self._engine: PolicyEngineClient | None = None
         # Keyed by ATTESTED identity, never by anything the caller sends. See _firewall_for.
         self._firewalls: dict[str, McpFirewall] = {}
+        # Post-backs in flight, and when the cap was last logged (see `_spawn_post_back`).
+        self._post_backs = 0
+        self._post_back_logged = 0.0
+        # Per attested caller (its firewall): minted SSE event id -> (the server's event id, the POST
+        # scope it came from, or None for a GET stream). See `_mint_event_id` and `_EventIds`. Keyed by
+        # the firewall OBJECT, weakly, so an id minted for one caller is never found for another and
+        # an evicted caller's ids go with it.
+        self._event_ids: weakref.WeakKeyDictionary[McpFirewall, _EventIds] = weakref.WeakKeyDictionary()
         self._identity_key: str | None = None
         # Pins are per-SERVER, not per-session: a rug pull that reset itself every time a client
         # reconnected would not be detectable at all.
@@ -108,13 +142,8 @@ class HttpProxy:
         # value here while `build_store` hands back memory is how a surface ends up asserting
         # durability the process does not have.
         elif pin_store != effective_store_kind(pin_store, settings.mcp_pin_path):
-            log.warning(
-                "nrvq.mcp.http.pin_store_degraded",
-                configured=pin_store, using=effective_store_kind(pin_store, settings.mcp_pin_path),
-                code="NRVQ-MCP-5067",
-                hint="NRVQ_MCP_PIN_STORE=file needs NRVQ_MCP_PIN_PATH; without it pins are held in "
-                     "process, so a restart re-TOFUs every definition and drift is not detected",
-            )
+            # build_store logs the degradation (NRVQ-MCP-5078) for every caller; this branch only
+            # keeps the kind this surface REPORTS equal to the kind it actually runs.
             pin_store = effective_store_kind(pin_store, settings.mcp_pin_path)
         self._pin_store_kind = pin_store
         self._pins = PinRegistry(
@@ -149,7 +178,7 @@ class HttpProxy:
 
         No retry loop of its own: unlike the pin store there is nothing to swap in on success — the
         firewall already holds the registry object, and `start_refresh` re-attempts the load on the
-        same interval whether or not the first one worked. A failure here is loud (NRVQ-MCP-5070) and
+        same interval whether or not the first one worked. A failure here is loud (NRVQ-MCP-5077) and
         recovers on the next tick.
         """
         self._servers.namespace = await self._attested_namespace()
@@ -318,7 +347,15 @@ class HttpProxy:
         if msg is None:
             return JSONResponse(P.error_response(None, P.E_PARSE, "invalid JSON-RPC payload"), status_code=400)
 
-        mediation = await fw.on_client_message(msg)
+        # This POST's own correlation scope: its response body answers its request and nothing else,
+        # and a GET that resumes this POST's stream answers it at most once more. See `Correlation`.
+        corr = fw.new_correlation()
+        corr.upstream_headers = _connection_headers(request)
+        mediation = await fw.on_client_message(msg, list_upstream=self._upstream_lister(request),
+                                               corr=corr)
+        if mediation.catalog_scanned:
+            # The proxy listed a cold catalog itself; report it exactly as a forwarded tools/list.
+            self._report_catalog(fw, mediation)
         if mediation.reply is not None and mediation.forward is None:
             # Answered locally: the upstream is never contacted. This is the block path, and the
             # 200 is correct — the JSON-RPC envelope carries the refusal, not the HTTP status.
@@ -342,13 +379,108 @@ class HttpProxy:
         #
         # Opening the response as a stream lets the content-type be read BEFORE the body is consumed,
         # so one request serves both shapes.
+        initialize = msg.method == P.M_INITIALIZE
         if _wants_stream(request):
-            return await self._stream_through(fw, "POST", request, mediation.forward)
-        return await self._post_once(fw, request, mediation.forward)
+            return await self._stream_through(fw, "POST", request, mediation.forward, corr,
+                                              initialize=initialize)
+        return await self._post_once(fw, request, mediation.forward, corr, initialize=initialize)
+
+    def _upstream_lister(self, request: Request):
+        """The firewall's way to send its own `tools/list` upstream for a cold catalog.
+
+        The headers are the ones a `tools/list` from THIS client would carry, not the headers of the
+        `tools/call` that triggered it. Copying the call's headers wholesale sent `Mcp-Method:
+        tools/call`, `Mcp-Name: <tool>` and the `Mcp-Param-*` headers (built from model-controlled
+        arguments) on a request whose body says `tools/list`: a 2026-07-28 server rejects that
+        mismatch (`-32020`), which broke the self-list for exactly the stateless clients it exists
+        for, and it put call-derived values on the wire before Gate B had decided the call.
+
+        So only what identifies the CONNECTION is carried — `_LIST_HEADER_ALLOWLIST`: the
+        credential the server authenticates (`Authorization`), the 2025-06-18 session
+        (`Mcp-Session-Id`) and the negotiated revision (`Mcp-Protocol-Version`). `Mcp-Method` is set
+        to `tools/list` when the client's own request carried an `Mcp-Method` (a client that speaks
+        the header revision), and is absent otherwise, as it would be on that client's own list.
+
+        Bounded in total bytes here and in time by the firewall. The answer is either one JSON body or
+        an SSE stream, the server's choice per request as everywhere on this transport; on a stream the
+        response is the frame whose id matches, and the stream is closed as soon as it is found.
+        """
+        client_headers = {k.lower(): v for k, v in request.headers.items()}
+        headers = {k: v for k, v in client_headers.items() if k in _LIST_HEADER_ALLOWLIST}
+        if _MCP_METHOD_HEADER in client_headers:
+            headers[_MCP_METHOD_HEADER] = P.M_TOOLS_LIST
+        headers["content-type"] = "application/json"
+        headers["accept"] = f"application/json, {_SSE}"
+        # No compression. The size cap counts the bytes httpx hands back, which are DECODED: a gzip
+        # answer of a few hundred KiB expands to tens of MiB inside one chunk before any check can
+        # run. Asking for identity and refusing anything else keeps the cap a cap on the wire.
+        headers["accept-encoding"] = "identity"
+
+        async def _list(own: P.JsonRpcMessage) -> P.JsonRpcMessage | None:
+            async with self._client.stream("POST", self._upstream, headers=headers,
+                                           content=own.raw) as resp:
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"upstream answered HTTP {resp.status_code}")
+                encoding = resp.headers.get("content-encoding", "identity").strip().lower()
+                if encoding not in ("", "identity"):
+                    raise RuntimeError(f"upstream answered with content-encoding {encoding[:32]!r}; "
+                                       "the proxy's own list accepts identity only")
+                streamed = _is_sse(resp.headers)
+                buffer = b""
+                received = 0
+                lines = _SseLines()
+                async for chunk in resp.aiter_bytes():
+                    # TOTAL bytes, not the unparsed remainder: on a stream the remainder shrinks as
+                    # frames are split off, so a server sending endless small non-matching frames
+                    # would never reach a cap measured on it.
+                    received += len(chunk)
+                    if received > _OWN_LIST_MAX_BYTES:
+                        raise RuntimeError(f"tools/list answer exceeded {_OWN_LIST_MAX_BYTES} bytes")
+                    if not streamed:
+                        buffer += chunk
+                        continue
+                    buffer += lines.feed(chunk)
+                    while b"\n\n" in buffer:
+                        frame, buffer = buffer.split(b"\n\n", 1)
+                        found = _own_response_in_frame(frame, own.id)
+                        if found is not None:
+                            return found
+                if streamed:
+                    return _own_response_in_frame(buffer, own.id)
+                found = P.decode(buffer)
+                return found if found is not None and found.id == own.id else None
+
+        # Single flight and back-off are per credential (see `McpFirewall._cold_lists`): a digest, so
+        # the credential itself is never held as a key.
+        _list.credential_key = hashlib.sha256(                       # type: ignore[attr-defined]
+            f"{client_headers.get('authorization', '')}\0{client_headers.get('mcp-session-id', '')}"
+            .encode("utf-8", "replace")).hexdigest()[:32]
+        return _list
 
     async def _handle_get(self, request: Request) -> Response:
-        """Standalone SSE stream: server -> client, including server-initiated requests."""
-        return await self._stream_through(await self._firewall_for_caller(), "GET", request, None)
+        """Standalone SSE stream: server -> client, including server-initiated requests.
+
+        A plain GET stream answers NO request: the transport says a server MUST NOT send a response
+        on it unless resuming a stream associated with a previous client request, and every response
+        there is dropped (`Correlation.get_stream`). A GET carrying a Last-Event-ID the proxy minted on
+        one of its POST streams resumes THAT stream: it is mediated in that POST's scope, and the
+        server is sent its own event id back. An id the proxy did not mint resumes nothing.
+        """
+        fw = await self._firewall_for_caller()
+        corr = fw.new_correlation(get_stream=True)
+        server_last_id: str | None = None
+        last = request.headers.get("last-event-id")
+        if last is not None:
+            ids = self._event_ids.get(fw)
+            known = ids.get(last) if ids is not None else None
+            if known is not None:
+                server_last_id, origin = known
+                if origin is not None:
+                    corr = origin.resumption()
+        if not corr.resumed:
+            corr.upstream_headers = _connection_headers(request)
+        return await self._stream_through(fw, "GET", request, None, corr,
+                                          last_event_id=server_last_id)
 
     async def _handle_delete(self, request: Request) -> Response:
         """Session teardown.
@@ -359,49 +491,140 @@ class HttpProxy:
         Gate-A state by asking. Re-discovering a catalog is exactly how a rug pull would be laundered
         into a clean first sight. Pins are server-scoped and survive regardless.
         """
-        upstream = await self._client.request(
-            "DELETE", self._upstream, headers=self._forward_headers(request.headers))
-        return Response(upstream.content, status_code=upstream.status_code,
-                        headers=_passthrough(upstream.headers))
+        # The status and headers are passed on; the BODY is not. It was read whole into memory, with no
+        # bound, and handed to the client unmediated — server text on a path no gate looks at. A
+        # DELETE's answer has nothing a client needs beyond its status.
+        headers = {**self._forward_headers(request.headers), "accept-encoding": "identity"}
+        async with self._client.stream("DELETE", self._upstream, headers=headers) as upstream:
+            out = {k: v for k, v in _passthrough(upstream.headers).items() if k.lower() != "content-type"}
+            return Response(b"", status_code=upstream.status_code, headers=out)
 
     # ------------------------------------------------------------------ streaming
     async def _stream_through(self, fw: McpFirewall, method: str, request: Request,
-                              body: bytes | None) -> Response:
+                              body: bytes | None, corr: Correlation, initialize: bool = False,
+                              last_event_id: str | None = None) -> Response:
         headers = self._forward_headers(request.headers)
         if body is not None:
             headers["content-type"] = "application/json"
+        if last_event_id is not None:
+            # The client resumes with the id the proxy minted; the server knows its own.
+            headers = {k: v for k, v in headers.items() if k.lower() != "last-event-id"}
+            headers["last-event-id"] = last_event_id
+        # Opened before the response is returned, so the session header can be decided from the
+        # upstream's response headers (see `_session_header`).
+        cm = self._client.stream(method, self._upstream, headers=headers, content=body, timeout=None)
+        resp = await cm.__aenter__()
+        out_headers = {"cache-control": "no-cache",
+                       **self._session_header(request, resp.headers, initialize)}
 
         async def events() -> AsyncIterator[bytes]:
-            req = self._client.build_request(method, self._upstream, headers=headers, content=body)
-            async with self._client.stream(
-                method, self._upstream, headers=headers, content=body, timeout=None
-            ) as resp:
-                async for out in self._pump_frames(fw, resp):
+            try:
+                async for out in self._pump_frames(fw, resp, corr):
                     yield out
-            del req
+            finally:
+                await cm.__aexit__(None, None, None)
 
-        return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
+        return StreamingResponse(events(), media_type=_SSE, headers=out_headers)
 
-    async def _pump_frames(self, fw: McpFirewall, resp: Any) -> AsyncIterator[bytes]:
+    def _session_header(self, request: Request, upstream_headers: Any, initialize: bool) -> dict[str, str]:
+        """The Mcp-Session-Id to hand the client, if any.
+
+        The server assigns the session on the response to `initialize`, and that is the only response
+        whose session id is passed on. On any other response a session id that differs from the one
+        the client sent is withheld (NRVQ-MCP-5087): the TypeScript SDK 1.32 adopts a session id from
+        ANY response, so a server could otherwise move a client onto another client's session.
+        """
+        upstream = upstream_headers.get("mcp-session-id")
+        if upstream is None:
+            return {}
+        if initialize or upstream == request.headers.get("mcp-session-id"):
+            return {"mcp-session-id": upstream}
+        log.warning("nrvq.mcp.http.session_id_withheld", server=self._server_id, code="NRVQ-MCP-5087",
+                    detail="a non-initialize response carried a session id different from the "
+                           "request's; it was not passed to the client")
+        return {}
+
+    def _mint_event_id(self, fw: McpFirewall, server_id: str, corr: Correlation | None) -> str:
+        """An SSE event id of the proxy's own, mapped to the server's id and to the stream's scope.
+
+        The client resumes with what it was given. Event ids the SERVER chose cannot say which of the
+        proxy's streams they belonged to — a server can repeat one across streams — so the client is
+        given ids the proxy minted, and a resuming GET is mapped back to exactly one POST's scope.
+        """
+        ids = self._event_ids.get(fw)
+        if ids is None:
+            ids = self._event_ids[fw] = _EventIds()
+        origin = None if corr is None or corr.get_stream else corr
+        return ids.add(server_id, origin, id(corr) if corr is not None else 0)
+
+    async def _pump_frames(self, fw: McpFirewall, resp: Any,
+                           corr: Correlation | None = None) -> AsyncIterator[bytes]:
         """Mediate an SSE body frame by frame. One implementation, two callers.
 
         `_stream_through` and `_post_once` both consume SSE, and duplicating this loop is how the two
         would eventually disagree about framing — the same way `initialize` and `server/discover`
         drifted until one of them had no scan at all.
         """
+        if not _is_sse(resp.headers):
+            # The server answered a body that is NOT a stream on the path that serves the client a
+            # stream (an SSE-only client, or the GET stream). It has no frames and no `data:` lines, so
+            # the frame loop below would have read the whole body as bookkeeping and passed it through
+            # unmediated. It is one JSON-RPC message: mediate it whole, exactly as the JSON route does,
+            # and hand the client the result as the one SSE event it asked for. A body that does not
+            # decode is dropped by `_mediate_server_bytes` and nothing is emitted.
+            body = await self._read_capped(resp, "stream path, non-stream body")
+            if body is None:
+                return
+            mediated = await self._mediate_server_bytes(fw, body, corr) if body.strip() else b""
+            if mediated:
+                yield b"event: message\ndata: " + _one_line(mediated) + b"\n\n"
+            return
         buffer = b""
+        scan_from = 0
+        lines = _SseLines()
+        limit = int(settings.mcp_http_max_message_bytes)
         async for chunk in resp.aiter_bytes():
-            buffer += chunk
+            buffer += lines.feed(chunk)
             # SSE frames are separated by a blank line. Split on the boundary and emit whole frames
             # only — a half-received frame must not be parsed, and must not be held back longer than
-            # it takes to complete.
-            while b"\n\n" in buffer:
-                frame, buffer = buffer.split(b"\n\n", 1)
-                yield await self._mediate_frame(fw, frame) + b"\n\n"
+            # it takes to complete. The search resumes where the last one stopped: rescanning the
+            # whole pending frame on every chunk made a long frame quadratic.
+            while True:
+                end = buffer.find(b"\n\n", scan_from)
+                if end < 0:
+                    scan_from = max(0, len(buffer) - 1)
+                    break
+                frame, buffer, scan_from = buffer[:end], buffer[end + 2:], 0
+                yield await self._mediate_frame(fw, frame, corr) + b"\n\n"
+            if len(buffer) > limit:
+                # One frame larger than any message the proxy will hold. Ending the stream is the
+                # only fail-closed choice: the frame cannot be mediated without being held whole.
+                self._over_limit("stream path, one SSE frame", limit)
+                return
         if buffer.strip():
-            yield await self._mediate_frame(fw, buffer)
+            yield await self._mediate_frame(fw, buffer, corr)
 
-    async def _post_once(self, fw: McpFirewall, request: Request, body: bytes) -> Response:
+    async def _read_capped(self, resp: Any, where: str) -> bytes | None:
+        """The whole body, or None (logged) once it passes `mcp_http_max_message_bytes`."""
+        limit = int(settings.mcp_http_max_message_bytes)
+        parts: list[bytes] = []
+        size = 0
+        async for chunk in resp.aiter_bytes():
+            size += len(chunk)
+            if size > limit:
+                self._over_limit(where, limit)
+                return None
+            parts.append(chunk)
+        return b"".join(parts)
+
+    def _over_limit(self, where: str, limit: int) -> None:
+        log.warning("nrvq.mcp.http.upstream_message_too_large", where=where, limit=limit,
+                    server=self._server_id, code="NRVQ-MCP-5085",
+                    hint="raise NRVQ_MCP_HTTP_MAX_MESSAGE_BYTES only if the server's messages are "
+                         "legitimately this large")
+
+    async def _post_once(self, fw: McpFirewall, request: Request, body: bytes,
+                         corr: Correlation | None = None, initialize: bool = False) -> Response:
         """POST upstream exactly once and serve whichever shape comes back.
 
         The context manager is entered by hand because the decision — buffer or stream — depends on a
@@ -412,41 +635,80 @@ class HttpProxy:
         headers = {**self._forward_headers(request.headers), "content-type": "application/json"}
         cm = self._client.stream("POST", self._upstream, headers=headers, content=body, timeout=None)
         resp = await cm.__aenter__()
+        session_header = self._session_header(request, resp.headers, initialize)
 
-        if _SSE not in resp.headers.get("content-type", ""):
+        if not _is_sse(resp.headers):
             try:
-                out = await self._mediate_server_bytes(fw, await resp.aread())
+                raw = await self._read_capped(resp, "json path")
+                if raw is None:
+                    sent = P.decode(body)
+                    return Response(P.encode(P.error_response(
+                        sent.id if sent is not None else None, P.E_INTERNAL,
+                        "Norviq MCP proxy: the upstream response exceeded the size limit and was not "
+                        "forwarded")), status_code=502, media_type="application/json")
+                out = await self._mediate_server_bytes(fw, raw, corr)
                 return Response(out, status_code=resp.status_code,
-                                headers=_passthrough(resp.headers), media_type="application/json")
+                                headers={**_passthrough(resp.headers), **session_header},
+                                media_type="application/json")
             finally:
                 await cm.__aexit__(None, None, None)
 
         async def events() -> AsyncIterator[bytes]:
             try:
-                async for out in self._pump_frames(fw, resp):
+                async for out in self._pump_frames(fw, resp, corr):
                     yield out
             finally:
                 await cm.__aexit__(None, None, None)
 
-        return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
+        return StreamingResponse(events(), media_type=_SSE,
+                                 headers={"cache-control": "no-cache", **session_header})
 
-    async def _mediate_frame(self, fw: McpFirewall, frame: bytes) -> bytes:
-        """Mediate the JSON payload of one SSE frame, preserving every other SSE field.
+    async def _mediate_frame(self, fw: McpFirewall, frame: bytes,
+                             corr: Correlation | None = None) -> bytes:
+        """Mediate the JSON payload of one SSE frame, preserving the SSE fields a client acts on.
 
-        Only `data:` lines carry the JSON-RPC message; `event:`, `id:` and `retry:` are transport
-        bookkeeping the client needs intact (`id:` in particular drives resumption).
+        Only `data` carries the JSON-RPC message; `event:`, `id:`, `retry:` and comments are transport
+        bookkeeping the client needs intact (`id:` in particular drives resumption). The data lines are
+        joined and mediated as ONE message, as the client will read them. Any other line is dropped:
+        a spec client ignores an unknown field, and the proxy forwards nothing it did not classify.
         """
-        out_lines: list[bytes] = []
-        for line in frame.split(b"\n"):
-            if not line.startswith(b"data:"):
-                out_lines.append(line)
-                continue
-            payload = line[5:].strip()
-            mediated = await self._mediate_server_bytes(fw, payload)
-            out_lines.append(b"data: " + mediated if mediated else b"data: ")
-        return b"\n".join(out_lines)
+        keep, data, dropped = _split_frame(frame)
+        if dropped:
+            log.warning("nrvq.mcp.http.sse_lines_dropped", lines=dropped, server=self._server_id,
+                        code="NRVQ-MCP-5082",
+                        detail="lines in a server SSE frame that are neither data nor a known field "
+                               "were not forwarded")
+        # Event ids: the client is handed one the proxy minted (see `_mint_event_id`). An empty `id:`
+        # (which resets the client's last id) is passed as it is.
+        # Only the LAST `id:` of a frame sets the client's last event id (each one overwrites the
+        # buffer before dispatch), so only that one is kept and minted; minting every one let a server
+        # cost the proxy a mint and a map entry per line of an 8 MiB frame.
+        id_lines = [i for i, line in enumerate(keep) if line.partition(b":")[0] == b"id"]
+        for i in id_lines[:-1]:
+            keep[i] = b""
+        for i, line in enumerate(keep):
+            name, _, value = line.partition(b":")
+            if name == b"id" and line:
+                raw_id = value[1:] if value.startswith(b" ") else value
+                if len(raw_id) > _MAX_SERVER_EVENT_ID_BYTES:
+                    # Held in memory until evicted, so bounded: an id this long is not one the proxy
+                    # will remember. The frame goes on without an id (the client cannot resume to it).
+                    log.warning("nrvq.mcp.http.sse_event_id_too_long", bytes=len(raw_id),
+                                limit=_MAX_SERVER_EVENT_ID_BYTES, server=self._server_id,
+                                code="NRVQ-MCP-5088")
+                    keep[i] = b""
+                elif raw_id:
+                    keep[i] = b"id: " + self._mint_event_id(
+                        fw, raw_id.decode("utf-8", "replace"), corr).encode()
+                # An EMPTY `id:` is passed as it is: it resets the client's last event id.
+        keep = [line for line in keep if line]
+        if data is not None:
+            mediated = await self._mediate_server_bytes(fw, data, corr)
+            keep.append(b"data: " + _one_line(mediated) if mediated else b"data: ")
+        return b"\n".join(keep)
 
-    async def _mediate_server_bytes(self, fw: McpFirewall, payload: bytes) -> bytes:
+    async def _mediate_server_bytes(self, fw: McpFirewall, payload: bytes,
+                                    corr: Correlation | None = None) -> bytes:
         msg = P.decode(payload)
         if msg is None:
             # FAIL CLOSED, like stdio does (`nrvq.mcp.server.undecodable_dropped`). This used to
@@ -461,11 +723,11 @@ class HttpProxy:
             log.warning("nrvq.mcp.server.undecodable_dropped", bytes=len(payload),
                         transport="http", code="NRVQ-MCP-5004")
             return b""
-        result = await fw.on_server_message(msg)
+        result = await fw.on_server_message(msg, corr)
         if result.reply is not None:
             # A server-initiated request we refused. On this transport the reply travels back as a
             # separate POST rather than inline, so it is dispatched without blocking the stream.
-            asyncio.create_task(self._post_back(result.reply))
+            self._spawn_post_back(result.reply, corr.upstream_headers if corr else {})
         self._report_catalog(fw, result)
         if result.forward is None:
             return b""
@@ -495,10 +757,52 @@ class HttpProxy:
         if catalog is not None:
             asyncio.create_task(self._pin_store.flush(catalog))
 
-    async def _post_back(self, payload: bytes) -> None:
+    def _spawn_post_back(self, payload: bytes, connection: dict[str, str]) -> None:
+        """Start a post-back, unless `_MAX_POST_BACKS` are already in flight.
+
+        Each refused server request posts one refusal, and the server chooses how many it sends and
+        whether it ever answers them: uncapped, a stream of refusable requests held thousands of tasks
+        and the shared connection pool the client's own requests need. Past the cap the refusal is
+        not posted (logged, NRVQ-MCP-5090); the server request stays unanswered, which is what a
+        server that floods them gets.
+        """
+        if self._post_backs >= _MAX_POST_BACKS:
+            now = time.monotonic()
+            if now - self._post_back_logged >= 60.0:
+                self._post_back_logged = now
+                log.warning("nrvq.mcp.http.post_back_dropped", limit=_MAX_POST_BACKS,
+                            server=self._server_id, code="NRVQ-MCP-5090",
+                            detail="too many refusals in flight; this one was not posted back")
+            return
+        self._post_backs += 1
+
+        async def _run() -> None:
+            try:
+                await self._post_back(payload, connection)
+            finally:
+                self._post_backs -= 1
+        asyncio.create_task(_run())
+
+    async def _post_back(self, payload: bytes, connection: dict[str, str]) -> None:
+        """POST the proxy's refusal of a server request back upstream.
+
+        The reply is NOT read. `post()` read the server's whole answer into memory, unbounded and
+        uncompressed-on-arrival, for a body nobody uses: one refused elicitation answered with 400 MiB
+        took the process from 110 to 473 MiB, and refusals run concurrently. The status is all that is
+        looked at; the stream is closed unread.
+
+        It carries the client's connection headers (`_connection_headers`: the credential, the
+        2025-06-18 session and the protocol revision), so the refusal reaches the session that asked.
+        """
+        headers = {**connection, "content-type": "application/json",
+                   "accept": f"application/json, {_SSE}", "accept-encoding": "identity"}
         with contextlib.suppress(Exception):
-            await self._client.post(self._upstream, content=payload,
-                                    headers={"content-type": "application/json"})
+            # One bound for the whole exchange: httpx's timeout applies per phase (connect, write,
+            # pool, read), so on its own it allowed several multiples of the figure.
+            async with asyncio.timeout(_POST_BACK_TIMEOUT_S):
+                async with self._client.stream("POST", self._upstream, headers=headers, content=payload,
+                                               timeout=_POST_BACK_TIMEOUT_S):
+                    pass
 
     # ------------------------------------------------------------------ lifecycle
     async def run(self) -> int:
@@ -509,10 +813,7 @@ class HttpProxy:
         # first_seen TOFU decision this pod would then never reconcile with the shared store.
         await self._install_pin_store()
         await self._install_server_registry()
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0, connect=5.0),
-            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
-        )
+        self._client = _upstream_client()
         app = Starlette(routes=[
             Route("/mcp", self._handle_post, methods=["POST"]),
             Route("/mcp", self._handle_get, methods=["GET"]),
@@ -532,6 +833,173 @@ class HttpProxy:
             with contextlib.suppress(Exception):
                 await self._engine.close()
         return 0
+
+
+class _SseLines:
+    """SSE's three line terminators — CRLF, bare CR, bare LF — turned into LF, across chunk boundaries.
+
+    The proxy and the client must agree on where a line ends, because the proxy decides from the start
+    of a line whether it carries data (mediated) or bookkeeping (passed). Splitting on LF alone, as
+    this driver did, read `event: message<CR>data: {...}` as ONE bookkeeping line, while every spec
+    client reads it as two and dispatches the data. A CR ends the line at once, as it does for a
+    streaming client; an LF that opens the NEXT chunk straight after it is the second half of that
+    CRLF and is skipped, so a CRLF split across chunks is one line end, not two.
+    """
+
+    __slots__ = ("_cr",)
+
+    def __init__(self) -> None:
+        self._cr = False
+
+    def feed(self, chunk: bytes) -> bytes:
+        if self._cr and chunk.startswith(b"\n"):
+            chunk = chunk[1:]
+        self._cr = chunk.endswith(b"\r")
+        return chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+# The SSE fields other than `data` that a client acts on, plus comments (`:`). Anything else is
+# ignored by a spec client and dropped here, so nothing the proxy did not classify is forwarded.
+_SSE_BOOKKEEPING = frozenset({b"event", b"id", b"retry"})
+
+
+def _split_frame(frame: bytes) -> tuple[list[bytes], bytes | None, int]:
+    """One LF-normalised SSE frame -> (bookkeeping lines to keep, joined data or None, lines dropped).
+
+    `data` values are joined with LF, exactly as a client joins them before parsing, so a message
+    written over several `data:` lines is mediated as the one message the client will read.
+    """
+    keep: list[bytes] = []
+    data: list[bytes] = []
+    dropped = 0
+    for line in frame.split(b"\n"):
+        if b"\r" in line:
+            dropped += 1        # cannot survive `_SseLines`; never forwarded if a caller skipped it
+            continue
+        if line.startswith(b":"):
+            keep.append(line)
+            continue
+        name, _, value = line.partition(b":")
+        if name == b"data":
+            data.append(value[1:] if value.startswith(b" ") else value)
+        elif name in _SSE_BOOKKEEPING:
+            keep.append(line)
+        elif line:
+            dropped += 1
+    return keep, (b"\n".join(data) if data else None), dropped
+
+
+class _EventIds:
+    """One caller's minted event ids, bounded three ways.
+
+    Per stream (`_MAX_EVENT_IDS_PER_STREAM`, the oldest of that stream goes): resumption needs a
+    stream's recent ids, and one stream emitting thousands must not evict every other stream's. Per
+    caller in entries and in bytes (the oldest overall goes): the server chooses how many streams and
+    how long its ids are, and these are held in memory.
+    """
+
+    __slots__ = ("entries", "streams", "bytes")
+
+    def __init__(self) -> None:
+        self.entries: dict[str, tuple[str, Correlation | None, int]] = {}
+        self.streams: dict[int, collections.deque] = {}
+        self.bytes = 0
+
+    def get(self, minted: str) -> tuple[str, Correlation | None] | None:
+        entry = self.entries.get(minted)
+        return None if entry is None else (entry[0], entry[1])
+
+    def _drop(self, minted: str) -> None:
+        entry = self.entries.pop(minted, None)
+        if entry is None:
+            return
+        self.bytes -= len(entry[0])
+        queue = self.streams.get(entry[2])
+        if queue is not None:
+            with contextlib.suppress(ValueError):
+                queue.remove(minted)
+            if not queue:
+                self.streams.pop(entry[2], None)
+
+    def add(self, server_id: str, origin: Correlation | None, stream: int) -> str:
+        minted = f"nrvq-{uuid.uuid4().hex}"
+        queue = self.streams.setdefault(stream, collections.deque())
+        while len(queue) >= _MAX_EVENT_IDS_PER_STREAM:
+            self._drop(queue[0])
+        while self.entries and (len(self.entries) >= _MAX_EVENT_IDS
+                                or self.bytes + len(server_id) > _MAX_EVENT_ID_BUDGET):
+            self._drop(next(iter(self.entries)))
+        queue = self.streams.setdefault(stream, collections.deque())
+        queue.append(minted)
+        self.entries[minted] = (server_id, origin, stream)
+        self.bytes += len(server_id)
+        return minted
+
+
+class _NoCookies(http.cookiejar.DefaultCookiePolicy):
+    """Accept no cookie, return no cookie."""
+
+    def set_ok(self, cookie, request):  # noqa: D401 - CookiePolicy interface
+        return False
+
+    def return_ok(self, cookie, request):
+        return False
+
+
+def _upstream_client(transport: Any = None) -> httpx.AsyncClient:
+    """The one client the proxy talks to the upstream with — WITHOUT a cookie jar that remembers.
+
+    httpx keeps the cookies a server sets and sends them on every later request from the same client,
+    and this one client serves every caller of the proxy: a session cookie the server set for one
+    caller went out on another caller's requests, including the proxy's own self-lists and post-backs,
+    which are documented to carry no cookie. A client's own `Cookie` header still travels on that
+    client's forwarded requests, as any request header does.
+    """
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(60.0, connect=5.0),
+        limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+        transport=transport,
+    )
+    # On the client's own jar: httpx copies a jar passed as `cookies=` into a fresh default one, which
+    # would drop the policy.
+    client.cookies.jar.set_policy(_NoCookies())
+    return client
+
+
+def _connection_headers(request: Request) -> dict[str, str]:
+    """The client headers that identify its CONNECTION (credential, session, revision) and nothing
+    that describes a particular call — what the proxy's own requests upstream carry."""
+    return {k.lower(): v for k, v in request.headers.items() if k.lower() in _LIST_HEADER_ALLOWLIST}
+
+
+def _is_sse(headers: Any) -> bool:
+    """Whether a response is an SSE stream. Media types are case-insensitive (RFC 9110 §8.3.1)."""
+    return _SSE in str(headers.get("content-type", "")).lower()
+
+
+def _one_line(message: bytes) -> bytes:
+    """A mediated message as ONE `data:` value.
+
+    A message forwarded unchanged is re-emitted from the server's bytes, and a server that spread its
+    JSON over several `data:` lines (or pretty-printed a body) left line breaks in those bytes. After a
+    single `data: ` prefix the client read only the first line as data and lost the message. Line
+    breaks in JSON are only ever whitespace between tokens (inside a string they must be escaped), so
+    a compact re-encoding is the same message.
+    """
+    if b"\n" not in message and b"\r" not in message:
+        return message
+    return P.encode(json.loads(message)).rstrip(b"\n")
+
+
+def _own_response_in_frame(frame: bytes, own_id: Any) -> P.JsonRpcMessage | None:
+    """The response to the proxy's own request, if this SSE frame carries it; else None."""
+    _keep, data, _dropped = _split_frame(frame)
+    if data is None:
+        return None
+    msg = P.decode(data)
+    if msg is not None and msg.is_response and msg.id == own_id:
+        return msg
+    return None
 
 
 def _wants_stream(request: Request) -> bool:
@@ -558,4 +1026,8 @@ def _wants_stream(request: Request) -> bool:
 
 
 def _passthrough(headers) -> dict[str, str]:
-    return {k: v for k, v in headers.items() if k.lower() not in _HOP_HEADERS}
+    # Content-Encoding too: httpx has already decoded the body that is sent on, so a copied
+    # `gzip` would tell the client to decompress plain bytes. Mcp-Session-Id is never copied: it is
+    # passed only by `HttpProxy._session_header`.
+    return {k: v for k, v in headers.items()
+            if k.lower() not in _HOP_HEADERS and k.lower() not in ("content-encoding", "mcp-session-id")}

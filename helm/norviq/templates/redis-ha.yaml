@@ -1,5 +1,8 @@
 {{- if and .Values.redis.enabled .Values.redis.ha.enabled }}
-{{- /* HA Redis via the Spotahome redis-operator (Sentinel-managed failover) — multi-node prod.
+{{- /* HA store via the Spotahome redis-operator (Sentinel-managed failover) — multi-node prod. It runs
+       Valkey (BSD-3-Clause), which speaks the Redis protocol, ships `redis-server`/`redis-cli` as
+       symlinks to its own binaries, and runs the operator's replication, readiness and sentinel
+       scripts unchanged. The keys keep their `redis` names.
        GATED, default off, NOT live-validated on the single-node dev cluster. REQUIRES the
        redis-operator (RedisFailover CRD) installed first. Sentinel promotes a replica on master
        loss; the API connects through the failover service (redis.ha.serviceName). If you use a
@@ -7,7 +10,8 @@
 apiVersion: databases.spotahome.com/v1
 kind: RedisFailover
 metadata:
-  name: norviq-redis-ha
+  {{- /* Renamed from 0.2.5's norviq-redis-ha on purpose: see norviq.redisFailoverName. */}}
+  name: {{ include "norviq.redisFailoverName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
@@ -21,11 +25,17 @@ spec:
          configures the server, secretPath tells the operator. */}}
   auth:
     secretPath: norviq-redis-ha-auth
+  {{- /* redis.ha.image, NOT images.redis, so a later bump of the single store's engine never rolls
+         into a running failover (values.yaml says why). The sentinels take the same image: left unset,
+         the operator fills in its own default (redis:6.2.6-alpine in v1.2.4), unpinned and invisible
+         to the release image gate. tests/helm/test_bundled_store_upgrade.py checks both. */}}
+  {{- $haImage := include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.redis.ha.image | default "valkey/valkey:8.1-alpine")) }}
   sentinel:
     replicas: {{ .Values.redis.ha.replicas }}
+    image: "{{ $haImage }}"
   redis:
     replicas: {{ .Values.redis.ha.replicas }}
-    image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.redis.repository (.Values.images.redis.tag | toString))) }}"
+    image: "{{ $haImage }}"
     {{- /* Same as the postgres HA path: the sentinel cluster takes its password through customConfig,
            which cannot reference the chart-generated value, so HA requires an explicit credential. The
            default single-node redis auto-generates. */}}
@@ -38,7 +48,7 @@ spec:
     storage:
       persistentVolumeClaim:
         metadata:
-          name: norviq-redis-ha-data
+          name: norviq-valkey-ha-data
         spec:
           accessModes: ["ReadWriteOnce"]
           resources:
@@ -75,7 +85,7 @@ spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/component: redis
-    redisfailovers.databases.spotahome.com/name: norviq-redis-ha
+    redisfailovers.databases.spotahome.com/name: {{ include "norviq.redisFailoverName" . }}
     redisfailovers-role: master
   ports:
     - name: redis

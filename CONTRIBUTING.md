@@ -12,6 +12,9 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 - **Improve docs** — the `docs/` tree and this README are always improvable.
 - **Fix or build features** — please open (or comment on) an issue first for anything non-trivial, so
   we can agree on the approach before you invest time.
+- **Start somewhere small** — issues labelled
+  [`good first issue`](https://github.com/norviq-dev/norviq/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  each carry a file path, a reproduction you can run, and a definition of done.
 
 ## The stack
 
@@ -21,7 +24,7 @@ Norviq is a small polyglot monorepo:
 |-----------|--------------------|----------|
 | Enforcement engine + API | Python 3.11+, FastAPI, OPA/Rego | `norviq/` |
 | Console UI | React 18 + Vite, TypeScript | `ui/` |
-| Admission webhook | Go 1.26 | `webhook/` |
+| Admission webhook | Go 1.26.10+ | `webhook/` |
 | Deployment | Helm, Kubernetes CRDs | `helm/norviq` |
 | Policies | Rego | `comprehensive.rego`, `policies/` |
 | Tests | pytest, vitest, `go test` | `tests/`, `ui/src/**/*.test.tsx`, `webhook/` |
@@ -36,9 +39,19 @@ pip install -e ".[dev]"          # pytest, pytest-asyncio, httpx, ruff
 # Console UI (Node.js 20+)
 cd ui && npm ci
 
-# Go webhook (Go 1.26+)
+# Go webhook (Go 1.26.10+, the `go` line in webhook/go.mod)
 cd webhook && go build ./...
 ```
+
+The webhook needs **Go 1.26.10 or later**, not just any 1.26. `webhook/go.mod` says `go 1.26.10`
+because on go1.26.0 govulncheck reports 47 standard-library advisories, 29 of them reachable from the
+webhook binary, and 1.26.10 closes every one; CI installs exactly that version from the same line. An
+older `go` downloads 1.26.10 by itself when `GOTOOLCHAIN=auto`, the default. Where `GOTOOLCHAIN=local`
+is set (the official `golang` images set it, and a distribution's Go package may), the build stops with
+`go: go.mod requires go >= 1.26.10 (running go 1.26.9; GOTOOLCHAIN=local)`: upgrade Go, or run with
+`GOTOOLCHAIN=auto`. Image builds hit the same wall from a stale cache: if your local
+`golang:1.26-alpine` predates 1.26.10, `docker pull golang:1.26-alpine` (or `docker build --pull`)
+before building `webhook/Dockerfile`, including through `scripts/kind-e2e/00-up.sh`.
 
 You also need the **`opa`** binary on your `PATH` — a large part of the test suite shells out to it
 to evaluate real Rego (there is no stub evaluator).
@@ -77,8 +90,7 @@ cd ui && npx tsc --noEmit && npm run test:run     # test:run = `vitest run`
 
 # Go webhook
 cd webhook && go test ./... && gofmt -l . && go vet ./...
-# `gofmt -l` currently lists two pre-existing files with struct-alignment drift
-# (config.go, handler_injection_integrity_test.go) — not caused by your change.
+# `gofmt -l` prints nothing on a clean tree; any file it lists is drift your change introduced.
 
 # Rego — the shipped baseline policy must parse
 opa check --v0-compatible comprehensive.rego
@@ -156,6 +168,9 @@ silence a real finding.
   in monitor mode records engine-side failures as would-blocks; and a policy in `audit` mode does the
   same for its own OPA errors. New security-relevant code needs a test proving the block/deny path.
 - **Tests are required** for behavior changes. No new test failures against the baseline suite.
+- **Control-test every check.** A test that guards a fix must fail with the fix reverted and pass with
+  it; say so in the PR with both outputs. A check that cannot fail proves nothing, and a claim that
+  something works is reproduced, not accepted on the strength of the claim.
 - **Policies must validate** — any Rego must define `decision` / `rule_id` / `reason` and a
   `default decision`, and must not use network/environment builtins (see
   [docs/guides/writing-policies.md](docs/guides/writing-policies.md)).
@@ -170,7 +185,48 @@ silence a real finding.
 1. Fork and branch from `main`.
 2. Keep PRs focused; describe the change and how you tested it.
 3. Run the checks above locally, and confirm CI is green.
-4. A maintainer will review. For enforcement/auth/policy changes, expect a careful security review.
+4. The maintainer reviews and merges once CI is green. There is one maintainer and no required-review
+   gate on `main` today (see [GOVERNANCE.md](GOVERNANCE.md)); for enforcement, auth or policy changes a
+   second reviewer is asked for and cannot yet be guaranteed. Expect questions that ask you to
+   reproduce a claim rather than restate it.
+
+## Developer Certificate of Origin
+
+Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/)
+(DCO). A `Signed-off-by` line is your statement that you can make the DCO's certification for that
+commit: that you wrote it, or otherwise have the right to submit it under the project licence, and
+that you understand the contribution and the sign-off are public and kept with the project. It is a
+statement about origin, not an approval or a review. Sign off with `git commit -s`, which appends
+
+    Signed-off-by: Your Name <you@example.com>
+
+using the name and email you commit as; the sign-off has to match the commit's author. To sign off
+commits you have already made on a branch, run `git rebase --signoff main` and force-push the branch.
+
+**Why it is required.** The CNCF charter (§11) requires inbound code contributions to carry a DCO
+sign-off once a project is accepted. Norviq asks for it now rather than at acceptance. Most commits in
+the history carry no sign-off; it is enforced only from the day the DCO check below is enabled.
+
+**What is checked.** Every commit in a pull request needs a sign-off. A DCO check on pull requests
+will enforce it once the DCO check is enabled on the repository; commits merged before that are not
+rewritten. A commit that slipped through unsigned is fixed with a remediation commit, an empty
+commit stating that its author adds the `Signed-off-by` to the listed SHA, rather than by rewriting
+`main`. For commits written with AI assistance, see the next section: the human author signs off.
+
+## AI-assisted commits and provenance
+
+Four commits on `main` (and in every release from `v0.2.0` on) are authored as
+`Claude <noreply@anthropic.com>`, the default git identity of the AI coding tool they were written
+with: `e97892d`, `a61b37f`, `5ae820d` and `92e0e59` (all 2026-07-31, the MCP action firewall, its
+control-plane pins and console, their docs, and a kind-demo fix). The maintainer committed all
+four (he is the committer on each) and is responsible for them. History is not
+rewritten to change their author, because that would change every later SHA, including the
+published release tags; `.mailmap` deliberately leaves them unmapped so the record stays visible.
+
+From here on, a commit written with AI assistance has a human author: the maintainer (or
+contributor) who reviewed it is the author and adds the `Signed-off-by` described above. A tool is
+never recorded as an author or co-author, and cannot sign off, because it cannot make the DCO's
+certification.
 
 ## License
 

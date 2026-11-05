@@ -241,3 +241,15 @@ def test_redteam_single_inherits_global_api_url_and_token(monkeypatch) -> None:
     result = _runner().invoke(cli, ["--api-url", "http://api.example:9000", "--token", "secret", "redteam", "single", "PI-001"])
     assert result.exit_code == 0
     assert captured == {"api_url": "http://api.example:9000", "token": "secret"}
+
+
+def test_agent_reset_history_calls_the_audited_reset_and_says_a_freeze_remains(monkeypatch) -> None:
+    payload = {"reset": True, "spiffe_id": "spiffe://test", "score_before": 0.0, "violation_count": 4,
+               "keys_cleared": ["agent_history:spiffe://test"], "frozen": True, "trust_cap": None}
+    _patch_request(
+        monkeypatch, {("POST", _url("/api/v1/agents/spiffe://test/trust/reset")): FakeResponse(200, payload)}
+    )
+    result = _runner().invoke(cli, ["agent", "reset-history", "spiffe://test"])
+    assert result.exit_code == 0, result.output
+    assert "History reset: spiffe://test (score before: 0.0, violations: 4" in result.output
+    assert "Still frozen or capped" in result.output

@@ -305,10 +305,11 @@ destructive_verb_tool {
 # caught on 75/75 calls and `get_delete_all_records` was allowed on 75/75.
 #
 # NOT keyed on `derived.verb`: `classify_tool` takes the WORST verb over all name tokens and therefore
-# over-classifies — `run_query` and `execute_sql` both classify as `delete`, so a verb-keyed block arm
-# refuses ordinary read tools. Over-classification is safe where it NARROWS and unsafe where it
-# BLOCKS. Whole tokens over `tool_name_tokens` instead, matching the egress section's approach, which
-# also defeats `getDeleteAllRecords` because `name_split_map` splits camelCase first.
+# over-classifies — `run_report` and `execute_sql` both classify as `delete` (`run_query` did too until
+# BACKLOG 7.10), so a verb-keyed block arm refuses ordinary read tools. Over-classification is safe
+# where it NARROWS and unsafe where it BLOCKS. Whole tokens over `tool_name_tokens` instead, matching
+# the egress section's approach, which also defeats `getDeleteAllRecords` because `name_split_map`
+# splits camelCase first.
 #
 # Kept in sync with webhook/presets/strict.rego's `strict_default_block` arms — this pair is the
 # documented drift hazard, and the parity test only compares DECISIONS.

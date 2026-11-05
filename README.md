@@ -6,6 +6,8 @@
 
 **Runtime policy enforcement for LLM agent tool calls on Kubernetes.**
 
+[![FOSSA Security](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fnorviq-dev%2Fnorviq.svg?type=shield&issueType=security)](https://app.fossa.com/projects/git%2Bgithub.com%2Fnorviq-dev%2Fnorviq?ref=badge_shield&issueType=security)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/norviq)](https://artifacthub.io/packages/helm/norviq/norviq)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.30%2B-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 [![OPA](https://img.shields.io/badge/policy-OPA%2FRego-7D4698?logo=openpolicyagent&logoColor=white)](https://www.openpolicyagent.org)
@@ -16,9 +18,11 @@
 </div>
 
 Norviq is a policy enforcement point (PEP) that sits between an AI agent's reasoning loop and the
-tools it can call. Every tool call is intercepted, evaluated against OPA/Rego policies scoped to the
-workload's Kubernetes/SPIFFE identity, and then **allowed, blocked, escalated, or audited** — before
-the tool runs. It turns "the model decided to call `execute_sql` / `send_email` / `shell`" from an
+tools it can call. Before a tool runs, the call is sent to Norviq — by the SDK inside the agent's
+process, or by the agent to an injected sidecar — evaluated against OPA/Rego policies scoped to the
+workload's Kubernetes/SPIFFE identity, and answered **allow, block, escalate, or audit**. The agent then
+runs the tool or declines to: Norviq authorizes the call, it does not sit in the tool's network path
+(see [Security model](docs/security-model.md)). It turns "the model decided to call `execute_sql` / `send_email` / `shell`" from an
 implicit trust into an enforced, per-identity, auditable decision.
 
 ---
@@ -28,11 +32,13 @@ implicit trust into an enforced, per-identity, auditable decision.
 LLM agents are given real tools — databases, shells, email, cloud APIs, internal services. The model
 chooses which to call at runtime, and a single prompt injection or reasoning error can turn a benign
 agent into an exfiltration or destruction path. Norviq puts a deterministic, policy-driven gate on
-that surface, so a tool call only happens if an explicit policy for that agent's identity allows it.
+that surface: the agent asks before each tool call, the policy for its identity decides, and in a
+namespace the baseline covers, a call one of its controls refuses does not run.
 
 ## How it works
 
-Every tool call takes a round trip through the engine before it executes:
+A tool call that goes through the SDK or the sidecar takes a round trip through the engine before it
+executes:
 
 ```mermaid
 sequenceDiagram
@@ -51,13 +57,29 @@ sequenceDiagram
     Engine->>Engine: audit log · trust score · asset/attack graph
 ```
 
-- **Interception** — an injected sidecar (or the SDK) forwards each tool call to the engine's `/evaluate`.
-- **Identity** — decisions are scoped to the calling workload's SPIFFE identity (SPIRE SVID), not a
-  shared secret, so policy is per-agent-class and per-namespace.
-- **Policy** — Rego policies are layered in tiers (agent-class → namespace baseline → cluster baseline)
-  with tighten-only overlays; the most-restrictive matching rule wins.
-- **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can roll
-  out enforcement observably before turning it on.
+- **Interception** — the SDK, or the agent through an injected sidecar, sends each tool call to the
+  engine's `/evaluate` and runs the tool only if the answer allows it. This is cooperative: agent code
+  that calls a tool without asking reaches it unjudged, which the opt-in `agentEgressPolicy` bounds at
+  the network layer.
+- **Identity** — decisions are scoped to the calling workload's namespace and agent class, so policy is
+  per-agent-class and per-namespace. By default (`config.spiffeMode: mock`) the injected sidecar
+  presents a per-workload HS256 token that the admission webhook mints at injection, signed with the API
+  secret (`api.secretKey`); the API overwrites the namespace, agent class and SPIFFE ID in each request
+  with that token's claims, so a sidecar cannot claim a sibling's identity. SPIRE-issued SVIDs
+  (`config.spiffeMode: workload-api` with `config.spiffeCsi.enabled` and `webhook.spiffe.inject`) are
+  opt-in. See [Concepts → Agent identity](docs/concepts.md#agent-identity).
+- **Policy** — Rego policies are layered: agent-class, workload and namespace policies resolve by
+  priority (the highest-priority enforcing policy wins, the most restrictive decision breaking ties; a
+  policy saved in `audit` mode can only tighten). The namespace and cluster baselines, your tuned
+  controls and the tighten-only overlays (sector packs, guardrails, remediation) are floors on top: they
+  can make the result stricter, never looser, whatever their priority. From 0.2.6 a class policy no longer
+  loosens a baseline control. Setting the control's effect in the console's Baseline controls does, for
+  the whole namespace: once saved, a namespace's control effects replace the chart's baseline there, for
+  every agent class, when they are this release's compile of the chart's own `strict` preset (the
+  cluster baseline still applies). See
+  [Concepts → Policy tiers & precedence](docs/concepts.md#policy-tiers--precedence).
+- **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can trial
+  a policy observably, or step the enforcing baseline back to observing (below).
 
 ### Deployed components
 
@@ -90,6 +112,8 @@ bound to `127.0.0.1`) — neither proxies to the other. In the default injection
 so Postgres, Redis, and policy loading stay centralized and nothing is evaluated per-pod. The Engine
 Deployment runs that same evaluator as a standalone cluster workload (`NRVQ_SIDECAR_MODE=embedded`,
 exposed as `norviq-engine:8282`) for callers that want to evaluate without going through the API.
+Those callers authenticate with the same service token `/api/v1/evaluate` takes, and are evaluated as
+the identity bound in it.
 
 ## Works with your agent framework
 
@@ -116,7 +140,8 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
   and they can be set to `block` and `deny` respectively. See [Security model](docs/security-model.md).
 - **Kubernetes-native** — `NrvqPolicy` / `NrvqClass` / `NrvqConfig` CRDs, a mutating webhook that
   injects the enforcement sidecar, and a Helm chart.
-- **Workload identity** — SPIFFE/SPIRE SVIDs (with a mock mode for non-SPIRE clusters).
+- **Workload identity** — a webhook-minted, per-workload token by default (`mock` mode); SPIFFE/SPIRE
+  SVIDs as an opt-in for clusters running SPIRE.
 - **Console UI** — policy catalog + editor, attack graph, asset graph, agent trust, audit stream.
 - **Red-team suite** — built-in adversarial tests (prompt injection, encoding/nesting evasion, SQLi,
   PII/PCI exfil) that prove a policy actually blocks.
@@ -125,6 +150,30 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
 - **High availability** — multi-replica with cross-replica policy propagation and DB-authoritative
   deletes; HPA/PDB/anti-affinity for multi-node clusters.
 - **Multi-cluster (fleet)** — signed policy-bundle distribution across a hub and spoke clusters.
+
+## Scope
+
+Norviq decides whether an agent's tool call may run, before it runs. In scope:
+
+- Per-call allow / block / escalate / audit decisions on a tool call's inputs (`tool_name` and
+  `tool_params`), against OPA/Rego policy scoped to the calling workload's identity.
+- The pieces that deliver that on Kubernetes: the API and engine, the admission webhook and injected
+  sidecar, the `NrvqPolicy` / `NrvqClass` / `NrvqConfig` CRDs, the Helm chart and the console.
+- The SDK adapters for agent frameworks, and the MCP proxy that gates MCP servers at discovery and at
+  call time.
+
+Out of scope, by design (see [Security model → What Norviq defends](docs/security-model.md#what-norviq-defends)
+for the first item and [Known design decisions / non-goals](docs/security-model.md#known-design-decisions--non-goals)
+for the rest):
+
+- **Network interposition.** Norviq authorizes a call; it does not sit in the tool's network path. Agent
+  code that calls a tool without asking reaches it unjudged; the opt-in `agentEgressPolicy` bounds that
+  at the network layer.
+- **Tool outputs.** A call's return payload is not inspected unless the opt-in output-DLP hook is on.
+- **Data with no recognisable shape.** The content detectors match known shapes (card numbers, SSNs,
+  credential prefixes). For anything else, the control is a destination allowlist in policy.
+- **Admission-time validation of policy objects.** The controller validates `NrvqPolicy` objects when
+  it syncs them and skips invalid ones; there is no ValidatingAdmissionPolicy in the chart.
 
 ## Try it without a cluster
 
@@ -172,7 +221,7 @@ kubectl create namespace default 2>/dev/null || true
 
 # Installs from the published, cosign-signed chart. CRDs ship inside it, and every Norviq image is
 # pinned by immutable digest — so this deploys exactly the bytes that release published.
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 -n norviq \
   --set 'policyQuotaNamespaces={default}' \
   --set config.dbSslMode=disable   # the bundled Postgres has no TLS; omit if you point at an external TLS DB
 ```
@@ -183,14 +232,31 @@ Working on Norviq itself, or a modified chart? Install from a clone instead — 
 
 `policyQuotaNamespaces` is the list of tenant namespaces that will run agents — it is **required**, not
 optional. The chart installs a `strict`-preset namespace baseline for each entry, so an empty list
-fails the install by design rather than shipping a cluster with no baseline. That baseline ships in
-**audit** mode (`baselineClusterPolicy.enforcementMode`): every control evaluates and records a
-non-compliance event, and the call proceeds. It is deliberately not fail-closed — installing 22 block
-rules in front of every tool call on day one dropped real traffic — so set `enforcementMode: block`
-when you are ready to enforce. Add every agent namespace
-you plan to use, and **create them before installing** — the baseline policy and quota are namespaced
-objects, so the install cannot place them in a namespace that does not exist yet. If one is missing the
-chart stops before applying anything and names it.
+fails the install by design rather than shipping a cluster with no baseline. From 0.2.6 that baseline
+**enforces** (`baselineClusterPolicy.enforcementMode: block`): 20 of its 21 controls act on the call —
+17 refuse it, `llm06_excessive_agency` refuses destructive tools and holds elevated ones for approval,
+and two MCP controls hold it for approval — and `scope_violation_dangerous_tool` records without
+blocking. Through 0.2.5 it shipped in `audit`. It is not fail-closed as a whole: a namespace outside
+this list has no baseline, and an API outage still follows `webhook.injection.fallbackMode`, which ships
+`allow`.
+
+To turn it off, pick the scope. Each records the call instead of refusing it, except a control
+switched Off, which is not evaluated at all:
+
+- **Every namespace, at install:** `--set baselineClusterPolicy.enforcementMode=audit` (the 0.2.5
+  posture, in every namespace whose Baseline controls nobody has saved).
+- **One namespace:** console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>`
+  with `{"enforcement_mode": "audit"}`. This softens every block in that namespace, not only the
+  baseline's, except a trust freeze, an invalid agent identity (`invalid_spiffe_identity`) and the rate
+  limit.
+- **One control:** console → Baseline controls → **Monitor** or **Off** (`PUT /api/v1/baseline/controls`).
+
+[Concepts → Turning the shipped baseline off](docs/concepts.md#turning-the-shipped-baseline-off) has the
+details, including what saving the controls panel does under an `audit` install.
+
+Add every agent namespace you plan to use, and **create them before installing** — the baseline policy
+and quota are namespaced objects, so the install cannot place them in a namespace that does not exist
+yet. If one is missing the chart stops before applying anything and names it.
 
 The chart deploys the API, engine, console UI, mutating webhook, and bundled PostgreSQL + Redis + OPA.
 Port-forward the console:
@@ -217,7 +283,7 @@ namespaces you listed in `policyQuotaNamespaces` — the label alone does nothin
 enabled:
 
 ```bash
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
 kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 ```
 
@@ -247,7 +313,7 @@ Full documentation is at **[docs.norviq.dev](https://docs.norviq.dev)**:
 - **[Policy cookbook](https://docs.norviq.dev/guides/policy-cookbook/)** — copy-paste `NrvqPolicy` recipes + validated Rego building blocks
 - **[Asset & attack graphs](https://docs.norviq.dev/guides/graphs/)** — real reach, kill chains, Simulate, Defend, tool classification
 - **[Compliance & coverage](https://docs.norviq.dev/guides/compliance/)** — MITRE ATLAS / OWASP LLM coverage, gaps, remediation, evidence pack
-- **[MCP firewall](https://docs.norviq.dev/guides/mcp/)** — governing MCP servers: the discovery and invocation gates, definition pinning and drift, and writing policy against `input.mcp`
+- **[MCP firewall](https://docs.norviq.dev/guides/mcp-servers/)** — governing MCP servers: the discovery and invocation gates, definition pinning and drift, and writing policy against `input.mcp`
 - **[Integrating agents](https://docs.norviq.dev/guides/integrating-agents/)** — the SDK: LangChain, LangGraph, CrewAI, AutoGen, Semantic Kernel
 - **[CLI reference](https://docs.norviq.dev/cli/)** — `norviq login`, policies, audit, agents, red-team, fleet
 - **[Configuration](https://docs.norviq.dev/configuration/)** — Helm `values.yaml` reference
@@ -275,10 +341,56 @@ opa test --v0-compatible webhook/presets/ comprehensive.rego
 The stack is Python (FastAPI) + OPA/Rego for the engine, React + Vite (TypeScript) for the console, and
 Go for the admission webhook. See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
+## Community
+
+Norviq's channels are GitHub issues and Discussions, listed below. There is no mailing list, chat
+channel or regular community meeting yet. Report a security issue privately as
+[SECURITY.md](SECURITY.md) describes, never in a public issue.
+
+- **Issues** — bugs and reproducible findings. [`good first issue`](https://github.com/norviq-dev/norviq/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  items each carry a file path, a reproduction and a definition of done.
+- **[Discussions](https://github.com/norviq-dev/norviq/discussions)** — show us your policy, say which
+  framework you run, argue about what comes after MCP.
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) · [GOVERNANCE.md](GOVERNANCE.md) · [MAINTAINERS.md](MAINTAINERS.md) · [REVIEWING.md](REVIEWING.md) · [RELEASES.md](RELEASES.md) · [ROADMAP.md](ROADMAP.md) · [SECURITY.md](SECURITY.md) · [CHANGELOG.md](CHANGELOG.md)
+- **Running it somewhere real?** Add yourself to [ADOPTERS.md](ADOPTERS.md).
+
+### Code of Conduct
+
+Everyone taking part in Norviq follows the
+[CNCF Code of Conduct](https://github.com/cncf/foundation/blob/main/code-of-conduct.md), adopted by
+reference in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) (the CNCF project-template form). Report a
+violation to `conduct@norviq.dev`, which reaches the maintainer. Norviq is not a CNCF project; the
+CNCF Code of Conduct Committee route applies only if and when it is accepted.
+
 ## Security
 
 Found a vulnerability? Please follow the coordinated-disclosure process in **[SECURITY.md](SECURITY.md)** —
 do not open a public issue for security reports.
+
+## SBOM
+
+Each container image a release publishes (engine, api, ui, webhook and bootstrap, as
+`ghcr.io/norviq-dev/norviq-engine:<component>-<version>`) has a software bill of materials:
+
+- **Format:** SPDX JSON, generated by Trivy from the built image (`.github/workflows/build.yml`).
+- **Where:** attached to the image digest in the registry as a cosign attestation of type `spdxjson`,
+  signed keylessly by the workflow that built the image. The image SBOMs are not GitHub release assets.
+- **Release source SBOM:** each tagged release also attaches an SPDX JSON SBOM of the tagged source
+  (generated by Trivy from the lockfiles) to its GitHub Release, next to the wheel, sdist and chart,
+  each with a keyless Sigstore bundle (`<file>.sigstore.json`).
+- **Not covered:** the Helm chart and the PyPI package have no SBOM of their own beyond that source
+  SBOM.
+
+To verify an image's SBOM attestation and print the SBOM:
+
+```bash
+cosign verify-attestation --type spdxjson \
+  --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/build.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/norviq-dev/norviq-engine:api-<version> | jq -r '.payload' | base64 -d | jq '.predicate'
+```
+
+Third-party NOTICE files that the Apache License requires us to reproduce are in [NOTICE](NOTICE).
 
 ## License
 

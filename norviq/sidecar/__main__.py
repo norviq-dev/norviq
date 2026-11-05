@@ -26,10 +26,19 @@ async def main() -> None:
     # knob is not merely cosmetic.
     applied = configure_logging()
     log.info("nrvq.sidecar.log_level_applied", level=applied, code="NRVQ-SDC-3013")
+    # "token" mode verifies remote callers' JWTs with api_secret_key. The same weak-key guard the API and
+    # fleet hub apply: a shipped-default or short key makes every such token forgeable, so this mode must
+    # refuse to start on one rather than authenticate against it.
+    if str(settings.sidecar_remote_callers).lower() == "token":
+        secret = settings.api_secret_key or ""
+        if secret == "change-me-in-production" or len(secret) < 16:
+            log.error("nrvq.sidecar.weak_secret_for_remote_callers", code="NRVQ-SDC-3043")
+            if settings.require_strong_secret:
+                raise RuntimeError("Refusing to start: sidecar_remote_callers=token needs a strong api_secret_key.")
     proxy = SidecarProxy()
     await proxy.start()
     app = create_http_fallback(proxy._interceptor, proxy._emitter, proxy._resolver)
-    config = uvicorn.Config(app, host="0.0.0.0", port=settings.http_fallback_port, log_level="error")  # nosec B104 - HTTP fallback for the injected sidecar; binds within the pod's own network namespace (the app container reaches it on 127.0.0.1), never exposed as a Service
+    config = uvicorn.Config(app, host="0.0.0.0", port=settings.http_fallback_port, log_level="error")  # nosec B104 - all interfaces so kubelet probes (which dial the pod IP) reach /healthz and /readyz. /v1/evaluate refuses off-pod callers unless sidecar_remote_callers=token, which the chart sets only on the standalone engine Deployment (a ClusterIP Service); there it requires a service JWT. This comment used to say the port was never exposed as a Service, which was false for that Deployment.
     server = uvicorn.Server(config)
 
     try:

@@ -16,10 +16,14 @@ table has its own knob and a ``<=0`` value disables that table's pruning (keep f
                                   snapshots per namespace; rows referenced by ``attack_paths`` are
                                   ALWAYS kept (the FK has no cascade — deleting one would break the
                                   paths' provenance), readers only ever use the newest row.
+* ``revoked_tokens``            — logout revocations whose token has itself expired (``expires_at``-
+                                  driven, no knob: keeping one longer protects nothing).
 
 SAFETY: none of these tables is read by the evaluator's enforcement path — ``policies`` /
 ``policy_versions`` (and anything else enforcement reads) are deliberately NOT retention-managed
-here, so pruning can never change a decision. Mirrors the ``AuditForwarder`` / ``FleetPolicyPuller``
+here, so pruning can never change a decision. ``revoked_tokens`` IS read by the auth path, and is
+pruned only past the token's own ``exp`` (plus a margin): by then the JWT check rejects the token on
+its expiry, so the row no longer decides anything. Mirrors the ``AuditForwarder`` / ``FleetPolicyPuller``
 lifespan pattern: ``start()``/``stop()`` owning a background loop, cancelled on shutdown. One pruner
 runs per API replica; every statement is idempotent so concurrent sweeps are harmless.
 """
@@ -38,6 +42,8 @@ from norviq.api.retention import gc_expired_drafts
 from norviq.config import settings
 
 log = structlog.get_logger()
+
+_REVOCATION_PRUNE_MARGIN_S = 60
 
 
 class RetentionPruner:
@@ -85,6 +91,7 @@ class RetentionPruner:
             "intent_drafts": await self._step(self._prune_drafts),
             "agent_registry": await self._step(self._prune_agent_registry),
             "asset_graph": await self._step(self._prune_asset_graph),
+            "revoked_tokens": await self._step(self._prune_revoked_tokens),
         }
         if any(counts.values()):
             log.info("nrvq.retention.pruned", **counts, code="NRVQ-AUD-6010")
@@ -139,12 +146,16 @@ class RetentionPruner:
     async def _prune_agent_registry(self, session) -> int:
         """agent_registry identities unseen for agent_registry_retention_days (<=0 disables). Removes
         decommissioned/churned agents that would otherwise be listed forever and surface as phantom
-        'awaiting' nodes on the asset graph."""
+        'awaiting' nodes on the asset graph.
+
+        Never a FROZEN or CAPPED identity: the row is the durable copy of the admin's freeze/cap, so aging it
+        out lifted the control as a side effect — the agent came back unfrozen after the next Redis restart.
+        A quarantined agent is quiet by design, which is exactly what `last_seen` reads as decommissioned."""
         days = int(getattr(settings, "agent_registry_retention_days", 0))
         if days <= 0:
             return 0
         result = await session.execute(
-            text("DELETE FROM agent_registry WHERE last_seen < :cutoff"),
+            text("DELETE FROM agent_registry WHERE last_seen < :cutoff AND frozen = false AND trust_cap IS NULL"),
             {"cutoff": datetime.now(timezone.utc) - timedelta(days=days)},
         )
         return result.rowcount or 0
@@ -168,6 +179,17 @@ class RetentionPruner:
                 ") AND id NOT IN (SELECT DISTINCT graph_id FROM attack_paths)"
             ),
             {"keep": keep},
+        )
+        return result.rowcount or 0
+
+    async def _prune_revoked_tokens(self, session) -> int:
+        """Logout revocations whose token has expired. Always on, like the drafts GC: the row exists only
+        to outlive Redis for as long as the token could still verify, and not a second longer is useful.
+        The margin covers clock skew between the pod running this and the pods checking `exp`; it keeps
+        a row a minute longer and costs nothing."""
+        result = await session.execute(
+            text("DELETE FROM revoked_tokens WHERE expires_at < :cutoff"),
+            {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=_REVOCATION_PRUNE_MARGIN_S)},
         )
         return result.rowcount or 0
 

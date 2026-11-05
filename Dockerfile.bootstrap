@@ -27,7 +27,7 @@
 # default USER is numeric (not a name) so `runAsNonRoot: true` can verify it without a lookup.
 # The chart omits runAsUser entirely when openshift.enabled=true, letting the platform assign.
 
-ARG ALPINE_VERSION=3.21
+ARG ALPINE_VERSION=3.24
 FROM alpine:${ALPINE_VERSION}
 
 # The Makefile passes --build-arg NRVQ_GIT_SHA to all five images, and this one silently DROPPED it:
@@ -37,7 +37,8 @@ FROM alpine:${ALPINE_VERSION}
 # Dockerfile CONSUMES it. Same shape as the bug the stamp was added for.
 ARG NRVQ_GIT_SHA=unknown
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
-LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA} \
+      org.opencontainers.image.licenses=Apache-2.0
 
 # openssl: self-signs the internal CA. curl + ca-certificates: talks to the Kubernetes API directly.
 #

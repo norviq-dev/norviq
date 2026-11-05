@@ -46,9 +46,28 @@ command -v opa >/dev/null || fail "opa not on PATH — rego-backed tests would s
 # A multi-image build on a nearly-full disk does not fail cleanly: Docker starts reclaiming space and
 # has already deleted the kind node container once in this project's history, which presents as a
 # cluster that vanished mid-run.
-avail_gb=$(df -g / | awk 'NR==2 {print $4}')
-[ "${avail_gb:-99}" -lt 10 ] && fail "only ${avail_gb}GB free — build five images with <10GB and docker starts deleting things, including the kind node"
-echo "  disk ${avail_gb}GB free · opa $(opa version | head -1)"
+#
+# Measured where the images actually go. This read `df /` on the HOST, and on Docker Desktop that is the
+# wrong disk: the images and the kind node live inside the VM's disk image, which on this machine is
+# fully allocated (Docker.raw: 100G apparent, 100G on disk), so builds reuse space INSIDE it and never
+# grow the host file. The host read 5GB and refused while the VM had 65GB free. It can also be wrong the
+# other way, on a sparse image the host has to grow — so both are checked, and the message says which.
+vm_avail_gb=$(docker run --rm alpine:3.20 df -k / 2>/dev/null | awk 'NR==2 {print int($4/1048576)}')
+[ -n "$vm_avail_gb" ] || fail "could not read free space inside Docker — is the daemon up?"
+[ "$vm_avail_gb" -lt 10 ] && fail "only ${vm_avail_gb}GB free inside Docker — build five images with <10GB and docker starts deleting things, including the kind node"
+# POSIX `df -Pk`, not BSD `df -g`: GNU df has no -g, and under `set -euo pipefail` the failing
+# pipeline inside this assignment killed the script on Linux before the cluster stage (measured on a
+# Linux host). -P keeps each filesystem on one line on both, so field 4 is always "available".
+host_avail_gb=$(df -Pk / | awk 'NR==2 {print int($4/1048576)}')
+raw="$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+if [ -f "$raw" ]; then
+  apparent=$(ls -l "$raw" | awk '{print int($5/1073741824)}'); allocated=$(du -k "$raw" | awk '{print int($1/1048576)}')
+  # A sparse image still has to grow on the host: require the host to hold the growth it may need.
+  if [ "$allocated" -lt "$apparent" ] && [ "${host_avail_gb:-0}" -lt 10 ]; then
+    fail "only ${host_avail_gb}GB free on the host, and Docker's disk image can still grow by $((apparent - allocated))GB"
+  fi
+fi
+echo "  disk: ${vm_avail_gb}GB free in Docker, ${host_avail_gb}GB on the host · opa $(opa version | head -1)"
 
 # --- 2. cluster -----------------------------------------------------------------------------------
 stage "Cluster ${CLUSTER}"
@@ -73,12 +92,30 @@ stage "Building and loading five images"
 # Dockerfile lives INSIDE that directory and takes it as the build context. Four of the five follow the
 # repo-root `Dockerfile.<name>` convention and the fifth silently does not — this loop assumed the
 # convention held and died on `open Dockerfile.webhook: no such file or directory`.
+#
+# The API gets a provenance stamp the other four do not need. scripts/mcp-chatbot-scenario.sh refuses
+# to run against a stale CONTROL PLANE — its policies are Python modules inside this image — and that
+# check reads /app/.build_tree_digest. Dockerfile.api only writes it when the arg is passed, so
+# omitting it here left the scenario asserting a file that was never created: a guard that could not
+# pass rather than one that could not fail, but equally useless.
+GIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+TREE_DIGEST="$("${REPO_ROOT}/scripts/tree-digest.sh")"
+echo "  tree ${TREE_DIGEST:0:12}"
 for img in api ui engine webhook bootstrap; do
   echo "  build ${img}"
+  # NRVQ_GIT_SHA goes to ALL five, not only the api: the other four Dockerfiles declare the ARG and
+  # stamp it (NRVQ_BUILD_GIT_SHA, the OCI revision label), and without it they reported "unknown" —
+  # the exact failure the Makefile's docker-build comment describes, reintroduced by this rig.
   if [ "$img" = "webhook" ]; then
-    docker build -q -t "norviq/norviq-engine:webhook-latest" "${REPO_ROOT}/webhook" >/dev/null
+    docker build -q -t "norviq/norviq-engine:webhook-latest" --build-arg NRVQ_GIT_SHA="$GIT_SHA" \
+      "${REPO_ROOT}/webhook" >/dev/null
+  elif [ "$img" = "api" ]; then
+    docker build -q -t "norviq/norviq-engine:api-latest" -f "${REPO_ROOT}/Dockerfile.api" \
+      --build-arg NRVQ_GIT_SHA="$GIT_SHA" --build-arg NRVQ_TREE_DIGEST="$TREE_DIGEST" \
+      "$REPO_ROOT" >/dev/null
   else
-    docker build -q -t "norviq/norviq-engine:${img}-latest" -f "${REPO_ROOT}/Dockerfile.${img}" "$REPO_ROOT" >/dev/null
+    docker build -q -t "norviq/norviq-engine:${img}-latest" -f "${REPO_ROOT}/Dockerfile.${img}" \
+      --build-arg NRVQ_GIT_SHA="$GIT_SHA" "$REPO_ROOT" >/dev/null
   fi
 done
 kind load docker-image --name "$CLUSTER" \
@@ -109,17 +146,11 @@ QUOTA_NS="$(IFS=,; echo "${TENANT_NS[*]}")"
 
 # values-light: api replicas 1. The chart defaults to 2, and verb promotion does not propagate across
 # replicas, so a two-replica local cluster flaps in a way that looks like a product bug.
-# IfNotPresent: values-dev sets Always, which defeats `kind load` entirely — the node pulls from the
-# registry and never sees the image just loaded.
+# The image registry (`norviq/`) and IfNotPresent come from values-e2e.yaml, shared with CI — they
+# used to be --set flags here only, and CI's install, which never had them, tested the published images.
 helm --kube-context "kind-${CLUSTER}" upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
   -n "$NS" \
   -f "${REPO_ROOT}/helm/norviq/values-light.yaml" \
-  --set images.registry="norviq/" \
-  --set images.api.pullPolicy=IfNotPresent \
-  --set images.ui.pullPolicy=IfNotPresent \
-  --set images.engine.pullPolicy=IfNotPresent \
-  --set images.webhook.pullPolicy=IfNotPresent \
-  --set images.bootstrap.pullPolicy=IfNotPresent \
   --set "policyQuotaNamespaces={${QUOTA_NS}}" \
   --set webhook.injection.enabled=true \
   -f "${REPO_ROOT}/scripts/kind-e2e/values-e2e.yaml" \
@@ -227,9 +258,24 @@ sleep 1
 # When the cluster publishes a NodePort on the host (CI does; see .github/kind/e2e-cluster.yaml)
 # there is no tunnel to lose: kube-proxy routes to whichever pod is Ready, across restarts included.
 # A developer running this locally against a plain kind cluster still gets the forward.
-if "${KUBECTL[@]}" -n "$NS" patch svc norviq-ui \
+#
+# ASK THE NODE, then POLL. This used to patch and make ONE 5s curl, which races kube-proxy: on a cluster
+# that does publish 30080 the curl ran before the new Service rule existed, the fallback fired, and the
+# NodePort answered 200 a few seconds later (measured on a cloud kind node). Whether the mapping exists
+# is a fact docker can state, so a plain cluster goes straight to the forward and a mapped one is given
+# time to come up instead of being judged on its first instant.
+nodeport_published=""
+docker port "${CLUSTER}-control-plane" 30080/tcp >/dev/null 2>&1 && nodeport_published=1
+nodeport_ok=""
+if [ -n "$nodeport_published" ] && "${KUBECTL[@]}" -n "$NS" patch svc norviq-ui \
      -p "{\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"port\":80,\"targetPort\":\"http\",\"nodePort\":30080}]}}" \
-     >/dev/null 2>&1 && curl -sf -o /dev/null --max-time 5 "http://localhost:${UI_PORT}/"; then
+     >/dev/null 2>&1; then
+  for _ in $(seq 1 30); do
+    curl -sf -o /dev/null --max-time 3 "http://localhost:${UI_PORT}/" && { nodeport_ok=1; break; }
+    sleep 1
+  done
+fi
+if [ -n "$nodeport_ok" ]; then
   echo "  console via NodePort 30080 -> localhost:${UI_PORT} (no port-forward)"
 else
   echo "  NodePort unavailable — falling back to a supervised port-forward"

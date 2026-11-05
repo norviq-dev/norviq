@@ -187,9 +187,15 @@ export function Login() {
   };
 
   /** Success → brief branded success state → into the app shell. */
+  // The redirect after a successful sign-in is a timer, so it must not outlive the component: a timer
+  // left running after unmount navigated a page that no longer rendered this screen, and in the test
+  // environment it fired after teardown ("window is not defined") and failed an otherwise green run.
+  const redirectTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(redirectTimer.current), []);
   const finish = (p: Phase) => {
     setPhase(p);
-    window.setTimeout(() => window.location.replace("/"), 900);
+    window.clearTimeout(redirectTimer.current);
+    redirectTimer.current = window.setTimeout(() => window.location.replace("/"), 900);
   };
 
   const signIn = async () => {
@@ -348,7 +354,7 @@ export function Login() {
       className="nv-root"
       style={{
         minHeight: "100vh", width: "100%", display: "flex", flexDirection: "column", alignItems: "center",
-        justifyContent: "flex-start", padding: 28, fontFamily: "'Outfit', system-ui, sans-serif", color: "#e8edf5",
+        justifyContent: "flex-start", padding: 28, fontFamily: "var(--font-sans)", color: "#e8edf5",
         background: "radial-gradient(circle at 50% 8%, #10141b 0%, #08090c 58%)", position: "relative",
         overflowX: "hidden", overflowY: "auto", boxSizing: "border-box"
       }}
@@ -448,7 +454,7 @@ export function Login() {
                     maxLength={512}
                     onChange={(e) => { setDevToken(e.target.value); setError(""); }} onKeyDown={enter(() => void signIn())}
                     placeholder="nrvq_dev_••••••••••••••••"
-                    style={{ height: 40, fontFamily: "ui-monospace, 'SF Mono', 'JetBrains Mono', monospace", fontSize: 12 }} />
+                    style={{ height: 40, fontFamily: "var(--font-mono)", fontSize: 12 }} />
                 </div>
               )}
 

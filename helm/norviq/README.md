@@ -33,7 +33,7 @@ The chart installs into the namespace from `helm -n/--namespace` (standard Helm)
 without an explicit tenant list — supply `policyQuotaNamespaces`:
 
 ```bash
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 \
   -n norviq --create-namespace \
   --set-json 'policyQuotaNamespaces=["default"]'
 ```
@@ -41,7 +41,7 @@ helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 \
 Production HA + autoscaling profile:
 
 ```bash
-helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 --untar   # for values-prod.yaml
+helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 --untar   # for values-prod.yaml
 helm install norviq ./norviq -n norviq --create-namespace \
   -f ./norviq/values-prod.yaml \
   --set postgresql.password=<strong> --set redis.password=<strong> \
@@ -63,7 +63,7 @@ helm test norviq -n norviq
 Upgrade / uninstall:
 
 ```bash
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq --reset-then-reuse-values
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 -n norviq --reset-then-reuse-values
 helm uninstall norviq -n norviq
 ```
 
@@ -96,7 +96,8 @@ Every value is documented inline in [`values.yaml`](values.yaml); the environmen
 | Key | Default | Notes |
 |---|---|---|
 | `policyQuotaNamespaces` | `[]` | **Required.** Tenant namespaces to protect. Empty + `baselineClusterPolicy.enabled` fails the install by design. |
-| `config.enforcementMode` | `block` | `block` (enforce) or `audit` (visibility only). |
+| `baselineClusterPolicy.enforcementMode` | `block` | The namespace baseline rendered for each namespace above **enforces** from 0.2.6. `audit` records what it would refuse and lets the call proceed (the 0.2.5 posture). See "The namespace baseline enforces by default" below. |
+| `config.enforcementMode` | `block` | Engine-wide default. It decides whether `config.noPolicyDecision=deny` can block; it does **not** put the baseline or any policy in audit — that is `baselineClusterPolicy.enforcementMode`. |
 | `config.noPolicyDecision` | `allow` | Decision when no policy is loaded. Ships `allow`, matching `values.yaml`; the call carries the named `default_allow` rule. `deny` = fail-closed, and applies only in `block` enforcement mode. |
 | `config.requireStrongSecret` | `true` | Refuse to boot on a weak/default JWT secret or admin password. |
 | `webhook.injection.enabled` | `false` | Turn on sidecar injection (auto-bootstraps TLS, no cert-manager needed). |
@@ -104,6 +105,28 @@ Every value is documented inline in [`values.yaml`](values.yaml); the environmen
 | `{api,engine,webhook}.autoscaling.enabled` | `false` | HPA on CPU and/or memory; the Deployment then drops its static `replicas`. |
 | `ingress.enabled` | `false` | See "Expose the console". |
 | `images.registry` | `ghcr.io/norviq-dev/` | Override to mirror into your own registry/ACR/GAR. |
+
+## The namespace baseline enforces by default
+
+Every namespace in `policyQuotaNamespaces` gets a `strict` namespace baseline (`baseline-cluster-guard-<ns>`),
+and from 0.2.6 it enforces: 20 of its 21 controls act on a matching call (17 refuse it,
+`llm06_excessive_agency` refuses destructive tools and holds elevated ones for approval, two MCP controls
+hold it for approval), and `scope_violation_dangerous_tool` records it and lets it through. Three ways to
+turn it off, each recording the call instead of refusing it (a control switched Off is not evaluated at
+all):
+
+| Scope | How |
+|---|---|
+| Every baseline namespace | `helm upgrade --install … --set baselineClusterPolicy.enforcementMode=audit` |
+| One namespace | Console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` (softens every block in that namespace except a trust freeze, an invalid agent identity and the rate limit) |
+| One control (`baselineClusterPolicy.preset: strict`, the default) | Console → Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls`. With another preset the panel relaxes nothing: its save is one more floor beside the chart's baseline |
+
+Once a namespace's Baseline controls are saved they replace the chart's `strict` baseline there and run in
+`block`, so the install-wide `audit` no longer reaches that namespace (including one saved under 0.2.5;
+see the CHANGELOG). `baselineClusterPolicy.enabled=false` removes the baseline altogether. The baseline
+is not fail-closed either way: a namespace outside the list has no baseline, and an engine outage
+follows `webhook.injection.fallbackMode`, which ships `allow`. Details are in
+[Concepts → Turning the shipped baseline off](https://docs.norviq.dev/concepts/#turning-the-shipped-baseline-off).
 
 ## Notes
 

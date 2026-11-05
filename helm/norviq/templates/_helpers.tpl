@@ -62,13 +62,25 @@ and falls back to the readable tag, which is what you want while developing.
 {{/*
 Third-party (upstream) image ref, with the optional global.imageRegistry mirror host prepended for
 air-gapped installs. Norviq's own images go through norviq.image (images.registry); this covers the
-images with no registry field of their own — opa, redis, postgres, the tls-proxy nginx, the
-cert-bootstrap job, the helm-test curl. Empty global => the upstream ref is unchanged.
-  Usage: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" "redis:7-alpine") }}
+images with no registry field of their own — opa, valkey, postgres, the CNPG operand, the tls-proxy
+nginx, the wait-for busybox, the helm-test curl. Empty global => the upstream ref is unchanged.
+  Usage: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" "valkey/valkey:8.1-alpine") }}
+
+The digest comes from global.thirdPartyImageDigests, looked up by the UPSTREAM ref exactly as the
+template names it, and is appended as `repo:tag@sha256:…` AFTER any mirror prefix. Keyed by ref,
+rather than a `digest` field beside each tag, so a digest can only ever pin the tag it was resolved
+for: an operator who overrides opa.image or images.redis.tag gets a ref with no entry and exactly
+the image they asked for, never `:<new-tag>@<old-digest>` (the runtime resolves the digest and
+ignores the tag, so that would run the OLD image under the new label). And a maintainer who bumps a
+tag without its digest renders an unpinned ref, which the release gate refuses, instead of shipping
+the previous image silently.
 */}}
 {{- define "norviq.thirdPartyImage" -}}
 {{- $g := .root.Values.global.imageRegistry | default "" -}}
-{{- if $g -}}{{ printf "%s/%s" (trimSuffix "/" $g) .image }}{{- else -}}{{ .image }}{{- end -}}
+{{- $digest := get (.root.Values.global.thirdPartyImageDigests | default dict) .image | default "" -}}
+{{- $ref := .image -}}
+{{- if $g -}}{{- $ref = printf "%s/%s" (trimSuffix "/" $g) .image -}}{{- end -}}
+{{- if $digest -}}{{ printf "%s@%s" $ref $digest }}{{- else -}}{{ $ref }}{{- end -}}
 {{- end }}
 
 {{/* imagePullSecrets block (empty when .Values.imagePullSecrets is []). Usage: indent under spec. */}}
@@ -224,6 +236,21 @@ successful install into a permanent Init:0/2.
 {{- end -}}
 
 {{/*
+The RedisFailover's name, and with it the operator's `redisfailovers.databases.spotahome.com/name`
+pod label that the master Service and the agent egress policies select on.
+
+`norviq-valkey-ha`, not 0.2.5's `norviq-redis-ha`, because the failover moved from Redis 7.4 to
+Valkey 8.1 in 0.2.6. Under the old name the operator would have rolled Valkey pods into the running
+7.4 failover, onto volumes holding Redis 7.4's RDB-12 dumps and behind a 7.4 master. Valkey 8.1 loads
+neither: it exits with "Can't handle RDB format version 12" on the dump and on the full-sync stream.
+A new name is a new failover (StatefulSet `rfr-norviq-valkey-ha`, new volume claims), and helm deletes
+the old one. tests/helm/test_bundled_store_upgrade.py holds the name apart from 0.2.5's.
+*/}}
+{{- define "norviq.redisFailoverName" -}}
+norviq-valkey-ha
+{{- end -}}
+
+{{/*
 An EMPTY .host renders NO init container.
 
 The gate can only wait on an address it can name. With an external datastore configured the
@@ -239,14 +266,19 @@ values.yaml made it worse by telling operators that with `existingSecret` the ot
 unused" — `host` was still being used, here.
 
 Skipping is safe. This gate is a convenience that avoids a few CrashLoopBackOffs while the bundled
-StatefulSets come up; it is not a correctness mechanism. The app retries its own connections, and a
-managed datastore is up before the release is installed. Waiting on a name that cannot resolve is
+StatefulSets come up; it is not a correctness mechanism. api and engine retry their own first
+connection to each store (5 attempts, 1/2/4/8 s apart, about 15 s; norviq/startup_retry.py) and then
+fail startup so the pod restarts, and a managed datastore is up before the release is installed. Waiting on a name that cannot resolve is
 strictly worse than not waiting.
 */}}
 {{- define "norviq.waitFor" -}}
 {{- if .host -}}
 - name: {{ .name }}
-  image: busybox:1.36
+  {{- /* Wrapped like every other third-party image. This was the one bare reference in the chart, so
+         `global.imageRegistry` relocated opa, postgres, valkey, nginx and curl and left busybox pointing
+         at Docker Hub — on an air-gapped cluster api and engine sat in Init:0/2 on an ImagePullBackOff
+         for an image the operator never chose and could not move. */}}
+  image: {{ include "norviq.thirdPartyImage" (dict "root" .root "image" "busybox:1.36") | quote }}
   command: ['sh','-c','until nc -z {{ .host }} {{ .port }}; do echo waiting for {{ .host }}; sleep 2; done']
   securityContext:
     runAsNonRoot: true

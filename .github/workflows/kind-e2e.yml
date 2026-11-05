@@ -93,8 +93,8 @@ jobs:
         run: |
           curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
             -o /usr/local/bin/opa \
-            https://openpolicyagent.org/downloads/v1.19.1/opa_linux_amd64_static
-          echo "c9f985ce0d345f5484006ade2c695ed9e3f308e4441139e46695c5c182ac0839  /usr/local/bin/opa" | sha256sum -c -
+            https://openpolicyagent.org/downloads/v1.21.4/opa_linux_amd64_static
+          echo "2ab571f367f293bb19523b76f92f1945bbf245003392c7f392903f95c2b9b630  /usr/local/bin/opa" | sha256sum -c -
           chmod +x /usr/local/bin/opa
           opa version
 
@@ -146,12 +146,22 @@ jobs:
       # that on shard 1 of run 32373505877 (openpolicyagent/opa:1.19.1-static), and a `python:3.12-slim`
       # 502 took a shard of an earlier run the same way.
       #
-      # Pulling on the RUNNER instead moves that dependency to a step that can retry and whose failure
-      # names itself, and `kind load` then means the kubelet never needs the network.
+      # Pulling BEFORE the install instead moves that dependency to a step that can retry and whose
+      # failure names itself, and the kubelet then never needs the network.
       #
       # The list is DERIVED from the rendered chart, not hardcoded. A hardcoded list silently stops
       # covering an image the moment the chart adds or bumps one — which is the same shape as every
       # other stale-copy defect this job has had. `helm template` is the only thing that knows.
+      #
+      # PULLED BY THE NODE, not `docker pull` + `kind load`. The chart pins every third-party image by
+      # its multi-arch index digest (global.thirdPartyImageDigests), so the kubelet asks containerd for
+      # `<repo>@sha256:<index>`. `kind load` cannot supply that: it `docker save`s the single-platform
+      # image the runner pulled and re-imports it on the node under a different digest, so the kubelet
+      # finds nothing under the pinned one and pulls from Docker Hub at pod start after all — the
+      # failure this step exists to remove, back again and now silent. `crictl pull` on the node goes
+      # through the same CRI image store and the same reference normalisation (tag dropped, digest
+      # kept) as the kubelet, so what it stores is what the pod asks for. The rig keeps the pins rather
+      # than clearing them in values-e2e.yaml so that it runs the bytes a release ships.
       - name: Preload the chart's third-party images
         run: |
           set -euo pipefail
@@ -160,17 +170,27 @@ jobs:
               -f helm/norviq/values-light.yaml -f scripts/kind-e2e/values-e2e.yaml \
               --set policyQuotaNamespaces='{agents,analytics}' \
             | grep -oE 'image: *"?[^"]+"?' | sed 's/image: *//' | tr -d '"' \
-            | grep -v '^ghcr\.io/norviq-dev/' | sort -u
+            | grep -vE '^(ghcr\.io/norviq-dev/|norviq/norviq-engine:)' | sort -u
           )
+          # First-party images are excluded by BOTH spellings: values-e2e.yaml points the chart at the
+          # `norviq/` images this job builds and kind-loads, and those exist on no registry — pulling
+          # them would fail (or, from Docker Hub's unowned `norviq` namespace, pull a stranger's image).
           test "${#IMAGES[@]}" -gt 0   # a silent empty list would preload nothing and read as success
-          echo "preloading ${#IMAGES[@]} third-party images: ${IMAGES[*]}"
+          mapfile -t NODES < <(kind get nodes --name norviq-local)
+          test "${#NODES[@]}" -gt 0
+          echo "preloading ${#IMAGES[@]} third-party images onto ${NODES[*]}: ${IMAGES[*]}"
           for img in "${IMAGES[@]}"; do
-            for attempt in 1 2 3; do
-              docker pull "$img" && break
-              echo "::warning::pull failed for $img (attempt $attempt), retrying"
-              sleep $((attempt * 5))
+            for node in "${NODES[@]}"; do
+              for attempt in 1 2 3; do
+                docker exec "$node" crictl pull "$img" >/dev/null && break
+                if [ "$attempt" -eq 3 ]; then
+                  echo "::error::could not pull $img onto $node after 3 attempts" >&2
+                  exit 1
+                fi
+                echo "::warning::pull failed for $img on $node (attempt $attempt), retrying"
+                sleep $((attempt * 5))
+              done
             done
-            kind load docker-image --name norviq-local "$img"
           done
 
       # Every namespace in `policyQuotaNamespaces` must EXIST before install, or the chart fails
@@ -194,12 +214,24 @@ jobs:
             -f helm/norviq/values-light.yaml \
             -f scripts/kind-e2e/values-e2e.yaml \
             --set policyQuotaNamespaces='{agents,analytics}' \
-            --set images.api.pullPolicy=IfNotPresent \
-            --set images.ui.pullPolicy=IfNotPresent \
-            --set images.engine.pullPolicy=IfNotPresent \
-            --set images.webhook.pullPolicy=IfNotPresent \
             --wait --timeout 10m
           kubectl -n norviq get pods
+
+      # PROVE THE CLUSTER RUNS THIS PULL REQUEST'S BUILD. The install used to keep the chart's default
+      # registry (ghcr.io/norviq-dev/), so every run tested the published `-latest` images while the
+      # images built above sat unused on the node — green or red, the result said nothing about the
+      # change under review. The registry now comes from values-e2e.yaml (shared with 00-up.sh); this
+      # step is what makes a regression of that loud instead of silent.
+      - name: Verify the cluster runs the locally built images
+        run: |
+          set -euo pipefail
+          for dep in norviq-api norviq-ui norviq-engine norviq-webhook; do
+            img="$(kubectl -n norviq get deploy "$dep" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+            case "$img" in
+              norviq/norviq-engine:*) echo "ok  $dep -> $img" ;;
+              *) echo "::error::$dep runs $img, not the image this job built (norviq/norviq-engine:*)"; exit 1 ;;
+            esac
+          done
 
       - name: Mint an admin token
         run: |

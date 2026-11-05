@@ -22,6 +22,9 @@ from urllib.parse import urlsplit
 
 import structlog
 
+# The baseline compiler owns the CONTROLS-region format, so the engine asks it whether a namespace's
+# saved controls settle every control of the chart's baseline rather than parsing that format twice.
+from norviq.api import baseline as baseline_lib
 from norviq.config import settings
 from norviq.engine.latency import (
     PHASE_CACHE, PHASE_CANDIDATES, PHASE_OPA, PHASE_OPA_WAIT, PHASE_PERSIST, PHASE_POSTURE,
@@ -43,7 +46,15 @@ from norviq.engine.masking import (
 )
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
-from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
+from norviq.engine.empty_literals import upgrade_legacy
+from norviq.engine.opa_client import (
+    OPA_COMPILE_ERROR,
+    OpaClient,
+    OpaModuleRejected,
+    managed_package,
+    rewrite_package,
+    sanitize_key,
+)
 from norviq.telemetry.metrics import record_eval_phases, record_tool_call
 from norviq.telemetry.spans import create_tool_call_span, enrich_span
 from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
@@ -61,6 +72,14 @@ _MAX_DRYRUN_MODULES = 256
 # one-time compile, and the whole point of warming is to keep a slow compile from being charged to a
 # data-plane deadline. Bounded so a wedged OPA still degrades to the normal fail-closed path.
 _MODULE_WARM_TIMEOUT_S = 10.0
+# Bound on the memo of "do these saved controls supersede that chart baseline". One entry per (controls,
+# chart) pair of digests actually seen — normally one per namespace that has saved controls — so it is
+# bounded in bytes as well as in entries.
+_SUPERSEDE_MEMO_MAX = 1024
+# Bound on the (policy key, source digest) pairs remembered so NRVQ-ENG-2070/2071 fire once per module
+# rather than on every evaluation. Dry-run keys are caller-chosen, so the memo cannot be unbounded; when
+# full it is cleared, which costs at most one repeated line per module.
+_MAX_REPORTED_MODULES = 4096
 
 # rule_id PREFIXES stamped when a would-block is SOFTENED to a logged `audit` decision — namespace
 # monitor mode and per-policy audit mode respectively. Exported (not inlined into the f-strings below)
@@ -386,13 +405,17 @@ _SQL_TABLE_RE = re.compile(
 # and our signal to raise — not a reason to take their production down. They remain loudly logged and
 # distinctly attributed; they simply no longer drop the call when the namespace says not to.
 #
-# The two that remain are not automatic judgements about a call, which is what monitor mode governs:
+# The ones that remain are not automatic judgements about a call, which is what monitor mode governs:
 #   * `trust_frozen`     — an admin explicitly froze this agent. Incident response outranks posture;
 #                          an operator who froze an agent five minutes ago expects it to stay frozen.
 #   * `rate_limit_exceeded` — a resource control protecting the customer's OWN backend. "Do not block
 #                          on policy" is not a request for unbounded call volume. Configurable via
 #                          `monitor_exempt_rate_limit` for operators who want even this to soften.
-_BASE_POSTURE_EXEMPT_RULES = frozenset({"trust_frozen"})
+#   * `invalid_spiffe_identity` — see below.
+# Never softened by monitor mode. trust_frozen is the admin kill switch. invalid_spiffe_identity is an identity-
+# integrity failure, not a policy outcome: the identity is one no admin control can be applied to (the shared
+# rule in norviq/engine/identity.py), so softening it in a monitor namespace would let an unfreezable caller run.
+_BASE_POSTURE_EXEMPT_RULES = frozenset({"trust_frozen", "invalid_spiffe_identity"})
 
 
 def _posture_exempt_rules() -> frozenset[str]:
@@ -446,6 +469,9 @@ class OPAEvaluator:
         # event via the cache's invalidation hook (below) — freeze/cap are NOT cached here, always read fresh.
         _eval_ttl = min(_ttl, settings.redis_ttl_eval_s) if _ttl > 0 else 0
         self._inproc_eval_cache = TTLCache(_eval_ttl, settings.evaluator_inproc_cache_max)
+        # (sha256 of controls rego, sha256 of chart baseline rego) -> whether the saved controls supersede
+        # that baseline. See _controls_supersede_baseline.
+        self._supersede_memo: dict[tuple[str, str], bool] = {}
         if hasattr(cache, "register_eval_invalidation_hook"):
             cache.register_eval_invalidation_hook(self._on_eval_invalidated)
         self._semaphore = asyncio.Semaphore(settings.evaluator_max_concurrency)
@@ -456,6 +482,10 @@ class OPAEvaluator:
         # dry-run with arbitrary ns/class strings, so track dry-run keys in insertion order and LRU-evict past
         # a cap (delete the OPA module + drop the digest) — bounds server memory + _pushed against abuse.
         self._dryrun_keys: OrderedDict[str, None] = OrderedDict()
+        # Modules already named in the log: rewritten from an older release's empty literals (2070), and
+        # refused by OPA's compiler (2071). See `_opa_source` / `_report_rejected`.
+        self._upgrade_reported: set[tuple[str, str]] = set()
+        self._rejected_reported: set[tuple[str, str]] = set()
         self._audit_tasks: set[asyncio.Task[None]] = set()
         self._policies: dict[str, dict] = {}
         # Count PERSISTENT engine (OPA-eval) errors so evaluator_error is observable, not silent. This is
@@ -769,6 +799,12 @@ class OPAEvaluator:
         the identity and the violation, not a recomputed score. Uses the same background queue as the
         happy path so it cannot add latency to a call that has already failed.
         """
+        from norviq.engine.identity import is_controllable_spiffe_id
+
+        if not is_controllable_spiffe_id(event.agent_identity.spiffe_id):
+            # Not a registry identity: the admin routes refuse it, so a row for it could never be frozen,
+            # lifted or deleted, only listed. The block itself is logged (NRVQ-ENG-2006) and audited.
+            return
         try:
             from norviq.engine.trust import TrustResult
 
@@ -994,8 +1030,14 @@ class OPAEvaluator:
         caller-controlled payload, which is strictly more freely chosen. Name-only means an unresolved
         name returns `unknown`, which is not `read`, so it is rate-limited. Fail toward throttling.
 
-        Net effect: strictly NARROWER than before. Every tool that was exempt and is genuinely a read
-        stays exempt; the ones that were exempt only because of how they were spelled no longer are.
+        Net effect: narrower than the prefix test alone. Every exempt tool now needs BOTH the prefix and
+        a `read` from the classifier, so the ones that were exempt only because of how they were spelled
+        no longer are. It is not frozen at the set exempt when this was written: it moves with the
+        classifier, in both directions. When BACKLOG 7.10 stopped `run` outranking the read it governs,
+        `get_run_status` and `list_run_logs` became exempt (they are reads, and had been throttled only
+        because `run` made them `delete`), while `get_run_command_output` stays throttled because a run
+        qualifier governing code keeps the exec reading. Pinned in both directions by
+        tests/engine/test_evaluator_l1l2.py.
         """
         if not settings.evaluator_rate_limit_read_exempt:
             return False
@@ -1215,7 +1257,26 @@ class OPAEvaluator:
     _SQL_TOOL_SUBSTRINGS = ("sql", "query", "report", "select")
 
     def _derived_input(self, event: ToolCallEvent) -> dict:
-        """Flattened/normalized views of the call, for policies that must not depend on param naming."""
+        """Flattened/normalized views of the call, for policies that must not depend on param naming.
+
+        MEMOISED PER EVENT. `_build_input` is called once per candidate policy (routers loop at
+        _evaluate_single) and again on the transient-error retry, and this function is pure in `event`,
+        so without a cache the whole derived view — the param walks and `classify_tool`, which now scans
+        every string in the payload for a write keyword (BACKLOG 7.10) — was recomputed N+ times for one
+        call. At the 256 KiB body cap that scan is tens of ms; N times it dominated the evaluation. The
+        result is cached on the event, which lives exactly as long as the evaluation; the event's fields
+        do not change under it, so the cache is always valid for the object it hangs on."""
+        cached = getattr(event, "_nrvq_derived_cache", None)
+        if cached is not None:
+            return cached
+        derived = self._compute_derived_input(event)
+        try:
+            event._nrvq_derived_cache = derived
+        except Exception:  # noqa: BLE001 — a model that refuses the attribute just recomputes; never fails the call
+            pass
+        return derived
+
+    def _compute_derived_input(self, event: ToolCallEvent) -> dict:
         values = [v for v in self._walk_values(event.tool_params) if isinstance(v, str)]
         paths, ambiguous_paths = self._walk_paths(event.tool_params)
         sql_like = self._sql_candidate(values)
@@ -2056,12 +2117,17 @@ class OPAEvaluator:
         return "data.norviq.strict"
 
     def _no_policy_decision(self, key: str, namespace: str) -> dict:
-        """Decide when NO policy is loaded for `key`. Deny-by-default for a PEP (enforcement_mode=block),
-        with three distinct, loudly-logged cases so a startup/load anomaly is never mistaken for genuine no-policy.
+        """Decide when NO policy is loaded for `key`, with three distinct, loudly-logged cases so a
+        startup/load anomaly is never mistaken for genuine no-policy.
 
         - load FAILURE never reaches here: load_from_db raises -> evaluate() fail-closes (NRVQ-ENG-2000).
         - not-yet-warmed (loader bound but warm load incomplete) -> deny `policy_load_pending` (distinct alarm).
-        - genuine no-policy for an enforcing namespace -> deny `no_policy_loaded` (block mode) or allow (audit mode).
+        - genuine no-policy -> deny `no_policy_loaded` ONLY when enforcement_mode=block AND
+          no_policy_decision=deny; otherwise allow under `default_allow`. no_policy_decision ships "allow"
+          (config.py, values.yaml config.noPolicyDecision), so on a stock install this branch allows.
+
+        This docstring used to open "Deny-by-default for a PEP (enforcement_mode=block)", which the code
+        below has not done since no_policy_decision began shipping "allow" in 0.2.0.
         """
         loader = getattr(self, "_loader", None)
         warmed = getattr(loader, "_warmed", True) if loader is not None else True
@@ -2089,7 +2155,60 @@ class OPAEvaluator:
             return self._no_policy_decision(key, namespace)
         if settings.opa_mode == "server":
             return await self._evaluate_opa_server(key, rego, opa_input)
-        return await self._evaluate_opa_subprocess(namespace, agent_class, opa_input, rego, package_name)
+        return await self._evaluate_opa_subprocess(
+            namespace, agent_class, opa_input, rego, package_name, key=key
+        )
+
+    @staticmethod
+    def _remember(memo: set[tuple[str, str]], item: tuple[str, str]) -> bool:
+        """Add `item` to a bounded once-per-module memo; True when it was not there yet."""
+        if item in memo:
+            return False
+        if len(memo) >= _MAX_REPORTED_MODULES:
+            memo.clear()
+        memo.add(item)
+        return True
+
+    def _opa_source(self, key: str, rego: str) -> str:
+        """The source OPA compiles for `key`: the stored rego, with the empty collection literals an older
+        release's generators wrote rewritten to forms OPA 1.21 accepts (`empty_literals.upgrade_legacy`).
+
+        Applied here — where a module enters OPA (server push, re-push, subprocess fork) — and nowhere
+        else, because every path that loads a stored policy ends here: warm_cache, load_from_db, a peer's
+        upsert event, the embedded engine's reload, a fleet push, a rollback to an old version and a
+        dry-run of pasted text alike. The loader's copy, which the policies API serves and whose builder
+        body hash the console checks for hand edits, and the Postgres row stay byte-identical, so a
+        rollback to 0.2.5 reads exactly what it wrote. The server path runs this only on a push (the
+        digest guard short-circuits before it), so the data plane never pays for the scan.
+        """
+        upgraded, shapes = upgrade_legacy(rego)
+        if shapes and self._remember(self._upgrade_reported, (key, hashlib.sha256(rego.encode("utf-8")).hexdigest())):
+            log.info(
+                "nrvq.opa.legacy_literals_upgraded", key=key, shapes=list(shapes), code="NRVQ-ENG-2070",
+                detail="holds a bare empty literal of a shape an older release's generator wrote; compiled "
+                       "as the typed form (same value), stored row unchanged. Regenerating the policy from its "
+                       "source (builder, intent, MCP registry) stores the current form.",
+            )
+        return upgraded
+
+    def _report_rejected(self, key: str, rego: str, module_id: str, exc: Exception) -> None:
+        """Name a module OPA refused to compile — the policy key and OPA's own error — once per module.
+
+        Without it the only trace was `evaluator_error` on each call plus a log line keyed on the
+        sanitised module id, which an operator cannot map back to a policy without reading the code.
+        """
+        if self._remember(self._rejected_reported, (key, hashlib.sha256(rego.encode("utf-8")).hexdigest())):
+            log.error("nrvq.opa.module_rejected", key=key, module_id=module_id, error=str(exc)[:2000],
+                      code="NRVQ-ENG-2071")
+
+    async def _push_module(self, key: str, rego: str) -> None:
+        """Push `key`'s module into the OPA server — the one place a server-mode module is compiled."""
+        module_id = sanitize_key(key)
+        try:
+            await self.opa.push_policy(module_id, rewrite_package(self._opa_source(key, rego), managed_package(key)))
+        except OpaModuleRejected as exc:
+            self._report_rejected(key, rego, module_id, exc)
+            raise
 
     async def _track_dryrun_module(self, key: str) -> None:
         """LRU-bound the ephemeral dry-run OPA modules so an authenticated user can't grow the OPA server
@@ -2121,7 +2240,7 @@ class OPAEvaluator:
         digest = hashlib.sha256(rego.encode("utf-8")).hexdigest()
         if self._pushed.get(key) == digest:
             return
-        await self.opa.push_policy(sanitize_key(key), rewrite_package(rego, managed_package(key)))
+        await self._push_module(key, rego)
         self._pushed[key] = digest
         if key.startswith("dryrun:"):
             await self._track_dryrun_module(key)
@@ -2138,14 +2257,13 @@ class OPAEvaluator:
     async def _evaluate_opa_server(self, key: str, rego: str, opa_input: dict) -> dict:
         """Evaluate against the long-lived OPA server; push (or re-push) the module as needed."""
         package = managed_package(key)
-        module_id = sanitize_key(key)
         digest = hashlib.sha256(rego.encode("utf-8")).hexdigest()
         await self._ensure_module_pushed(key, rego)
         result = await self.opa.query(package, opa_input)
         if result is None:
             # OPA lost in-memory state (sidecar restart) — re-push this module once and retry.
             log.warning("nrvq.opa.module_missing", key=key, code="NRVQ-ENG-2057")
-            await self.opa.push_policy(module_id, rewrite_package(rego, package))
+            await self._push_module(key, rego)
             self._pushed[key] = digest
             result = await self.opa.query(package, opa_input)
         if not isinstance(result, dict):
@@ -2160,11 +2278,14 @@ class OPAEvaluator:
         }
 
     async def _evaluate_opa_subprocess(
-        self, namespace: str, agent_class: str, opa_input: dict, rego: str, package_name: str | None
+        self, namespace: str, agent_class: str, opa_input: dict, rego: str, package_name: str | None,
+        key: str | None = None,
     ) -> dict:
         """Evaluate Rego source via a per-call `opa eval` fork (rollback path)."""
         if package_name is None:
             package_name = self._extract_package_name(rego)
+        key = key or f"{namespace}:{agent_class}"
+        stored_rego, rego = rego, self._opa_source(key, rego)
         query = self._opa_query_for_package(package_name)
         log.debug(
             "nrvq.opa.query.resolved",
@@ -2218,7 +2339,16 @@ class OPAEvaluator:
                 )
 
         if proc.returncode != 0:
-            raise RuntimeError(f"opa eval failed: {stderr.decode('utf-8', errors='replace').strip()}")
+            # `--format=json` reports a compile error on STDOUT with an empty stderr, so the message this
+            # raised used to read just "opa eval failed: " and OPA's reason was lost.
+            detail = (stderr or stdout).decode("utf-8", errors="replace").strip()
+            # Compile-stage codes only (opa_client.OPA_COMPILE_ERROR): "this module does not compile",
+            # not "this input broke evaluation" — the distinction the server path gets from the push.
+            if OPA_COMPILE_ERROR.search(detail):
+                exc = OpaModuleRejected(f"opa eval failed: {detail[:2000]}")
+                self._report_rejected(key, stored_rego, sanitize_key(key), exc)
+                raise exc
+            raise RuntimeError(f"opa eval failed: {detail[:2000]}")
 
         parsed = json.loads(stdout.decode("utf-8"))
         value = self._extract_opa_value(parsed)
@@ -2322,8 +2452,12 @@ class OPAEvaluator:
             event_id=event.event_id,
         )
 
-    async def _collect_candidates(self, event: ToolCallEvent) -> list[dict]:
-        """Collect candidate policies from loader state by specificity."""
+    async def _collect_candidates(self, event: ToolCallEvent, *, explain: bool = False) -> list[dict]:
+        """Collect candidate policies from loader state by specificity.
+
+        `explain` is for /policies/effective only: a chart baseline that the namespace's saved controls
+        supersede is then KEPT in the list, tagged `superseded_by`, so the console can say why it is not
+        deciding. Enforcement never passes it, and gets the list without that candidate."""
         if self._loader is None:
             return []
         namespace = event.agent_identity.namespace
@@ -2334,7 +2468,7 @@ class OPAEvaluator:
         # /policies/effective report the real winning layer (e.g. deny_shell_execution) instead of a misleading
         # no_policy_loaded. The concrete-namespace collection below is left byte-identical (decision parity).
         if namespace == "all":
-            return await self._collect_candidates_union(agent_class)
+            return await self._collect_candidates_union(agent_class, explain=explain)
         candidates = []
 
         async def _append_policy(target_namespace: str, target_agent_class: str) -> None:
@@ -2354,7 +2488,7 @@ class OPAEvaluator:
                 candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
                                    "enforcement_mode": loaded.get("enforcement_mode", "block")})
 
-        async def _append_controls_floor(target_namespace: str, scope: str = "__controls__") -> None:
+        async def _append_controls_floor(target_namespace: str, scope: str = "__controls__") -> dict | None:
             """A reserved-scope module, tagged as a tighten-only overlay so it acts as a FLOOR.
 
             Same lookup as `_append_policy` (in-memory first, then the DB), but tagged `overlay: True` at
@@ -2370,21 +2504,25 @@ class OPAEvaluator:
             Landing in the HARD partition needs no extra work: `_resolve_overlay` partitions the PACK
             family by key suffix and treats EVERYTHING ELSE as hard, so a `__pack_weaken__` can never
             relax either of these.
+
+            Returns the candidate it appended (or None), so the chart baseline can be checked against
+            the namespace's saved controls once both are collected.
             """
             key = f"{target_namespace}:{scope}"
             entry = self._loader._policies.get(key) or await self._loader.load_from_db(
                 target_namespace, scope
             )
-            if entry:
-                candidates.append(
-                    {
-                        "key": key,
-                        "rego": entry["rego"],
-                        "priority": entry["priority"],
-                        "enforcement_mode": entry.get("enforcement_mode", "block"),
-                        "overlay": True,
-                    }
-                )
+            if not entry:
+                return None
+            candidate = {
+                "key": key,
+                "rego": entry["rego"],
+                "priority": entry["priority"],
+                "enforcement_mode": entry.get("enforcement_mode", "block"),
+                "overlay": True,
+            }
+            candidates.append(candidate)
+            return candidate
 
         await _append_policy(namespace, agent_class)
         # The customer's tuned baseline CONTROLS, kept on their own key rather than sharing
@@ -2416,7 +2554,7 @@ class OPAEvaluator:
         # means. Note this also restores MONITORING on classes that have their own policy: `audit` is
         # stricter than `allow`, and audit never interrupts a call, so the record comes back with no
         # availability cost.
-        await _append_controls_floor(namespace)
+        controls_floor = await _append_controls_floor(namespace)
         # The compiled egress allowlist (C2-013). A tighten-only overlay for the same reason the
         # controls floor is one: a per-class policy at a higher priority must not be able to discard
         # the operator's destination rules, which is exactly what C2-008 was.
@@ -2425,8 +2563,22 @@ class OPAEvaluator:
         # per-class policy must not be able to discard the operator's decision about which MCP
         # integrations are expected here, or which of them may be written through.
         await _append_controls_floor(namespace, "__mcp__")
-        await _append_policy(namespace, "__baseline__")
-        await _append_policy("__cluster__", "__baseline__")
+        # The namespace and cluster baselines are FLOORS too, for the reason the controls tier is one.
+        # As base tiers they resolved by priority outright. The chart's baseline CR is stored at
+        # `<ns>:__baseline__` with priority 1 (webhook baselineFallbackPriority), so any class policy
+        # outranked it. That was harmless only while the baseline shipped in `audit`, which partitions
+        # it out as an observer. Once it ENFORCES (the 0.2.6 default), measured on this resolver: an
+        # enforcing baseline block (deny_shell_execution) against a class policy at 100 that allows
+        # came back allow / support_default_allow. Writing any policy for a class switched the whole
+        # enforcing baseline off for it. The opposite direction is just as wrong for a baseline an
+        # admin authors at a HIGH priority (`__cluster__:__baseline__` at 900): its default_allow then
+        # beat a tenant's block. As a floor the baseline only tightens: its blocks apply whatever the
+        # priority, and its allow never undoes a tenant's block. An `audit` baseline still only records,
+        # because floors are ranked by their effective decision. A class policy no longer loosens it; the
+        # namespace's saved control effects do, by superseding it (below).
+        ns_baseline = await _append_controls_floor(namespace, "__baseline__")
+        self._apply_controls_supersede(candidates, controls_floor, ns_baseline, explain)
+        await _append_controls_floor("__cluster__", "__baseline__")
         # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
         # `deployment:<name>` / `namespace:<ns>` keys); collect them here so they are enforced, not just
         # advertised (in-memory-only, additive: zero hot-path cost when absent, and priority resolution
@@ -2494,7 +2646,7 @@ class OPAEvaluator:
                 )
         return candidates
 
-    async def _collect_candidates_union(self, agent_class: str) -> list[dict]:
+    async def _collect_candidates_union(self, agent_class: str, *, explain: bool = False) -> list[dict]:
         """Union resolver for the console's namespace=all picker. Collects the class policy + baseline +
         the additive overlays for EVERY namespace that actually holds a policy for this class, plus the single
         cluster baseline. Mirrors the concrete-namespace collection above so `_resolve_with_packs` yields the
@@ -2504,22 +2656,21 @@ class OPAEvaluator:
         candidates: list[dict] = []
         seen: set[str] = set()
 
-        async def _append_policy(target_namespace: str, target_agent_class: str) -> None:
-            # Base/floor lookup only — never tags "overlay": True (mirrors _collect_candidates).
+        async def _append_policy(target_namespace: str, target_agent_class: str, floor: bool = False) -> dict | None:
+            # Base lookup, or a FLOOR when `floor` is set (the chart baselines; mirrors _collect_candidates).
             key = f"{target_namespace}:{target_agent_class}"
             if key in seen:
-                return
-            if key in self._loader._policies:
-                entry = self._loader._policies[key]
-                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
-                                   "enforcement_mode": entry.get("enforcement_mode", "block")})
-                seen.add(key)
-                return
-            loaded = await self._loader.load_from_db(target_namespace, target_agent_class)
-            if loaded:
-                candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
-                                   "enforcement_mode": loaded.get("enforcement_mode", "block")})
-                seen.add(key)
+                return None
+            entry = self._loader._policies.get(key) or await self._loader.load_from_db(
+                target_namespace, target_agent_class
+            )
+            if not entry:
+                return None
+            candidate = {"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                         "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": floor}
+            candidates.append(candidate)
+            seen.add(key)
+            return candidate
 
         def _append_overlay(key: str) -> None:
             # additive/in-memory-only overlays (pack/guardrail/override/weaken/remediation) — absent by default,
@@ -2530,13 +2681,16 @@ class OPAEvaluator:
             candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"], "overlay": True})
             seen.add(key)
 
-        def _append_controls_overlay(ns: str, scope: str = "__controls__") -> None:
+        def _append_controls_overlay(ns: str, scope: str = "__controls__") -> dict | None:
             key = f"{ns}:{scope}"
-            if key in self._loader._policies and key not in seen:
-                entry = self._loader._policies[key]
-                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
-                                   "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": True})
-                seen.add(key)
+            if key not in self._loader._policies or key in seen:
+                return None
+            entry = self._loader._policies[key]
+            candidate = {"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                         "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": True}
+            candidates.append(candidate)
+            seen.add(key)
+            return candidate
 
         for ns in await self._loader.namespaces_for_class(agent_class):
             await _append_policy(ns, agent_class)
@@ -2548,17 +2702,93 @@ class OPAEvaluator:
             # tier, the console's "All namespaces" view would report a different winning layer than the
             # one a real agent actually gets, which is precisely the view an operator uses to check that
             # their tuning took effect.
-            _append_controls_overlay(ns)
+            controls_floor = _append_controls_overlay(ns)
             _append_controls_overlay(ns, "__egress__")
-            await _append_policy(ns, "__baseline__")
+            ns_baseline = await _append_policy(ns, "__baseline__", floor=True)
+            # Superseded per namespace, by that namespace's own controls, exactly as in
+            # _collect_candidates — or "All namespaces" would show a chart block the agent never gets.
+            self._apply_controls_supersede(candidates, controls_floor, ns_baseline, explain)
             for overlay in ("__pack__", "__guardrail__", "__pack_override__", "__pack_weaken__"):
                 _append_overlay(f"{ns}:{overlay}")
             # Mirror the per-class remediation overlay lookup from _collect_candidates for
             # the union resolver (console's namespace="all" picker) — same additive/in-memory-only, tighten-only.
             if agent_class:
                 _append_overlay(f"{ns}:{agent_class}__remediation__")
-        await _append_policy("__cluster__", "__baseline__")
+        await _append_policy("__cluster__", "__baseline__", floor=True)
         return candidates
+
+    def _apply_controls_supersede(
+        self, candidates: list[dict], controls: dict | None, ns_baseline: dict | None, explain: bool
+    ) -> None:
+        """Drop the chart's namespace baseline when the namespace's saved controls supersede it.
+
+        Both are floors, and floors combine strictest-wins. That made the console's per-control switch a
+        one-way valve: it could tighten a control but never relax one below the chart's baseline, which
+        is the preset file itself, every control at the severity its head was authored with. Measured
+        live on prep/0.2.6 (namespace persona-legal, chart baseline in block): deny_shell_execution set
+        to Off, and then to Monitor, still returned block / deny_shell_execution, while namespace monitor
+        mode and the chart's own `audit` flag both softened it. "Set the control's effect instead", the
+        one loosening path left once baselines became floors, did nothing.
+
+        So once an operator has saved effects for a namespace, those effects ARE its baseline: the
+        console compiles the chart's own preset with an effect on every control — the operator's, or the
+        default, which is what the preset's own head does (baseline.shipped_default) — so it is a
+        complete specification of it, and a control nobody touched does what the chart did. Only the
+        per-namespace guard steps aside. `__cluster__:__baseline__` is an admin's cluster-wide floor and
+        is never passed here, and the controls module is still a floor, so a class policy can no more
+        loosen it than it could the chart's.
+
+        It steps aside only when `baseline_lib.covers` proves the controls module is exactly what this
+        release's compiler renders from the chart's own preset, and only for a module stored in `block`
+        mode, the only mode the baseline router writes; otherwise both stay floors, exactly as before.
+        That keeps a control nobody switched off from being dropped when the chart names another
+        preset or its own rego, or when the module came from another compiler (v0.2.5's included). An
+        `audit`-mode module is excluded because `_apply_policy_mode` softens its blocks to records:
+        measured before this guard, a `__controls__` stored in audit with deny_shell_execution at deny
+        turned the chart's block/deny_shell_execution into audit/policy_audit_would_block. And it is
+        decided AFTER both lookups succeeded: a lookup that raised has already failed the whole
+        evaluation closed, and a missing row is no controls, so the chart governs.
+        """
+        if controls is None or ns_baseline is None:
+            return
+        if str(controls.get("enforcement_mode", "block")) != "block":
+            return
+        if not self._controls_supersede_baseline(controls, ns_baseline):
+            return
+        if explain:
+            ns_baseline["superseded_by"] = controls["key"]
+            return
+        candidates[:] = [c for c in candidates if c is not ns_baseline]
+
+    def _controls_supersede_baseline(self, controls: dict, ns_baseline: dict) -> bool:
+        """Whether saved controls settle every control of the chart baseline. Uncertain means no."""
+        memo = self.__dict__.get("_supersede_memo")
+        if memo is None:  # an evaluator built without __init__ (resolver tests)
+            memo = self._supersede_memo = {}
+        texts = (str(controls.get("rego") or ""), str(ns_baseline.get("rego") or ""))
+        # Keyed by digest, not by the texts: holding the texts would keep every replaced policy alive
+        # until the memo filled. The hot path already digests each candidate's rego to decide whether
+        # OPA has it (_ensure_module_pushed), so this costs what that does, once more per text.
+        pair = tuple(hashlib.sha256(t.encode("utf-8")).hexdigest() for t in texts)
+        known = memo.get(pair)
+        if known is not None:
+            return known
+        try:
+            covered = baseline_lib.covers(*texts)
+        except Exception as exc:  # noqa: BLE001 — keep the chart floor rather than guess
+            # Not memoised, so a transient fault is retried on the next evaluation rather than pinned.
+            log.error("nrvq.engine.baseline.supersede_check_failed", controls=controls.get("key"),
+                      baseline=ns_baseline.get("key"), error=str(exc), code="NRVQ-ENG-2069")
+            return False
+        if not covered:
+            # Once per distinct pair (memoised below), not per call: the operator saved effects that the
+            # engine is NOT honouring over the chart's baseline, and the console still shows them.
+            log.warning("nrvq.engine.baseline.controls_do_not_supersede", controls=controls.get("key"),
+                        baseline=ns_baseline.get("key"), code="NRVQ-ENG-2068")
+        if len(memo) >= _SUPERSEDE_MEMO_MAX:
+            memo.clear()
+        memo[pair] = covered
+        return covered
 
     def _resolve_with_packs(self, results: list[dict]) -> dict:
         """Sector packs (:__pack__) and the opt-in tool-allowlist guardrail (:__guardrail__) are
@@ -2616,7 +2846,7 @@ class OPAEvaluator:
         (_resolve_with_packs) does NOT use this method — it uses the "overlay" flag tagged at construction, which
         can never misclassify a real class's own base policy. Prefer the flag over this heuristic wherever the
         candidate dict is available."""
-        return (key.endswith(":__pack__") or key.endswith(":__guardrail__")
+        return (key.endswith(":__baseline__") or key.endswith(":__pack__") or key.endswith(":__guardrail__")
                 or key.endswith(":__pack_override__") or key.endswith(":__pack_weaken__")
                 or key.endswith("__remediation__"))
 
@@ -2627,7 +2857,6 @@ class OPAEvaluator:
         __pack_weaken__ overlay exists ONLY to dial back a sector pack's own restriction, not to neutralize an
         operator guardrail or a compliance-remediation control. Each partition is resolved independently, then
         combined by plain most-restrictive-wins, so a hard block/escalate always survives a pack weaken's allow."""
-        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
         pack_family = [
             r for r in results
             if str(r["key"]).endswith((":__pack__", ":__pack_override__", ":__pack_weaken__"))
@@ -2640,8 +2869,8 @@ class OPAEvaluator:
             return hard_winner
         if hard_winner is None:
             return pack_winner
-        pack_rank = rank.get(pack_winner["decision"].decision, 3)
-        hard_rank = rank.get(hard_winner["decision"].decision, 3)
+        pack_rank = self._effective_rank(pack_winner)
+        hard_rank = self._effective_rank(hard_winner)
         # a tie keeps the hard overlay's winner (guardrail/remediation reason takes attribution priority).
         return pack_winner if pack_rank < hard_rank else hard_winner
 
@@ -2662,9 +2891,13 @@ class OPAEvaluator:
     @staticmethod
     def _resolve_hard_overlay(results: list[dict]) -> dict:
         """Plain most-restrictive-wins for HARD tighten-only overlays (:__guardrail__, *__remediation__) — NO
-        weaken exception. Ties broken by highest priority."""
-        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
-        results.sort(key=lambda item: (rank.get(item["decision"].decision, 3), -int(item["priority"])))
+        weaken exception. Ties broken by highest priority.
+
+        Ranked by EFFECTIVE decision. A block from an audit-mode floor is about to be softened to an audit,
+        so ranking it as a block let it tie an enforcing guardrail's block and win on priority — and the
+        softened result discarded the enforcement. Reachable once the chart baseline became a floor and an
+        operator kept it in `audit`."""
+        results.sort(key=lambda item: (OPAEvaluator._effective_rank(item), -int(item["priority"])))
         return results[0]
 
     def _resolve_precedence(self, results: list[dict]) -> dict:
@@ -2838,6 +3071,11 @@ class OPAEvaluator:
         )
 
     def _validate_spiffe(self, spiffe_id: str) -> None:
-        """Validate SPIFFE identifier format before trust operations."""
-        if not spiffe_id.startswith("spiffe://"):
+        """Validate SPIFFE identifier format before trust operations: the same rule the key API and the admin
+        trust routes apply (identity.is_controllable_spiffe_id), so every identity that gets a decision can be
+        frozen. It used to check only the "spiffe://" prefix, which let the bare prefix and ids over 512
+        characters be decided for while PUT /agents/{id}/trust answered 422 for them."""
+        from norviq.engine.identity import is_controllable_spiffe_id
+
+        if not is_controllable_spiffe_id(spiffe_id):
             raise InvalidSpiffeIdentity("invalid spiffe_id")

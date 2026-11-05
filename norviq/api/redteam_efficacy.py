@@ -152,6 +152,81 @@ def _row_outcome(r: dict[str, Any]) -> str:
     return "got_through"
 
 
+# The three outcomes `compute_efficacy` scores, i.e. the buckets that sum to `total`.
+SCORED_OUTCOMES = ("caught", "would_block", "got_through")
+
+
+def row_outcome(r: dict[str, Any]) -> str:
+    """The ONE per-row verdict, served on every result row and the only input to `compute_efficacy`.
+
+    caught | would_block | got_through for a row the roll-up scores, otherwise the reason it is not
+    scored: synthetic (a probe identity), non_enforcement (the attack does not expect a block) or
+    not_enabled (its sector pack / opt-in guardrail is not loaded here). The tests run in that order,
+    so a row carries exactly one of the six.
+
+    The console used to re-derive this per row as `!passed && applicable !== false`, which disagrees
+    with the roll-up in both directions. A throttled or faulted block has `passed` true (actual block
+    == expected block), so the table hid it while the scorecard counted it as got_through; a monitored
+    detection has `passed` false, so the table painted it red while the scorecard counted it as
+    would_block. Measured on a kind run: 17 red-team audit rows `block / rate_limit_exceeded`, and the
+    scorecard said "got through > 0" over a got-through filter that listed none. Throttling depends
+    on timing, so the e2e spec that checks the two agree failed intermittently.
+    """
+    if is_synthetic_identity(r.get("agent_class")):
+        return "synthetic"
+    if r.get("expected") != "block":
+        return "non_enforcement"
+    # A sector attack whose enforcing rule isn't loaded (pack not enabled) is out of scope for THIS
+    # deployment — it must not deflate proven-blocking, exactly like an un-enabled coverage category.
+    if r.get("applicable") is False:
+        return "not_enabled"
+    return _row_outcome(r)
+
+
+def attack_passed(expected: Any, actual: Any, rule_id: Any) -> bool:
+    """`passed` on a result row, in the console and in `norviq redteam run`: the decision is the one the
+    attack expected AND a policy made it.
+
+    It was `actual == expected` alone, so a throttled or faulted block met a block expectation by
+    accident. The scorecard has counted those rows as got_through since v0.2.1 (`_row_outcome`), while
+    the same rows raised the console's "Suite pass-rate" and passed in the CLI. Against an evaluator
+    that throttles every call, a suite read 32/34 passed beside a scorecard of 0 caught. Same resolver
+    as `_row_outcome`, so the two cannot disagree about what a throttle is. A row that records no
+    expectation proves nothing, so it does not pass either.
+    """
+    return bool(expected) and actual == expected and non_policy_rule_for(str(rule_id or "")) is None
+
+
+def pass_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """total / passed / failed / pass_rate over result rows, counted by `attack_passed`.
+
+    The one formula for a run's pass figures: the suite builds its report with it, and the read
+    routes re-derive them with it whenever the rows are still stored.
+    """
+    total = len(results)
+    passed = sum(1 for r in results if attack_passed(r.get("expected"), r.get("actual"), r.get("rule_id")))
+    return {
+        "total": total,
+        "passed": passed,
+        "failed": total - passed,
+        "pass_rate": round(passed / total * 100, 1) if total else 0,
+    }
+
+
+def with_outcomes(results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Copies of `results`, each annotated with its `row_outcome` and its current `passed`, to serve.
+
+    Computed on read and never persisted, so a run stored before this field existed gets it too, and
+    a stored row can never carry a verdict that disagrees with the current roll-up. `passed` is
+    re-derived for the same reason: a row written while it was `actual == expected` says a throttled
+    block passed, beside an `outcome` of got_through.
+    """
+    return [
+        {**r, "passed": attack_passed(r.get("expected"), r.get("actual"), r.get("rule_id")), "outcome": row_outcome(r)}
+        for r in results or []
+    ]
+
+
 def _finalize(bucket: dict[str, Any]) -> dict[str, Any]:
     total, caught = bucket["total"], bucket["caught"]
     bucket["proven_blocking_pct"] = round(caught / total * 100, 1) if total else 0.0
@@ -194,30 +269,34 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Caught-vs-got-through roll-up over the suite's result rows.
 
     - Synthetic / probe target identities are excluded (``is_synthetic_identity``).
-    - Only rows whose EXPECTED decision is ``block`` count toward the proven-blocking ratio. A ``caught`` row is
-      one that actually blocked (``passed``); a ``got_through`` row expected a block but did not get one.
+    - Only rows whose EXPECTED decision is ``block`` count toward the proven-blocking ratio. A ``caught`` row was
+      stopped by a policy (NOT ``passed``, which a throttle or a fault also satisfies); a ``got_through`` row
+      expected a block and no policy gave one. ``_row_outcome`` has the full rule.
     - Rows whose expected decision is not ``block`` (runtime/intent-only control cases) are tallied under
       ``non_enforcement`` and never counted as a miss.
+
+    Every bucket is a count of `row_outcome` over the rows — the same verdict each served row carries —
+    so a table filtered on a row's `outcome` cannot disagree with the number above it.
     """
-    considered = [r for r in results if not is_synthetic_identity(r.get("agent_class"))]
     overall = _blank_bucket()
     by_technique: dict[str, dict[str, Any]] = {}
     by_owasp: dict[str, dict[str, Any]] = {}
     by_vector: dict[str, dict[str, Any]] = {}
     non_enforcement = 0
     sector_not_enabled = 0  # sector-pack attacks whose pack isn't enabled — out of scope, NOT a miss
-    excluded_synthetic = len(results) - len(considered)
+    excluded_synthetic = 0
 
-    for r in considered:
-        if r.get("expected") != "block":
+    for r in results:
+        outcome = row_outcome(r)
+        if outcome == "synthetic":
+            excluded_synthetic += 1
+            continue
+        if outcome == "non_enforcement":
             non_enforcement += 1
             continue
-        # A sector attack whose enforcing rule isn't loaded (pack not enabled) is out of scope for THIS
-        # deployment — it must not deflate proven-blocking, exactly like an un-enabled coverage category.
-        if r.get("applicable") is False:
+        if outcome == "not_enabled":
             sector_not_enabled += 1
             continue
-        outcome = _row_outcome(r)
         overall["total"] += 1
         overall[outcome] += 1
 

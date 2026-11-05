@@ -475,13 +475,22 @@ class-tier policy matches.
    cross-namespace target, not the evaluation priority**: the controller then stores the policy at
    priority `1` (`baselineFallbackPriority`, `webhook/controller.go:998-1001`).
 
-That priority is the point. A namespace baseline is a **fallback, not a floor**. Base-tier candidates
-are resolved highest-priority-wins (`_resolve_precedence`, `norviq/engine/evaluator.py:2149-2158`), so
-a class policy at the default `100` outranks the baseline at `1` outright — including when the class
-policy allows and the baseline would have blocked. If you need something that can only ever tighten
-regardless of priority, you need an overlay, and no overlay is reachable from a CR — the CRD's
-`agentClass` pattern (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) forbids underscores. Which endpoint you use
-depends on which overlay:
+Through 0.2.5 that priority made a namespace baseline a **fallback**: base tiers resolve
+highest-priority-wins (`_resolve_precedence`), so a class policy at the default `100` outranked the
+baseline at `1` outright, including when the class policy allowed and the baseline would have blocked.
+From 0.2.6 the baselines are collected as **floors** (`_collect_candidates`): a baseline block applies
+whatever the class policy says, and a baseline allow never undoes a class policy's block. To relax one
+baseline control, set its effect with `PUT /api/v1/baseline/controls` (the console's Baseline controls).
+Once saved, the namespace's control effects replace the chart's `<ns>:__baseline__` for every agent
+class there, each control doing what the console shows (a control nobody changed does what the preset
+does) — provided the chart's baseline is the `strict` preset the console compiles and the saved module
+is exactly this release's compile of it (`covers()` in `norviq/api/baseline.py`, checked by
+`_apply_controls_supersede`; the API re-compiles saved controls at startup). The effect applies to every
+class in the namespace, because a class policy can no longer exempt itself. With another preset or its own rego, both stay floors and the stricter wins;
+`__cluster__:__baseline__` is never replaced. For
+anything else that must only tighten, you still need an overlay, and no overlay is reachable from a CR
+— the CRD's `agentClass` pattern (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) forbids underscores. Which endpoint
+you use depends on which overlay:
 
 | Overlay | How to author it |
 |---|---|
@@ -495,10 +504,10 @@ any pack is toggled and skips the override route's OPA validation and admin gate
 [Writing Policies §4](writing-policies.md).
 
 **One namespace has exactly one `__baseline__` scope, and on most installs the chart already occupies
-it.** With `baselineClusterPolicy.enabled: true` (the default, `helm/norviq/values.yaml:67-71`) the
+it.** With `baselineClusterPolicy.enabled: true` (the default, `baselineClusterPolicy` in `helm/norviq/values.yaml`) the
 chart renders one `baseline-cluster-guard-<ns>` CR per entry in `policyQuotaNamespaces`, each landing at
 `<ns>:__baseline__` with the `strict` preset. Check before you assume: `policyQuotaNamespaces` is `[]`
-by default (`values.yaml:17`), and the chart refuses to install with the baseline enabled and that list
+by default (`values.yaml`), and the chart refuses to install with the baseline enabled and that list
 empty rather than silently rendering zero baselines (`{{- fail }}`,
 `helm/norviq/templates/baseline-cluster-policy.yaml:1-10`) — so the scope is occupied for exactly the
 namespaces on that list, and not at all if the operator chose `baselineClusterPolicy.enabled: false`.
@@ -846,10 +855,10 @@ conditions worth knowing precisely (`_apply_policy_mode`, `norviq/engine/evaluat
 - Softened decisions keep their identity: `decision` becomes `audit` and `rule_id` is prefixed
   `policy_audit_would_block:` (`evaluator.py:63`, `756-759`). The call **proceeds** — `audit` counts as
   allowed at the PEP (`PolicyDecision.is_allowed`, `norviq/sdk/core/decisions.py:35-37`).
-- Two rule ids stay hard whatever the mode says: `trust_frozen` and, while `monitor_exempt_rate_limit`
-  is on (the default), `rate_limit_exceeded` (`_posture_exempt_rules`, `evaluator.py:395-402`). An admin
-  trust freeze is an incident-response kill switch and the rate limiter a resource control; engine-health
-  blocks soften like any other.
+- Three rule ids stay hard whatever the mode says: `trust_frozen`, `invalid_spiffe_identity` and, while
+  `monitor_exempt_rate_limit` is on (the default), `rate_limit_exceeded` (`_posture_exempt_rules` in
+  `evaluator.py`). An admin trust freeze is an incident-response kill switch, an invalid identity is one no
+  freeze could reach, and the rate limiter is a resource control; engine-health blocks soften like any other.
 
 ```yaml
 apiVersion: norviq.io/v1alpha1

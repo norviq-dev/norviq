@@ -175,3 +175,46 @@ def test_the_readme_says_how_to_get_the_other_posture() -> None:
     reads as 'this product does not lock anything down'."""
     text = _PYPI_README.read_text(encoding="utf-8")
     assert "noPolicyDecision" in text and "NRVQ_NO_POLICY_DECISION" in text
+
+
+@pytest.mark.parametrize("env_name, field", [
+    ("NRVQ_AUTH_REQUIRE_BOUND_AGENT_IDENTITY", "auth_require_bound_agent_identity"),
+    ("NRVQ_REQUIRE_STRONG_SECRET", "require_strong_secret"),
+    ("NRVQ_AUTH_LOGIN_ENABLED", "auth_login_enabled"),
+    ("NRVQ_LEGACY_HS256_ENABLED", "legacy_hs256_enabled"),
+])
+def test_a_boolean_that_defaults_true_in_code_cannot_fall_back_to_false_in_the_chart(env_name, field):
+    """sprig's `default` treats boolean false AND nil as empty, so `| default false` on a boolean is
+    only correct when the code also defaults False. Both of these default True — and an env var beats
+    a pydantic default, so any overlay that nulled the key (a values file listing `auth:` keys and
+    omitting this one) rendered "false" and switched the control OFF while config.py said it was on.
+    Rendered all three cases before fixing: true->"true", false->"false", null->"false".
+
+    Stock installs were safe because values.yaml pins true. Latent, not firing — but it is the house
+    defect exactly: a security control whose chart fallback silently disagrees with the code's."""
+    assert getattr(settings, field) is True, (
+        f"{field} no longer defaults True in norviq/config.py; this test's premise changed, re-read it"
+    )
+    text = (_ROOT / "helm/norviq/templates/configmap.yaml").read_text()
+    line = next(line for line in text.splitlines() if line.strip().startswith(env_name + ":"))
+    assert "| default false" not in line, (
+        f"{env_name} uses `| default false`, which turns a nulled key into \"false\" while the code "
+        f"default is True. Use the ternary form so nil falls back to the CODE default."
+    )
+    assert 'ternary "false" "true"' in line, f"{env_name} does not use the nil-safe boolean idiom: {line.strip()}"
+
+
+def test_no_template_defaults_a_value_to_true():
+    """`| default true` is never right on a boolean: sprig's `default` treats false as empty, so an explicit
+    false renders "true". It did exactly that for auth.enabled (an SSO-only install kept local password login)
+    and oidc.legacyHs256Enabled (HS256 tokens still accepted after the OIDC cutover), in both the spoke's and
+    the fleet hub's ConfigMaps. The nil-safe idiom is `ternary "false" "true" (eq (toString .Values.x) "false")`."""
+    offenders = [
+        f"{path.relative_to(_ROOT)}:{n}: {line.strip()}"
+        for path in sorted((_ROOT / "helm/norviq/templates").rglob("*"))
+        if path.is_file()
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        for expr in re.findall(r"\{\{.*?\}\}", line)
+        if re.search(r"\|\s*default\s+true\b", expr)
+    ]
+    assert not offenders, "\n  ".join(["`| default true` turns an explicit false into true:"] + offenders)

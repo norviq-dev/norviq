@@ -15,6 +15,8 @@ import {
   fetchRedteamTargets,
   runRedteamSuite,
   type RedteamLatest,
+  type RedteamOutcome,
+  type RedteamResult,
   type RedteamRunSummary
 } from "../api/client";
 import { DecisionBadge, type Decision } from "../components/common/DecisionBadge";
@@ -89,10 +91,19 @@ const RedTeam = () => {
 
   // Whenever the displayed run changes (new run, or detail was pruned server-side), snap back to page 0 so
   // the pager can never point past the end of a smaller/scoped result set.
-  useEffect(() => {
+  //
+  // DURING RENDER, not in an effect. An effect keyed on run_id runs only after the new run is already on
+  // screen, so a click on the got-through filter made in that gap was silently undone a moment later:
+  // the existing "'got-through only' filter" test lost its click 2 times in 32 with four vitest processes
+  // running, and the e2e spec clicks the same checkbox right after the run renders. Adjusting state while
+  // rendering (React's documented pattern for "reset when a key changes") commits the reset in the same
+  // render that shows the run, so there is no window left in which a click can be lost.
+  const [shownRunId, setShownRunId] = useState(latest?.run_id);
+  if (latest?.run_id !== shownRunId) {
+    setShownRunId(latest?.run_id);
     setPage(0);
     setFailedOnly(false);
-  }, [latest?.run_id]);
+  }
 
   const runSuite = async () => {
     if (inFlightRef.current) return; // Block a duplicate submit in the same tick → exactly one POST
@@ -415,22 +426,9 @@ const RedTeam = () => {
                         <td style={tdStyle} className="mono">{r.expected}</td>
                         <td style={tdStyle}><DecisionBadge decision={(r.actual as Decision) ?? "allow"} /></td>
                         <td style={{ ...tdStyle, whiteSpace: "nowrap" }}>
-                          {r.passed ? (
-                            <span style={{ color: ACCENT, display: "inline-flex", alignItems: "center", gap: 4 }}>
-                              <CheckCircle2 size={14} /> caught
-                            </span>
-                          ) : !gotThrough(r) ? (
-                            // A conditional attack whose enforcing rule isn't loaded — a sector pack, or
-                            // the opt-in MCP integration guardrail. Out of scope, not a real miss. Shares
-                            // `gotThrough` with the filter so the two cannot drift apart again.
-                            <span style={{ color: "var(--text-muted)", display: "inline-flex", alignItems: "center", gap: 4 }} title="This attack targets a sector pack or an opt-in guardrail that is not enabled for this namespace — not a policy gap.">
-                              — not enabled here
-                            </span>
-                          ) : (
-                            <span style={{ color: DANGER, display: "inline-flex", alignItems: "center", gap: 4 }} data-testid="redteam-row-failed">
-                              <XCircle size={14} /> got through
-                            </span>
-                          )}
+                          {/* Same `outcomeOf` as the filter, and the server counted the scorecard from
+                              the same verdict — the label, the filter and the number cannot drift. */}
+                          <OutcomeLabel outcome={outcomeOf(r)} />
                         </td>
                         <td style={tdStyle}>
                           <Link
@@ -497,20 +495,76 @@ const RedTeam = () => {
 };
 
 /**
- * ONE notion of "got through", used by the filter AND by the row badge.
+ * ONE verdict per row, used by the filter AND by the row label — and it is the SERVER's.
  *
- * These had drifted: the filter was `!passed`, while the badge renders "— pack not enabled" instead of
- * "got through" whenever `applicable === false`, and `compute_efficacy` skips those rows entirely
- * rather than counting them as misses. So "got-through only" listed rows that the very same table
- * labelled as not-a-miss, and the count disagreed with the scorecard above it.
+ * The page used to decide "got through" itself, as `!passed && applicable !== false`, while the
+ * scorecard above it counted `compute_efficacy`'s verdict. They disagreed in both directions. A
+ * throttled or faulted block had `passed` true (actual block == expected block; the server's
+ * `attack_passed` has since excluded it, and "Suite pass-rate" with it), so the table hid it
+ * while the scorecard counted it as got-through — a kind run had 17 `block / rate_limit_exceeded`
+ * red-team rows, and "Got through" read above zero over a filter that listed nothing. A monitored
+ * detection has `passed` false, so the table painted it red while the scorecard counted it as
+ * would-block. Throttling depends on timing, which is why the e2e spec checking the two flaked.
  *
- * An attack is a miss only if it expected a block, did not get one, AND its enforcing rule was
- * actually loaded. A sector pack or the opt-in MCP guardrail that nobody installed is a control that
- * was never there — not a policy gap, and listing it as one sends an operator hunting a hole that does
- * not exist. Surfaced by the MCP identity attacks, which are guardrail-conditional by design.
+ * The API now serves `outcome` on every row (computed on read, so stored runs have it too). The
+ * fallback is the old predicate, kept only for a row from an API that predates the field.
  */
-function gotThrough(r: { passed?: boolean; applicable?: boolean }): boolean {
-  return !r.passed && r.applicable !== false;
+function outcomeOf(r: Pick<RedteamResult, "outcome" | "passed" | "applicable">): RedteamOutcome {
+  if (r.outcome) return r.outcome;
+  if (r.passed) return "caught";
+  return r.applicable === false ? "not_enabled" : "got_through";
+}
+
+function gotThrough(r: Pick<RedteamResult, "outcome" | "passed" | "applicable">): boolean {
+  return outcomeOf(r) === "got_through";
+}
+
+const outcomeStyle: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 4 };
+const mutedOutcome: React.CSSProperties = { ...outcomeStyle, color: "var(--text-muted)" };
+
+function OutcomeLabel({ outcome }: { outcome: RedteamOutcome }) {
+  switch (outcome) {
+    case "caught":
+      return <span style={{ ...outcomeStyle, color: ACCENT }}><CheckCircle2 size={14} /> caught</span>;
+    case "got_through":
+      return (
+        <span style={{ ...outcomeStyle, color: DANGER }} data-testid="redteam-row-failed">
+          <XCircle size={14} /> got through
+        </span>
+      );
+    case "would_block":
+      // Neither a pass nor a miss: a control DETECTED it and let it proceed on purpose. Amber, and the
+      // same words as the breakdown's "Would block" column, so an operator reads one vocabulary.
+      return (
+        <span style={{ ...outcomeStyle, color: WARN }} data-testid="redteam-row-monitored" title="Detected by a control that is on Monitor — recorded, call proceeded">
+          <ShieldAlert size={14} /> detected — monitored
+        </span>
+      );
+    case "not_enabled":
+      // A conditional attack whose enforcing rule isn't loaded — a sector pack, or the opt-in MCP
+      // integration guardrail. Out of scope, not a real miss.
+      return (
+        <span style={mutedOutcome} title="This attack targets a sector pack or an opt-in guardrail that is not enabled for this namespace — not a policy gap.">
+          — not enabled here
+        </span>
+      );
+    case "non_enforcement":
+      return (
+        <span style={mutedOutcome} title="This attack does not expect a single call to be blocked — it is enforced at runtime (rate limiter, call-depth limit). Not counted as caught or got through.">
+          — runtime control, not scored
+        </span>
+      );
+    case "synthetic":
+      return (
+        <span style={mutedOutcome} title="Evaluated as a synthetic / probe identity. The scorecard measures real deployed classes, so this row is excluded from it.">
+          — synthetic identity, not scored
+        </span>
+      );
+    default:
+      // An outcome this console does not know yet (a newer API). Say what the server said rather than
+      // guess a colour for it.
+      return <span style={mutedOutcome}>{String(outcome)}</span>;
+  }
 }
 
 function Stat({ label, value, color, icon: Icon, testid }: { label: string; value: React.ReactNode; color?: string; icon?: typeof CheckCircle2; testid?: string }) {

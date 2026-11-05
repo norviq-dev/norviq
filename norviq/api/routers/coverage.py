@@ -27,8 +27,10 @@ from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
+from norviq.engine.policy_loader import stored_priority
 from norviq.api.routers.mitre import _activity_by_rule
 from norviq.api.synthetic import is_synthetic_identity
+from norviq.api.threat_intent import parse_allow_names
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -51,8 +53,6 @@ def _load_mapping() -> dict[str, list[str]]:
 
 
 _RESERVED_CLASS_RE = re.compile(r"^__.*__$")
-_ALLOW_NAMES_RE = re.compile(r'allow_names\s*:=\s*\{([^}]*)\}')
-_QUOTED_RE = re.compile(r'"([^"]+)"')
 # Marker emitted by the intent compiler's header (see its `_HEADER`), carrying the tool names that
 # intent's own predicates can admit, as JSON. Anchored to a comment line so it can never be confused
 # with rego syntax.
@@ -77,9 +77,15 @@ def _parse_agent_policy(agent_class: str, rego: str, priority: int, mode: str) -
     else:
         kind = "custom"
     allow_tools: list[str] = []
-    am = _ALLOW_NAMES_RE.search(rego or "")
-    if am:
-        allow_tools = sorted(set(_QUOTED_RE.findall(am.group(1))))
+    # False only for an `allow_names` written as an expression the parser cannot read: an empty
+    # `allow_tools` on an intent policy is rendered "denies every tool", which an unread hand-written
+    # comprehension does not support. `parse_allow_names` reads both empty forms exactly — `{}` from
+    # 0.2.5 and earlier, the typed comprehension since.
+    allow_tools_known = True
+    parsed_names = parse_allow_names(rego)
+    if parsed_names is not None:
+        allow_tools = list(parsed_names.names or ())
+        allow_tools_known = parsed_names.names is not None
     else:
         # An INTENT-compiled policy (norviq/engine/intent/compiler.py) has no `allow_names` set —
         # its scoping lives in per-rule predicates, and emitting a parallel set just to feed this
@@ -101,7 +107,8 @@ def _parse_agent_policy(agent_class: str, rego: str, priority: int, mode: str) -
     if lm:
         learned = [seg.strip() for seg in lm.group(1).split(",") if "=" in seg]
     return {
-        "cls": agent_class, "kind": kind, "allow_tools": allow_tools, "refinements": refinements,
+        "cls": agent_class, "kind": kind, "allow_tools": allow_tools, "allow_tools_known": allow_tools_known,
+        "refinements": refinements,
         "learned_verbs": learned, "priority": priority, "enforcement_mode": mode,
     }
 
@@ -178,7 +185,7 @@ async def _agent_class_policies(
     out = []
     for r in rows:
         summary = _parse_agent_policy(str(r["agent_class"]), str(r["rego_source"] or ""),
-                                      int(r["priority"] or 100), str(r["enforcement_mode"] or "block"))
+                                      stored_priority(r["priority"]), str(r["enforcement_mode"] or "block"))
         e = eff.get(str(r["agent_class"]), {})
         summary["observed"] = e.get("observed", 0)
         summary["blocked"] = e.get("blocked", 0)

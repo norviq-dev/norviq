@@ -30,6 +30,7 @@ import re
 from dataclasses import dataclass
 
 from norviq.engine.confusables import skeleton
+from norviq.engine.empty_literals import EMPTY_OBJECT, braces
 
 # --- tool-name verb classification (matches how the console + baseline reason about tools) -----------
 # A "read" tool's name starts with one of these verbs (search_kb, get_user, list_invoices, …).
@@ -212,13 +213,49 @@ def _rego_comment(value: str) -> str:
 
 
 def _rego_str_set(name: str, values: tuple[str, ...]) -> str:
-    items = ", ".join(_rego_string(v) for v in values)
-    return f"{name} := {{{items}}}"
+    return f"{name} := {braces([_rego_string(v) for v in values])}"
 
 
 def _rego_quoted_set(name: str, values: list[str]) -> str:
-    items = ", ".join(_rego_string(v) for v in values)
-    return f"{name} := {{{items}}}"
+    # No values is the common case for `cap_tools` (no tool observed yet) and `allow_names` (an
+    # allowlist that denies the class everything). A bare `{}` there is a compile error on OPA 1.21 —
+    # see norviq/engine/empty_literals.py.
+    return f"{name} := {braces([_rego_string(v) for v in values])}"
+
+
+_ALLOW_NAMES_RE = re.compile(r'allow_names\s*:=\s*\{([^}]*)\}')
+_QUOTED_RE = re.compile(r'"([^"]+)"')
+_TYPED_EMPTY_BODY = " ".join(EMPTY_OBJECT[1:-1].split())
+
+
+@dataclass(frozen=True)
+class AllowNames:
+    """What a policy's `allow_names := {...}` says. `names` is None when the set is written as an
+    expression this parser cannot evaluate — a hand-written comprehension such as
+    `{n | n := ["a"][_]}`. Its names are then UNKNOWN, which is not the same as none: for an intent
+    policy an empty allowlist means "denies every tool", and saying that about an unread expression
+    is a claim the console cannot back."""
+
+    names: tuple[str, ...] | None
+
+
+def parse_allow_names(rego: str) -> AllowNames | None:
+    """Read a policy's `allow_names := {...}` set; None when the policy has no such set.
+
+    Read by the console's coverage and threat-path views (`routers/coverage.py`, `routers/threats.py`)
+    from the STORED row, so every form a generator has written is live at once: a set literal, `{}` (an
+    empty allowlist up to 0.2.5) and the typed empty comprehension (norviq/engine/empty_literals.py,
+    since). Those three are read exactly. Anything else is an expression, reported as unknown names.
+    """
+    m = _ALLOW_NAMES_RE.search(rego or "")
+    if m is None:
+        return None
+    body = m.group(1).strip()
+    if not body or " ".join(body.split()) == _TYPED_EMPTY_BODY:
+        return AllowNames(())
+    if body.startswith('"'):
+        return AllowNames(tuple(sorted(set(_QUOTED_RE.findall(body)))))
+    return AllowNames(None)
 
 
 def generate_capability_rego(

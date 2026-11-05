@@ -95,7 +95,11 @@ describe("TargetSettings — governance only", () => {
     }));
     const { fireEvent } = await import("@testing-library/react");
     renderPage();
-    fireEvent.click(await screen.findByTestId("enforcement-mode-audit"));
+    // The toggle renders before /me resolves and stays disabled until the role is known; a click on a
+    // disabled button does nothing, so wait for the state a user would click in.
+    const toggle = await screen.findByTestId("enforcement-mode-audit");
+    await waitFor(() => expect(toggle).toBeEnabled());
+    fireEvent.click(toggle);
     await waitFor(() => expect(putBody).toEqual({ enforcement_mode: "audit" }));  // pre-fix: no such toggle
     expect(putUrl).toContain("namespace=default");                                // concrete ns, never all
   });

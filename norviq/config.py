@@ -289,6 +289,17 @@ class NorviqSettings(BaseSettings):
     # Upper bound on in-flight request-id bookkeeping per direction. A peer that opens requests and never
     # completes them would otherwise grow this map without limit; oldest entries are evicted.
     mcp_max_pending_requests: int = 4096
+    # How long the proxy waits for its OWN `tools/list` when a `tools/call` arrives and it has no
+    # scanned catalog for the server yet (a cold catalog: the proxy restarted and the client did not
+    # re-list). The answer is scanned and pinned on the ordinary Gate A path before the call is
+    # evaluated. On timeout or error the call is evaluated unscanned, as before, which the baseline
+    # escalates. Bounded because the client's call waits on it; 0 disables the self-list.
+    mcp_cold_list_timeout_s: float = 5.0
+    # Largest single message the HTTP proxy reads from the upstream on a client-facing path: a JSON
+    # body, a non-stream body on the streaming path, or one SSE frame still waiting for its blank
+    # line. The upstream is untrusted and these were read into memory unbounded. Over it, the response
+    # fails closed (NRVQ-MCP-5085). 8 MiB is the stdio driver's line bound.
+    mcp_http_max_message_bytes: int = 8 * 1024 * 1024
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     db_ssl_mode: str = Field(
         default="prefer",
@@ -388,6 +399,15 @@ class NorviqSettings(BaseSettings):
     log_format: str = "json"
     socket_path: str = "/tmp/norviq-proxy.sock"  # nosec B108 - Settings default; the sidecar's socket lives on a pod-private emptyDir, path overridable via NRVQ_SOCKET_PATH
     http_fallback_port: int = 8282
+    # Who may call the sidecar's HTTP fallback (POST /v1/evaluate) from OFF the pod. "deny" (default):
+    # loopback only — the pod-local app, which is the only caller an injected sidecar has (the primary
+    # transport is the unix socket anyway). "token": a remote caller must present a service JWT, verified
+    # and revocation-checked like /api/v1/evaluate, and is evaluated under the identity bound in it. The
+    # chart sets "token" on the standalone engine Deployment only, which holds the signing key; an
+    # injected sidecar does not, and must never try to verify with whatever key it falls back to.
+    # Before this the fallback had no caller check at all, and the engine Deployment served it on a
+    # ClusterIP Service, so any pod could submit evaluations under the ENGINE's identity.
+    sidecar_remote_callers: str = "deny"
     api_port: int = 8080
     # Reject over-large request bodies (defense against the base64 fan-out DoS amplifier and
     # generic memory abuse). 256 KiB is far above any legitimate tool-call payload. NRVQ_MAX_REQUEST_BODY_BYTES.

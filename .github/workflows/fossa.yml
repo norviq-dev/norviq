@@ -34,20 +34,27 @@ jobs:
       # flagged packages were absent from the runtime closure entirely).
       #
       # Generated here and never committed, so it cannot drift from the lock it derives from.
+      #
+      # `--extra spiffe` because that is what ships: Dockerfile.api and Dockerfile.engine install
+      # `.[spiffe]`. Without it the scan graded 60 packages where the images carry 64 (spiffe, pem,
+      # pyasn1, pyasn1-modules), and it graded protobuf 5.29.6 where the images get 7.35.1: spiffe
+      # needs protobuf>=6.31.1, so the lock resolves the extra in a fork of its own (pyproject.toml,
+      # [tool.uv] conflicts). tests/test_fossa_config.py holds this export to the Dockerfiles' extras.
       - name: Generate the shipped Python closure for FOSSA
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
-          uv export --frozen --no-dev --no-emit-project --no-hashes > requirements-runtime.txt
+          uv export --frozen --no-dev --extra spiffe --no-emit-project --no-hashes > requirements-runtime.txt
           echo "runtime closure: $(grep -cE '^[a-zA-Z0-9]' requirements-runtime.txt) packages"
 
           # ASSERT the narrowing is the intended one. A scope narrowed by accident looks exactly like
           # a scope narrowed on purpose, and a licence scan that quietly stopped looking is worse than
           # one that reports noise. These MUST be present — their absence means the export collapsed
           # and the scan would be grading almost nothing while still reporting green.
-          for must in fastapi pydantic sqlalchemy redis networkx grpcio; do
+          MUST="fastapi pydantic sqlalchemy redis networkx grpcio spiffe"
+          for must in $MUST; do
             grep -qiE "^${must}([=<>[;]|$)" requirements-runtime.txt \
-              || { echo "::error::runtime closure is missing ${must} — refusing to scan a set this small"; exit 1; }
+              || { echo "::error::runtime closure is missing ${must} — refusing to scan less than what ships"; exit 1; }
           done
           # And these must NOT be: they reach the graph only through optional framework extras.
           for never in scipy numpy pypdfium2 semantic-kernel chromadb pywin32; do
@@ -56,6 +63,13 @@ jobs:
           done
           echo "scope verified: includes what ships, excludes what does not"
 
+          # ASSERT fossa-cli will READ it. The summary check after the scan proves the setuptools
+          # project succeeded, not that one dependency was read: fossa-cli's requirements parser drops
+          # a line it cannot parse without a word, and a project of zero packages succeeds too. This
+          # reads every file setuptools discovers at the target path, each line in a form that parser
+          # is known to read, and needs the same packages in what it read.
+          python3 scripts/check_fossa_requirements.py . $MUST
+
       # Installs the fossa CLI and runs `fossa analyze` (upload only; we run `fossa test` ourselves below
       # so we can capture its JSON regardless of exit code). SHA-pinned (v1.7.0 tag dereferenced via
       # `gh api repos/fossas/fossa-action/git/ref/tags/v1.7.0` -> annotated tag object -> commit).
@@ -63,6 +77,20 @@ jobs:
         with:
           api-key: ${{ secrets.FOSSA_API_KEY }}
           run-tests: false
+      # ASSERT every graph .fossa.yml names was actually analysed. Its Python target said `type: pip`,
+      # which is not a fossa-cli project type, so from 2026-08-19 each summary read "2 projects scanned"
+      # (npm, gomod) and the gate below passed without grading a single Python package. Zero findings
+      # from a target that matched nothing looks exactly like a clean scan. fossa-cli writes the same
+      # summary it prints, ANSI-stripped, to this file (src/App/Fossa/Analyze/ScanSummary.hs), one
+      # `* <type> project in "<path>": succeeded` line per analysed project.
+      - name: Assert FOSSA analysed the Python, npm and Go graphs
+        run: |
+          s=/tmp/fossa-analyze-scan-summary.txt
+          for t in setuptools npm gomod; do
+            grep -qE "\* ${t} project in .*: succeeded" "$s" \
+              || { echo "::error::FOSSA analysed no ${t} project; the gate would grade a partial graph"; cat "$s"; exit 1; }
+          done
+          echo "analysed: setuptools (.[spiffe] closure), npm (ui), gomod (webhook)"
       - name: Dump FOSSA issues + attribution (JSON) for triage
         if: always()
         run: |
@@ -103,65 +131,7 @@ jobs:
       - name: FOSSA security gate (fail on dependency vuln/malware)
         if: always()
         run: |
-          python3 - <<'PY'
-          import json, sys
-          # Documented, accepted dependency exceptions, each UNFIXABLE by a version bump. Full rationale
-          # + review dates live in SECURITY.md ("Accepted dependency exceptions"). Keep this list in
-          # lockstep with that table: a CVE a bump CAN fix must be bumped (see werkzeug>=3.1.6 in
-          # pyproject), never listed here.
-          #
-          # The three PYTHON entries are additionally not in any shipped container image — the images
-          # install only `.[spiffe]`, and those deps arrive solely via norviq[frameworks] / [crewai] /
-          # [semantic-kernel], which a deployment must opt into. The react-router entry is NOT of that
-          # kind: it ships in the console bundle. It is accepted because the vulnerable code path does
-          # not exist in this application, which is a weaker claim, so SECURITY.md schedules it for a
-          # real fix rather than treating it as permanent.
-          # Advisory ids we knowingly carry. CVE ids AND GHSA ids: the react-router entry below has no
-          # CVE assigned, so a CVE-only allow-list structurally could not express it — which is how a
-          # vulnerability documented as accepted in SECURITY.md kept failing this gate anyway.
-          ACCEPTED_CVES = {
-              "CVE-2024-6825",   # litellm (via crewai[litellm]): NOT closable by a bump — 1.96.1 is the
-                                 #   newest release and ships NO wheel for this project's Python floor
-                                 #   (>=3.11), so `uv lock` refuses it outright and pins 1.96.0. Same
-                                 #   reachability class as the three below: it arrives only through the
-                                 #   OPTIONAL `norviq[crewai]` extra and is in NO shipped image
-                                 #   (Dockerfile.api / Dockerfile.engine install `.[spiffe]` only).
-                                 #   Re-check when litellm publishes a cp311 wheel above 1.96.1.
-              "CVE-2026-45829",  # chromadb (via crewai): Python-SERVER pre-auth RCE; no fixed release exists
-                                 #   (latest still affected); crewai uses chromadb as an embedded client, not
-                                 #   an exposed server, so the pre-auth server path is not reachable here.
-              "CVE-2026-26030",  # semantic-kernel: InMemoryVectorStore filter-lambda RCE; the fix (1.39.4+)
-                                 #   requires a PRE-RELEASE azure-ai-agents dep, and the vulnerable vector-store
-                                 #   path is not used by the norviq semantic-kernel adapter.
-              "CVE-2026-25592",  # semantic-kernel: a .NET CVE (fix = .NET Core 1.71.0) that FOSSA maps onto
-                                 #   the pip package; no Python semantic-kernel release clears it.
-              # react-router/react-router-dom (console UI, SHIPPED in Dockerfile.ui — unlike the three
-              #   above, which live only in optional extras). RSC-mode CSRF bypass. Fixed only in 8.3.0,
-              #   which needs React >=19.2.7 and Node >=22.22.0 and drops react-router-dom entirely, so
-              #   it is a React 18->19 migration rather than a bump. The console never enters RSC mode:
-              #   plain BrowserRouter + createRoot, static bundle behind nginx, no server runtime.
-              #   Identified by GHSA because NO CVE IS ASSIGNED — which is exactly why the matcher below
-              #   had to stop being CVE-only.
-              "GHSA-qwww-vcr4-c8h2",
-          }
-          d = json.load(open("fossa-issues.json"))
-          sec = [i for i in d.get("issues", []) if i.get("type") in ("vulnerability", "malware")]
-          def accepted_cve(i):
-              # Substring match over the whole issue blob so either identifier form matches wherever
-              # FOSSA happens to put it (cve field, title, or the advisory URL).
-              blob = json.dumps(i)
-              return next((c for c in ACCEPTED_CVES if c in blob), None)
-          accepted = [i for i in sec if accepted_cve(i)]
-          gated    = [i for i in sec if not accepted_cve(i)]
-          if accepted:
-              print(f"NOTE: {len(accepted)} accepted dependency exception(s) (documented in SECURITY.md):")
-              for i in accepted:
-                  print(f"  - {accepted_cve(i)}: {i.get('revisionId','')}")
-          if gated:
-              print(f"FOSSA security gate FAILED — {len(gated)} dependency vuln/malware issue(s):")
-              for i in gated:
-                  print(f"  - {i.get('type')}: {i.get('revisionId','')} {i.get('cve') or ''}")
-              sys.exit(1)
-          print(f"FOSSA security gate PASSED — 0 non-excepted dependency vuln/malware issues "
-                f"({len(accepted)} documented exception(s); license/outdated are informational).")
-          PY
+          # --shipped: FOSSA re-resolves transitive pip dependencies server-side and can grade versions
+          # the images never install. A pip vulnerability fails only if its exact version is in the
+          # closure generated above; others are listed, not gated. Missing/unreadable file fails closed.
+          python3 scripts/check_fossa_issues.py fossa-issues.json --shipped requirements-runtime.txt

@@ -11,12 +11,15 @@ Three ready-made overlays ship alongside the defaults:
   on for both datastores, which requires you to supply `postgresql.password`/`redis.password`
   explicitly — an HA cluster manages its own credential material (see [deployment.md](deployment.md)).
 - `helm/norviq/values-dev.yaml` — fixed dev secrets (`api.secretKey`, DB/Redis passwords),
-  `logLevel: DEBUG`, and `enforcementMode: audit` so a fresh dev install logs decisions instead of
-  enforcing them.
+  `logLevel: DEBUG`, and `config.enforcementMode: audit`. That last one does **not** stop the namespace
+  baseline enforcing (see `config.enforcementMode` below); add
+  `--set baselineClusterPolicy.enforcementMode=audit` for a dev install that only records. It does make
+  the console's Target Settings show every namespace without its own setting as Monitor, which is the
+  global value, not what the engine applies there.
 - `helm/norviq/values-light.yaml` — smallest viable single-node footprint (one replica of everything,
   PDBs/HPAs/HA/SPIFFE off). Enforcement behaviour is unchanged; only replicas and resources shrink.
 
-Apply an overlay with `helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq -f values-prod.yaml`
+Apply an overlay with `helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 -n norviq -f values-prod.yaml`
 (or `--set` individual keys, which always wins over a `-f` file for the same key).
 
 ## Install-blocking guards (read this first)
@@ -48,7 +51,7 @@ With `enabled: false` the chart **refuses to render** unless you give it an addr
 silently emitted the bundled service name and the API dialled a Service that did not exist.
 
 ```
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq --create-namespace \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 -n norviq --create-namespace \
   --set postgresql.enabled=false --set postgresql.host=mydb.postgres.database.azure.com \
   --set redis.enabled=false      --set redis.host=mycache.redis.cache.windows.net \
   --set postgresql.password=... --set redis.password=...
@@ -63,10 +66,20 @@ credential ever passes through values or the chart's own Secret:
 kubectl -n norviq create secret generic my-pg \
   --from-literal=url='postgresql://user:PW@mydb.example.com:5432/norviq'
 
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 -n norviq \
   --set postgresql.enabled=false --set postgresql.existingSecret=my-pg \
   --set redis.enabled=false      --set redis.existingSecret=my-redis
 ```
+
+Add `--set postgresql.host=mydb.example.com --set redis.host=mycache.example.com` (the hosts in those
+URLs) if api and engine should wait for the datastores before they start. The chart cannot read the
+address out of your Secret, so with `existingSecret` alone it renders **no** wait init containers: api
+and engine start at once and rely on their own startup retry, which is short (5 attempts over about
+15 s per store) and ends in a container restart, so a datastore that is not reachable yet shows as
+`CrashLoopBackOff` until it is.
+`host` only adds the wait: the URL still comes from the Secret. A `host` that disagrees with the
+Secret's URL makes the wait watch the wrong address. See
+[deployment.md, "Dependency waits"](deployment.md#what-the-chart-actually-renders).
 
 `existingSecretKey` defaults to `url`. Keep `config.dbSslMode` at its derived `require` (any external/HA host) for a managed
 database; the bundled Postgres has no TLS listener, which is why a local install overrides it.
@@ -114,9 +127,10 @@ quota list — three other things key off it, which is why it is effectively man
 | Key | Default | What it does |
 |---|---|---|
 | `policyQuotaNamespaces` | `[]` | For each listed namespace: renders a `ResourceQuota` capping `count/nrvqpolicies.norviq.io` at 100, **and** one baseline `NrvqPolicy`, **and** (when `agentEgressPolicy.namespaces` is empty) the egress lockdown target set. Each namespace must already exist — a `ResourceQuota` is namespaced. |
-| `baselineClusterPolicy.enabled` | `true` | Renders the cluster baseline guard, one `NrvqPolicy` per namespace above, in `audit` mode (`baselineClusterPolicy.enforcementMode`; set `block` to enforce). With `policyQuotaNamespaces` empty this **fails the render** rather than shipping zero baselines. |
+| `baselineClusterPolicy.enabled` | `true` | Renders the cluster baseline guard, one `NrvqPolicy` per namespace above. With `policyQuotaNamespaces` empty this **fails the render** rather than shipping zero baselines. |
+| `baselineClusterPolicy.enforcementMode` | `block` | From 0.2.6 the baseline **enforces**: the `strict` preset as written, so 20 of its 21 controls act on a matching call (17 refuse it, `llm06_excessive_agency` refuses destructive tools and holds elevated ones, two MCP controls hold it for approval) and `scope_violation_dangerous_tool` records it and lets it through. `audit` records what it would refuse and lets every call proceed, the 0.2.5 posture, in every namespace whose Baseline controls nobody has saved (saved controls replace the chart's baseline and run in `block`). This is the install-wide way off; per namespace it is Monitor (`PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}`), per control the console's Baseline controls panel (`PUT /api/v1/baseline/controls`). See [Concepts → Turning the shipped baseline off](concepts.md#turning-the-shipped-baseline-off). |
 | `baselineClusterPolicy.name` | `baseline-cluster-guard` | Name prefix; the rendered object is `<name>-<namespace>`. |
-| `baselineClusterPolicy.clusterPriority` | `900` | Priority of the baseline relative to tenant-authored policy. |
+| `baselineClusterPolicy.clusterPriority` | `900` | Authorizes the baseline's cross-namespace target (the CRD admits `500`-`1000`). It is not an evaluation priority: the controller stores the baseline at priority `1`, and as a floor the baseline tightens whatever the priorities say. |
 | `baselineClusterPolicy.preset` | `strict` | Preset rego bundled with the webhook (`strict` / `moderate` / `permissive` — see `webhook/presets/`). |
 
 ## Agent egress lockdown (`agentEgressPolicy.*`)
@@ -164,7 +178,7 @@ two StatefulSets sit in an admission-rejection loop with nothing pointing at the
 Use datastores you manage — the same thing `values-prod.yaml` already does:
 
 ```bash
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.6 -n norviq \
   --set openshift.enabled=true \
   --set postgresql.enabled=false --set postgresql.host=<host> \
   --set redis.enabled=false      --set redis.host=<host>
@@ -204,8 +218,10 @@ waits) run the full profile including `readOnlyRootFilesystem` and `runAsUser: 6
 | `images.engine/api/ui/webhook.repository` | `norviq-engine` | Same image, different tags per component (see below) — one multi-stage build produces all four. |
 | `images.*.tag` | `engine-latest` / `api-latest` / `ui-latest` / `webhook-latest` | Per-component tag within the shared `norviq-engine` repository. |
 | `images.*.pullPolicy` | `Always` | `values-prod.yaml` sets `IfNotPresent` for all four — appropriate once you're pinning immutable tags. |
-| `images.redis.repository`/`tag` | `redis` / `7-alpine` | Bundled Redis image. |
+| `images.redis.repository`/`tag` | `valkey/valkey` / `8.1-alpine` | Bundled single-instance Redis-protocol store (Valkey, BSD-3-Clause; `redis://` clients unchanged). Not the HA failover's image: that is `redis.ha.image` (same Valkey ref by default). |
 | `images.postgresql.repository`/`tag` | `postgres` / `16-alpine` | Bundled Postgres image. |
+| `global.imageRegistry` | `""` | Mirror host prepended to every third-party image (opa, valkey, postgres, the CNPG operand, the TLS-proxy nginx, the wait-for busybox, the `helm test` curl). Norviq's own images use `images.registry`. |
+| `global.thirdPartyImageDigests` | one entry per third-party image | The multi-arch index digest each third-party image renders with (`repo:tag@sha256:…`), keyed by the upstream ref. Keyed by ref so a digest only ever pins the tag it was resolved for: override a tag or `opa.image` and that image renders on your tag alone. The digest survives `global.imageRegistry`, so mirror with a digest-preserving copy (`crane copy`, `skopeo copy --all`, a pull-through cache); for a mirror that re-pushed the images (`docker pull` + `push`), set it to `null`. |
 | `imagePullSecrets` | `[]` | See Production checklist above. |
 | `gracefulShutdown.preStopSleepSeconds` | `15` | `preStop` sleep on api/engine/webhook so the Service deregisters the endpoint before `SIGTERM`, draining in-flight requests during a rolling upgrade. `0` disables the hook.  The chart moved to 15 on measurement: at 3 a rolling restart refused 1 and 31 benign calls across two runs, at 15 it refused 0, 0 and 2 across three (`values.yaml` lines 160-161). |
 
@@ -256,7 +272,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `webhook.injection.sidecarMode` | `proxy` | `proxy` — the injected sidecar POSTs each tool call to the central `norviq-api` `/evaluate` with a namespace-scoped service JWT (DB/OPA stay centralized, nothing per-pod). `embedded` — the sidecar runs its own `RedisCache` + OPA (subprocess) + `PolicyLoader` for air-gapped/edge deployments (the chart then wires `NRVQ_REDIS_URL`/`NRVQ_PG_URL` through to the injector). |
 | `webhook.injection.failurePolicy` | `Fail` | Admission posture for the injector. `Fail` is **fail-closed**: if the injector is unavailable, creation of a pod the webhook *routes* is rejected, so a routed pod can never start un-guarded. Read that together with `gateOnlyAgentPods` below: under the default, only pods carrying `norviq.io/agent-class` are routed at all, so `Fail` says nothing about an unlabelled pod — that pod is never sent to the injector and starts ungoverned regardless of this setting. Set `Ignore` (fail-open) only on a dev/eval cluster. The control-plane/kube-system namespaces are excluded from the selector, so this can't self-deadlock. **Note:** `webhook.pdb` is OFF by default — on a multi-node cluster enable it, or a single drain can evict both replicas. `webhook.spread` is on by default and is a soft (`ScheduleAnyway`) constraint, so single-node installs still schedule. |
 | `webhook.injection.gateOnlyAgentPods` | `true` | Gate admission on the pod's own `norviq.io/agent-class` label instead of the whole namespace. Without it, `norviq-injection=enabled` routes **every** pod created in that namespace through the injector — databases, ingress controllers, batch jobs — so with `failurePolicy: Fail` a Norviq outage blocks pod creation for workloads Norviq doesn't even govern. The rule is CREATE-only, so running pods are never touched. **Upgrade care:** agent pods relying on namespace-wide injection *without* an agent-class label stop being injected on their next restart, silently — the pod starts fine, it is simply ungoverned. Nothing in the console detects this today (an earlier version of this row claimed it did; it does not). After an upgrade, diff `kubectl get pods -n <ns> -L norviq.io/agent-class` against the pods you expect to be governed. |
-| `webhook.injection.fallbackMode` | `allow` | **Data-plane** posture — what a governed agent does when the engine is unreachable (distinct from `failurePolicy`, which is the *admission* posture). Ships `allow`: the agent keeps working through an engine outage, and every unjudged call is attributed to the named `engine_unavailable_fallback` rule so it can be counted and alerted on. Set `block` to refuse instead. Note this applies only to a genuinely unreachable engine — a 4xx is the engine *answering*, and always blocks regardless of this setting. This row previously said the default was `block`, which overstated the shipped posture. |
+| `webhook.injection.fallbackMode` | `allow` | **Data-plane** posture — what a governed agent does when the engine is unreachable (distinct from `failurePolicy`, which is the *admission* posture). Ships `allow`: the agent keeps working through an engine outage. The injected sidecar returns each unjudged call with `rule_id=thin_proxy_fail_open` and logs it as `NRVQ-SDC-3036`, so it can be counted and alerted on from the sidecar logs; it does not reach the audit log, because the API that writes the audit log is what is unreachable. (The injected MCP proxy goes through the SDK client instead, which names the same outcome `engine_unavailable_fallback`, `NRVQ-SDK-1013`.) Set `block` to refuse instead (`thin_proxy_fail_closed`, `NRVQ-SDC-3031`). Note this applies only to a genuinely unreachable engine — a 4xx is the engine *answering*, and always blocks regardless of this setting. This row previously said the default was `block`, which overstated the shipped posture. |
 | `webhook.injection.allowPodOptOut` | `true` | Honour the per-pod opt-out (`norviq-injection=disabled` label / `norviq.io/skip-injection` annotation). Set `false` so a pod author can't self-exempt a **routed** pod. It is not namespace-uniform under the default `gateOnlyAgentPods: true`: a pod that omits `norviq.io/agent-class` is never routed, so this setting never applies to it. Closing self-exemption means RBAC on the agent-class label as well as on the opt-out label/annotation. |
 | `images.bootstrap` | `norviq-engine:bootstrap-*` | First-party image for the cert-bootstrap hook Jobs, carrying `openssl` and `curl` — deliberately **not** `kubectl`. Replaces the previous `alpine/k8s`, which shipped kubectl but not openssl and so had to `apk add` at runtime — that needed root, and root is rejected outright by OpenShift's `restricted-v2` SCC. The hooks only GET/PATCH a `MutatingWebhookConfiguration` and apply a Secret, so `curl` with the pod's service-account token does the job without vendoring a Go binary whose CVEs would fail our own image scan. Baking `openssl` in also means the hooks need no network at install time, so they work air-gapped. |
 | `webhook.replicas` | `2` | Webhook server pod count. |
@@ -274,12 +290,12 @@ both Postgres and Redis, which is exactly the embedded shape.
 |---|---|---|
 | `redis.enabled` | `true` | Deploys the bundled single-replica Redis StatefulSet. |
 | `redis.replicas` | `1` | Single instance. |
-| `redis.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a Spotahome `RedisFailover` (`databases.spotahome.com/v1`, Sentinel) instead of the single StatefulSet — requires that operator pre-installed. Swap `templates/redis-ha.yaml` + `redis.ha.serviceName` for a different Redis HA stack. `redis.ha.replicas` (`3`), `redis.ha.serviceName` (`norviq-redis-ha`). |
+| `redis.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a Spotahome `RedisFailover` (`databases.spotahome.com/v1`, Sentinel) instead of the single StatefulSet — requires that operator pre-installed. Swap `templates/redis-ha.yaml` + `redis.ha.serviceName` for a different Redis HA stack. `redis.ha.replicas` (`3`), `redis.ha.serviceName` (`norviq-redis-ha`), `redis.ha.image` (`valkey/valkey:8.1-alpine`, BSD-3-Clause, digest-pinned: the image of the failover's redis **and** sentinel pods; the key keeps its `redis` name). The failover is named `norviq-valkey-ha`. 0.2.5's was `norviq-redis-ha` on Redis 7.4, whose RDB-12 data Valkey 8.1 cannot load, so 0.2.6 creates a new failover on new volumes rather than rolling Valkey into the old one; see the 0.2.6 upgrade notes in the CHANGELOG. |
 | `redis.resources` | `100m/128Mi` req, `300m/256Mi` limit | Per-pod CPU/memory. |
 | `redis.port` | `6379` | |
-| `redis.enabled` / `redis.host` / `redis.existingSecret` | `true` / `""` / `""` | `false` = bring your own cache; then `host` (or `existingSecret`, holding the full URL under `existingSecretKey`, default `url`) is required. |
+| `redis.enabled` / `redis.host` / `redis.existingSecret` | `true` / `""` / `""` | `false` = bring your own cache; then `host` (or `existingSecret`, holding the full URL under `existingSecretKey`, default `url`) is required. With `existingSecret`, `host` (plus `port`) is optional and only renders the `wait-for-redis` init container on api/engine; without it they start at once, and a datastore that is not reachable yet shows as container restarts. It must match the host in the Secret's URL. |
 | `redis.password` | `""` (generated) | Empty = the chart generates a strong password on first install and reuses it on upgrade (see "Datastore credentials are generated, not shipped"). Set a value to bring your own; required when `redis.ha.enabled`. |
-| `redis.storage` | `1Gi` | PVC size. |
+| `redis.storage` | `1Gi` | Size of the store's PersistentVolumeClaim (`norviq-redis-pvc`; under HA, one per RedisFailover pod, `norviq-valkey-ha-data-rfr-norviq-valkey-ha-<n>`). The store is persistent: the single instance keeps its data in the `valkey/` subdirectory, and the volume root holds whatever 0.2.5's Redis 7.4 wrote, left in place for `helm rollback`. |
 
 ## PostgreSQL (`postgresql.*`)
 
@@ -290,7 +306,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `postgresql.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a CloudNativePG `Cluster` (3 instances) instead of the single StatefulSet, and points the API's PG URL at its service — requires the CloudNativePG operator pre-installed. `postgresql.ha.instances` (`3`), `postgresql.ha.serviceName` (`norviq-postgresql-ha-rw`). |
 | `postgresql.resources` | `200m/256Mi` req, `500m/512Mi` limit | Per-pod CPU/memory. |
 | `postgresql.port` | `5432` | |
-| `postgresql.enabled` / `postgresql.host` / `postgresql.existingSecret` | `true` / `""` / `""` | `false` = bring your own database (the usual production shape); then `host` (or `existingSecret`, holding the full URL) is required. |
+| `postgresql.enabled` / `postgresql.host` / `postgresql.existingSecret` | `true` / `""` / `""` | `false` = bring your own database (the usual production shape); then `host` (or `existingSecret`, holding the full URL) is required. With `existingSecret`, `host` (plus `port`) is optional and only renders the `wait-for-postgres` init container on api/engine; without it they start at once, and a datastore that is not reachable yet shows as container restarts. It must match the host in the Secret's URL. |
 | `postgresql.database`/`username`/`password` | `norviq` / `norviq` / `""` (generated) | Empty password = the chart generates a strong one on first install and reuses it on upgrade. Set a value to bring your own; required when `postgresql.ha.enabled`. |
 | `postgresql.storage` | `5Gi` | PVC size. |
 
@@ -299,7 +315,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | Key | Default | What it does |
 |---|---|---|
 | `opa.enabled` | `true` | Deploys OPA as a long-lived sidecar in every api/engine pod instead of forking `opa eval` per call. Each replica gets its own OPA — no shared single point of failure. The sidecar is started with `--addr=127.0.0.1:<opa.port>`: OPA's admin API is unauthenticated **read-write**, so it must never be reachable from another pod. It therefore carries **no kubelet probes** (a kubelet probe dials the pod IP, which can't reach a loopback bind, and the `-static` image is distroless so an exec probe isn't an option either) — OPA health reaches readiness through the app's own `/readyz`. |
-| `opa.image` | `openpolicyagent/opa:1.19.1-static` | Pinned (not `latest-static`) so the running OPA version matches the one `scripts/gen-opa-capabilities.py` generated `helm/norviq/files/opa-capabilities.json` from; a drifted OPA could have a different builtin set than what `norviq/engine/opa_client.py::_check_capabilities` validates against. |
+| `opa.image` | `openpolicyagent/opa:1.21.4-static` | Pinned (not `latest-static`) so the running OPA version matches the one `scripts/gen-opa-capabilities.py` generated `helm/norviq/files/opa-capabilities.json` from; a drifted OPA could have a different builtin set than what `norviq/engine/opa_client.py::_check_capabilities` validates against. |
 | `opa.port` | `8181` | |
 | `opa.resources` | `50m/64Mi` req, `250m/128Mi` limit | Per-sidecar CPU/memory. |
 
@@ -314,9 +330,9 @@ a non-chart deployment makes the app spawn its own managed `opa run --server`, b
 | Key | Default | What it does |
 |---|---|---|
 | `config.internalTls.enabled` | `true` | Zero-touch internal TLS/mTLS for control-plane traffic. A Helm hook mints an internal CA and the API serving cert, the API pod runs an nginx TLS terminator sidecar on `:8443` (the app itself stays plain HTTP on loopback, so probes are unaffected), and the injector gives each sidecar a CA-signed client cert for mTLS. No operator certs or CSRs. Set `false` only for a plaintext dev cluster. |
-| `config.internalTls.proxyImage` | `nginx:1.27-alpine` | Image for that TLS terminator sidecar. |
+| `config.internalTls.proxyImage` | `nginx:1.30-alpine` | Image for that TLS terminator sidecar. |
 | `config.logLevel` | `INFO` | |
-| `config.enforcementMode` | `block` | Global default enforcement mode (individual `NrvqPolicy` objects can override per-target). |
+| `config.enforcementMode` | `block` | Engine-wide default (`NRVQ_ENFORCEMENT_MODE`). Under `block` it lets `config.noPolicyDecision: deny` refuse a call no policy covers (under `audit` that call is allowed), and it is what `GET /api/v1/settings` reports as the mode of a namespace with none of its own (Target Settings then reads Monitor for `audit`). A module that returns no decision is allowed under either value. It does **not** soften a block that a policy or the namespace baseline returns, so it is not a way to turn the baseline off — that is `baselineClusterPolicy.enforcementMode`, namespace Monitor, or the controls panel. |
 | `config.noPolicyDecision` | `allow` | What happens to a call in a namespace with **no matching policy**. Ships `allow` — a namespace nobody has written a policy for does not block, and the call is recorded against the named `default_allow` rule so it stays countable. Set `deny` for fail-closed, which takes effect only in `block` enforcement mode. This row previously said the default was `deny`, which overstated the shipped posture. |
 | `config.opaMode` | `server` | `server` — evaluate via HTTP against the per-pod OPA sidecar (`opa.*` above). `subprocess` — per-call `opa eval` fork (rollback path). |
 | `config.requireStrongSecret` | `true` | See Production checklist. |
@@ -331,7 +347,7 @@ a non-chart deployment makes the app spawn its own managed `opa run --server`, b
 | `config.retention.auditRetentionDays` | `30` | Audit-log rows older than this are pruned. The console's Audit Log views read at most the last 30 days; raise to 90–365 for compliance evidence windows (export audit-evidence packs for long-term archival). `0` = keep forever. |
 | `config.retention.coverageSnapshotRetentionDays` | `30` | Compliance coverage trend snapshots + export events older than this are pruned. `0` = keep forever. |
 | `config.retention.graphSnapshotKeepPerNamespace` | `10` | Keep only the newest N asset-graph snapshots per namespace (readers only load the newest; caps growth under traffic). `0` = keep all. |
-| `config.retention.agentRegistryRetentionDays` | `90` | Agent-registry entries are removed N days after `last_seen` (`0` = never). Admins can remove one immediately via `DELETE /api/v1/agents/{spiffe_id}`. |
+| `config.retention.agentRegistryRetentionDays` | `90` | Agent-registry entries are removed N days after `last_seen` (`0` = never). Admins can remove one immediately via `DELETE /api/v1/agents/{spiffe_id}`. A frozen or capped agent is never aged out, and `DELETE` refuses it with `409` until the freeze or cap is lifted. |
 | `config.retention.apiKeyDefaultTtlDays` | `90` | Default expiry for **newly created** API keys — per-key override at creation (incl. never). Pre-existing keys never expire; revoked keys are kept (soft revoke). `0` = new keys never expire. |
 | `config.retention.draftTtlDays` | `14` | Real policy-intent drafts auto-expire after N days (expired drafts are also swept hourly in the background). |
 | `config.retention.draftTtlTestHours` | `24` | Test/e2e (synthetic-class) drafts expire faster. |

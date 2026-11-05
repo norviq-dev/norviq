@@ -16,8 +16,6 @@ func TestIsAllowedSidecarImage(t *testing.T) {
 	allowed := []string{
 		// what a RELEASE injects — the case that was broken
 		"ghcr.io/norviq-dev/norviq-engine" + digest,
-		"norviq/norviq-engine" + digest,
-		"docker.io/norviq/norviq-engine" + digest,
 		// what a checkout injects
 		"ghcr.io/norviq-dev/norviq-engine:engine-latest",
 		"ghcr.io/norviq-dev/norviq-engine:engine-0.1.6",
@@ -52,6 +50,42 @@ func TestIsAllowedSidecarImage(t *testing.T) {
 	for _, img := range denied {
 		if isAllowedSidecarImage(img) {
 			t.Errorf("must deny %q", img)
+		}
+	}
+}
+
+// `norviq/norviq-engine` and `docker.io/norviq/norviq-engine` are Docker Hub's `norviq` namespace,
+// which the project does not own. They were in the production allowlist unconditionally; this test
+// used to list them as allowed. They are what the local kind rig builds, so they are allowed only with
+// the explicit local-images flag, and never otherwise.
+func TestLocalImageNamesNeedTheFlag(t *testing.T) {
+	const digest = "@sha256:305f35742c675a455416ca01086b8174f5999ecf3704ed26591b8dc157a3d381"
+	local := []string{
+		"norviq/norviq-engine:engine-latest",
+		"norviq/norviq-engine" + digest,
+		"docker.io/norviq/norviq-engine:engine-latest",
+		"docker.io/norviq/norviq-engine" + digest,
+	}
+	prev := allowLocalSidecarImages
+	t.Cleanup(func() { allowLocalSidecarImages = prev })
+
+	allowLocalSidecarImages = false
+	for _, img := range local {
+		if isAllowedSidecarImage(img) {
+			t.Errorf("without the flag, must deny %q", img)
+		}
+	}
+	allowLocalSidecarImages = true
+	for _, img := range local {
+		if !isAllowedSidecarImage(img) {
+			t.Errorf("with the flag, must allow %q", img)
+		}
+	}
+	// The flag widens to exactly these names, not to Docker Hub in general.
+	for _, img := range []string{"docker.io/attacker/norviq-engine:engine-latest", "norviq/other:latest",
+		"norviq/norviq-engine-evil:engine-latest"} {
+		if isAllowedSidecarImage(img) {
+			t.Errorf("even with the flag, must deny %q", img)
 		}
 	}
 }

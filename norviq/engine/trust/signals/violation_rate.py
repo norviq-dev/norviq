@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from norviq.engine.trust.models import TrustInput
-from norviq.engine.trust.signals.base import BaseSignal
+from norviq.engine.trust.signals.base import BaseSignal, collapse_repeated_refusals
 
 
 class ViolationRateSignal(BaseSignal):
@@ -17,6 +17,7 @@ class ViolationRateSignal(BaseSignal):
     async def compute(self, input_data: TrustInput, history: list[dict[str, Any]], profile: dict[str, Any]) -> float:
         """Return trust score from violation-rate buckets."""
         _ = input_data, profile
+        history = collapse_repeated_refusals(history)
         if not history:
             return 1.0
         blocked = sum(1 for entry in history if entry.get("decision") == "block")

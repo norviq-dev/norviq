@@ -85,38 +85,108 @@ def _kept(result, key: str) -> list:
 
 # ── a budget that is decremented but never consulted is not a budget ────────────────────────────
 
-async def test_bare_string_listing_entries_spend_the_shared_budget():
+def _count_bare_string_scans(monkeypatch, cpu: list[float] | None = None) -> list[int]:
+    """The characters each bare-string scan consumed, recorded around the real scanner — and, when
+    `cpu` is given, the CPU seconds each of those scanner calls took."""
+    import norviq.mcp.firewall as firewall_module
+
+    scanned: list[int] = []
+    real_scan = firewall_module.scan_untrusted_content
+
+    def counting_scan(*args, **kwargs):
+        t0 = time.process_time()
+        report = real_scan(*args, **kwargs)
+        if cpu is not None:
+            cpu.append(time.process_time() - t0)
+        scanned.append(report.scanned_chars)
+        return report
+
+    monkeypatch.setattr(firewall_module, "scan_untrusted_content", counting_scan)
+    return scanned
+
+
+async def test_bare_string_listing_entries_spend_the_shared_budget(monkeypatch):
     """The branch added so a bare string could not be forwarded unexamined scanned every entry at
     `_MAX_ITEM_TEXT`, subtracting from the shared budget without ever testing it. 500 entries of
     16 KiB cost 2088 ms through this gate — the same denial of service the budget exists to stop,
-    on a surface where the server picks the entry count."""
-    fw, result, elapsed = await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
-    assert elapsed < 0.400, f"one listing cost {elapsed * 1000:.0f} ms of scan"
+    on a surface where the server picks the entry count.
+
+    Asserted on what the scan READ, like the tools/list test below and for the same reason: this was
+    a wall-clock `< 0.400` and failed at 529 ms on a host at load ~12 (a kind cluster, a browser suite
+    and two test runs beside it) while the code was correct. The time check stays as a coarse guard in
+    CPU time, at a bound the unbudgeted branch overshoots twofold."""
+    scanned = _count_bare_string_scans(monkeypatch)
+    t0 = time.process_time()
+    fw, result, _ = await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
+    cpu = time.process_time() - t0
+    assert len(scanned) == 500, "every bare string must still go through the scanner"
+    assert sum(scanned) <= _LIST_SCAN_BUDGET, (
+        f"one listing scanned {sum(scanned)} chars against a shared budget of {_LIST_SCAN_BUDGET}")
+    assert cpu < 1.0, f"one listing cost {cpu * 1000:.0f} ms of CPU"
     # Withheld either way — the scan is for the operator's log, so stopping it costs no enforcement.
     assert _kept(result, "prompts") == []
 
 
-async def test_the_bare_string_branch_cannot_be_scaled_past_the_budget():
-    """Four times the payload must not be four times the work."""
-    _, _, small = await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
-    _, _, large = await _listing("prompts/list", "prompts", ["A" * 16380] * 2000)
-    assert large < small * 2 + 0.100, f"{small * 1000:.0f} ms -> {large * 1000:.0f} ms is linear"
+async def test_the_bare_string_branch_cannot_be_scaled_past_the_budget(monkeypatch):
+    """Four times the payload must not be four times the work: it must be the same characters.
+
+    The CPU guard is taken INSIDE the scanner calls, not around the whole delivery. Around the whole
+    delivery it failed a gate run at "230 ms -> 590 ms" while the scan read 524288 characters both
+    times: the rest of a delivery is legitimately linear in the entry count — this test's own
+    `json.dumps` and decode of an 8 vs 32 MiB message, the gate's re-parse, one withheld marker and
+    one finding per entry. Measured idle, 500 -> 2000 entries: scanner 216 -> 220 ms, the rest
+    ~55 -> ~260 ms; 20 replays of the whole-delivery check failed 1 (ratio up to 3.09), the scanner
+    ratio stayed <= 1.64 idle and under load. The budget is a promise about the scan, so the scan is
+    what is timed; with the budget removed the scanner's CPU grows fourfold with the entries."""
+    scan_cpu: list[float] = []
+    scanned = _count_bare_string_scans(monkeypatch, scan_cpu)
+    await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
+    small_cpu, small = sum(scan_cpu), sum(scanned)
+    scanned.clear()
+    scan_cpu.clear()
+    await _listing("prompts/list", "prompts", ["A" * 16380] * 2000)
+    large_cpu, large = sum(scan_cpu), sum(scanned)
+    assert large == small, f"{small} chars scanned for 500 entries, {large} for 2000"
+    assert large_cpu < small_cpu * 2 + 0.050, (
+        f"the bare-string scans cost {small_cpu * 1000:.0f} ms of CPU for 500 entries and "
+        f"{large_cpu * 1000:.0f} ms for 2000: linear")
 
 
 # ── a per-item budget on a surface whose item COUNT the server picks ────────────────────────────
 
-async def test_tools_list_shares_one_budget_across_every_tool():
+async def test_tools_list_shares_one_budget_across_every_tool(monkeypatch):
     """`tools/list` gave each tool its own `_MAX_TOTAL_SCAN_CHARS`, so 500 tools x 16 KiB cost
     1703 ms — 1534 ms of it inside `scan_tool_definition`. It is the ORIGINAL Gate A surface and it
-    is re-driven by every `notifications/tools/list_changed` the server chooses to send."""
+    is re-driven by every `notifications/tools/list_changed` the server chooses to send.
+
+    The bound is asserted on what the scan READ, not only on how long it took. This used to be a single
+    `perf_counter() < 0.500`, and with the shared budget in place one listing costs ~410 ms of CPU on a
+    fast host (measured: wall 407-440 ms, CPU 406-438 ms) — under 20% headroom, so a loaded runner
+    failed it (534 ms) while the code was correct. The characters every scan consumed are exact and say
+    precisely what the fix guarantees; the time check stays as a coarse guard, in CPU time so a busy
+    host's scheduling is not charged to the code, at a bound the per-tool budget overshoots fourfold."""
+    import norviq.mcp.firewall as firewall_module
+
+    scanned: list[int] = []
+    real_scan = firewall_module.scan_tool_definition
+
+    def counting_scan(*args, **kwargs):
+        report = real_scan(*args, **kwargs)
+        scanned.append(report.scanned_chars)
+        return report
+
+    monkeypatch.setattr(firewall_module, "scan_tool_definition", counting_scan)
     fw = _firewall()
     await fw.on_client_message(_msg({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))
     tools = [{"name": f"t{i}", "description": "A" * 16380} for i in range(500)]
     message = _msg({"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}})
-    t0 = time.perf_counter()
+    t0 = time.process_time()
     await fw.on_server_message(message)
-    elapsed = time.perf_counter() - t0
-    assert elapsed < 0.500, f"one tools/list cost {elapsed * 1000:.0f} ms of scan"
+    cpu = time.process_time() - t0
+    assert len(scanned) == 500, "every tool must still go through the scanner"
+    assert sum(scanned) <= _LIST_SCAN_BUDGET, (
+        f"one tools/list scanned {sum(scanned)} chars against a shared budget of {_LIST_SCAN_BUDGET}")
+    assert cpu < 1.0, f"one tools/list cost {cpu * 1000:.0f} ms of CPU"
 
 
 def test_a_tool_whose_prose_outran_the_budget_is_not_reported_as_scanned():
@@ -159,7 +229,9 @@ async def test_a_payload_past_the_walk_slice_is_still_found():
 
 def test_a_structure_the_walk_could_not_finish_is_reported():
     """Past the widened bound the answer is "I did not look", said out loud — not silence."""
-    args = [{"name": f"a{i}", "description": "fine"} for i in range(600)]
+    # Sized from the bound (it was 512 when this test was written, now `_MAX_WALK_MEMBERS`).
+    from norviq.mcp.scanner import _MAX_WALK_MEMBERS
+    args = [{"name": f"a{i}", "description": "fine"} for i in range(_MAX_WALK_MEMBERS + 88)]
     args.append({"name": "evil", "description": POISON})
     report = scan_catalog_item({"name": "p", "description": "Ok.", "arguments": args}, "prompts")
     assert report.budget_exhausted is True
@@ -169,21 +241,25 @@ def test_a_structure_the_walk_could_not_finish_is_reported():
 def test_an_object_with_more_members_than_the_walk_bound_is_reported():
     """Objects were never bounded at all: a dict of half a million members was half a million
     recursive calls building half a million path strings."""
-    report = scan_catalog_item({"name": "p", "extras": {f"k{i}": "v" for i in range(600)}}, "prompts")
+    from norviq.mcp.scanner import _MAX_WALK_MEMBERS
+    report = scan_catalog_item({"name": "p", "extras": {f"k{i}": "v" for i in range(_MAX_WALK_MEMBERS + 88)}},
+                               "prompts")
     assert "mcp_a_scan_truncated" in {f.rule for f in report.findings}
 
 
 def test_a_long_enum_does_not_cost_a_tool_its_description():
-    """The counter-test for the grade. A tool definition's walk bound cuts off `enum` values the
-    scan predicate discards anyway, so grading that at the sanitise threshold would replace the
-    description of any tool that lists 600 timezones. Reported at `low`; the CHARACTER budget, which
-    means prose went unread, stays medium."""
+    """REWRITTEN. This asserted that a 600-value enum is reported as a `low` truncation, on the
+    argument that a walk bound in a tool schema only cuts off enum values. That argument was false
+    (a bound cuts off whatever follows it, prose included), so a truncated tool definition is now
+    withheld — and the bounds were raised so that a real schema, a 600-zone enum among them, is not
+    truncated at all. The property this test protects is unchanged: a long enum costs the tool
+    nothing."""
     tool = {"name": "tz", "description": "Converts a timestamp.", "inputSchema": {
         "type": "object", "properties": {"zone": {"type": "string",
                                                   "enum": [f"Zone/{i}" for i in range(600)]}}}}
     report = scan_tool_definition(tool)
-    assert report.severity == "low", [f.rule for f in report.findings]
-    assert "mcp_a_scan_budget_exhausted" not in {f.rule for f in report.findings}
+    assert report.severity == "none", [f.rule for f in report.findings]
+    assert not report.budget_exhausted
 
 
 # ── an entry the bound stopped short of is not an entry that scanned clean ──────────────────────
@@ -198,21 +274,88 @@ async def test_a_padded_first_entry_cannot_walk_a_payload_through_the_second():
         {"uri": "file:///evil", "name": "evil", "description": POISON},
     ])
     assert _kept(result, "resources") == [], "an unscanned catalogue entry must not be forwarded"
+    # UPDATED (round 14): a definition over its own budget is withheld WITHOUT spending the listing's
+    # budget, so entry 1 is now actually scanned — found poisoned and withheld under its uri — rather
+    # than withheld unread. The property is unchanged: nothing unscanned or poisoned is forwarded.
     assert _norviq(result)["withheld"] == [
         "<resources entry at index 0, identifier withheld>",
-        "<resources entry at index 1, identifier withheld>",
+        "file:///evil",
     ]
 
 
-async def test_a_realistic_large_catalogue_is_not_withheld():
+def _ordinary_catalogue(entries: int) -> list[dict]:
+    """Ordinary files: a uri, a name and a three-sentence description, ~180 characters of JSON each."""
+    return [{"uri": f"file:///docs/{i}.md", "name": f"doc{i}",
+             "description": "Quarterly figures for one department. " * 3} for i in range(entries)]
+
+
+def _count_catalogue_scans(monkeypatch) -> list:
+    """The report of every catalogue-entry scan the gate ran, recorded around the real scanner."""
+    import norviq.mcp.firewall as firewall_module
+
+    reports: list = []
+    real_scan = firewall_module.scan_catalog_item
+
+    def counting_scan(*args, **kwargs):
+        report = real_scan(*args, **kwargs)
+        reports.append(report)
+        return report
+
+    monkeypatch.setattr(firewall_module, "scan_catalog_item", counting_scan)
+    return reports
+
+
+async def test_a_realistic_large_catalogue_is_not_withheld(monkeypatch):
     """The counter-test for the bound's SIZE. Withholding is the fail-closed action, which makes an
     under-sized budget an outage rather than a saving: 1200 ordinary files are 220 KB of uri, name
-    and description, and the previous 64 KiB budget would have cut the catalogue off partway."""
-    items = [{"uri": f"file:///docs/{i}.md", "name": f"doc{i}",
-              "description": "Quarterly figures for one department. " * 3} for i in range(1200)]
-    fw, result, elapsed = await _listing("resources/list", "resources", items)
+    and description, and the previous 64 KiB budget would have cut the catalogue off partway.
+
+    Asserted on the units the scan SPENT, like the tools/list and bare-string tests above. This was a
+    wall-clock `elapsed < 0.300` and failed about half the runs on a 4-vCPU 2.1 GHz host where the
+    listing costs ~290 ms of CPU (CPU == wall: real work, not scheduling) while the code was correct:
+    the ~165 ms the MCP guide quotes was measured on a faster host. Whether the listing fits is decided
+    by the cost units alone, which are exact on every host. The time check stays as a coarse guard
+    against the denial of service the budget exists for (1.7-2.1 s for one listing before it), at a
+    bound well above any host this suite runs on."""
+    reports = _count_catalogue_scans(monkeypatch)
+    fw, result, elapsed = await _listing("resources/list", "resources", _ordinary_catalogue(1200))
     assert result.forward is not None and result.note == "", "an ordinary catalogue pays nothing"
-    assert elapsed < 0.300
+    assert len(_kept(result, "resources")) == 1200
+    assert len(reports) == 1200, "every entry must still go through the scanner"
+    unread = [i for i, report in enumerate(reports) if report.budget_exhausted]
+    spent = sum(report.scanned_chars for report in reports)
+    assert not unread and spent < _LIST_SCAN_BUDGET, (
+        f"1200 ordinary entries cost {spent} units against a listing budget of {_LIST_SCAN_BUDGET}; "
+        f"{len(unread)} entries did not fit")
+    assert elapsed < 1.0, f"one ordinary listing took {elapsed * 1000:.0f} ms"
+
+
+async def test_the_documented_catalogue_ceiling_holds():
+    """Pins the ceiling the MCP guide states (section 3.1): on the shipped budget an ordinary listing
+    page of 1235 such entries is forwarded whole, and past it the tail is WITHHELD, never forwarded
+    unscanned, and logged as `NRVQ-MCP-5067` with `mcp_a_scan_budget_exhausted`. A change to the
+    budget or to the scanner's cost per entry moves the ceiling, and must move the documentation with
+    it: this test is what makes that change visible."""
+    from structlog.testing import capture_logs
+
+    _, result, _ = await _listing("resources/list", "resources", _ordinary_catalogue(1235))
+    assert result.note == "", "an ordinary catalogue at the documented ceiling pays nothing"
+    assert len(_kept(result, "resources")) == 1235
+
+    items = _ordinary_catalogue(1300)
+    with capture_logs() as logs:
+        _, result, _ = await _listing("resources/list", "resources", items)
+    assert _kept(result, "resources") == items[:1235]
+    meta = _norviq(result)
+    assert meta["withheld_total"] == 65
+    assert {f["rule"] for f in meta["findings"]} == {"mcp_a_scan_budget_exhausted"}
+    # The operator's log names the withheld entries by uri (the client's annotation names them by
+    # position), both capped at `_MAX_LIST_ANNOTATIONS` with the total kept.
+    from norviq.mcp.firewall import _MAX_LIST_ANNOTATIONS
+    flagged = [e for e in logs if e.get("code") == "NRVQ-MCP-5067"]
+    assert len(flagged) == 1 and flagged[0]["withheld_total"] == 65
+    assert flagged[0]["withheld"] == [f"file:///docs/{i}.md" for i in range(1235, 1300)][:_MAX_LIST_ANNOTATIONS]
+    assert set(flagged[0]["findings"]) == {"mcp_a_scan_budget_exhausted"}
 
 
 # ── the charset rule is scoped by how the entry is ADDRESSED ────────────────────────────────────

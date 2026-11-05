@@ -91,7 +91,7 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/component: redis
-              redisfailovers.databases.spotahome.com/name: norviq-redis-ha
+              redisfailovers.databases.spotahome.com/name: {{ include "norviq.redisFailoverName" $root }}
         {{- else if $root.Values.redis.enabled }}
         - namespaceSelector:
             matchLabels:

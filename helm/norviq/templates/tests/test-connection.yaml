@@ -34,7 +34,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: curl
-      image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.tests.image | default "curlimages/curl:8.10.1")) | quote }}
+      image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.tests.image | default "curlimages/curl:8.23.0")) | quote }}
       command: ["/bin/sh", "-c"]
       args:
         - |

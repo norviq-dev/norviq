@@ -134,3 +134,43 @@ def get_attacks_by_category(category: AttackCategory) -> list[AttackDefinition]:
 def get_attack_by_id(attack_id: str) -> AttackDefinition | None:
     """Return single attack by identifier."""
     return next((attack for attack in ATTACKS if attack.id == attack_id), None)
+
+
+def attack_request(attack: AttackDefinition, target_agent: str, target_namespace: str) -> dict[str, Any]:
+    """The tool call one attack makes as a target identity, in the shape both runners send it.
+
+    The console's suite validates it into its ToolCallEvent (norviq/api/routers/redteam.py::_build_event)
+    and `norviq redteam run` posts it to /api/v1/evaluate (norviq/redteam/simulator.py::_request_payload).
+    There used to be two builders, and the CLI's had drifted: it sent no `call_depth` and no `mcp`, so
+    CE-001 reached the engine at depth 0 and was allowed through the CLI while the console's run of the
+    same attack was blocked by chain_depth_limit, and MCP-01..03 arrived with no forged Gate-A context,
+    so the attack those three exist to make was never made from the CLI. A plain dict rather than a
+    ToolCallEvent, so this module stays importable without the SDK models.
+
+    Each class gets its own SVID so it picks up its own trust history.
+    """
+    depth = attack.tool_params.get("depth")
+    return {
+        "tool_name": attack.tool_name,
+        "tool_params": dict(attack.tool_params),
+        "agent_identity": {
+            "spiffe_id": f"spiffe://norviq/ns/{target_namespace}/sa/{target_agent}",
+            "namespace": target_namespace,
+            "agent_class": target_agent,
+        },
+        # EXPLICIT, not inherited. `framework == "redteam"` is what excludes these fabricated attacks
+        # from real-traffic counts (`audit_row_is_non_real`); untagged, synthetic attack volume would
+        # inflate the operator's live metrics. EvaluateRequest used to default it to "redteam", which also
+        # silently tagged REAL operator traffic posted over raw HTTP; that default is gone, so the suite
+        # declares itself.
+        "framework": "redteam",
+        "session_id": f"redteam-{attack.id}",
+        # A chained-call `depth` param threaded into the event's call_depth, so chain-depth rules can
+        # fire (the engine reads input.call_depth, not the tool param).
+        "call_depth": int(depth) if isinstance(depth, (int, str)) and str(depth).isdigit() else 0,
+        # Gate-A context, published to rego as `input.mcp`. Empty for every non-MCP attack, which is the
+        # same document a plain SDK call presents. COPIED: `ATTACKS` is a module constant built once at
+        # import, and handing the same dict to every event in every run makes any future mutation an
+        # untraceable cross-run bug.
+        "mcp": dict(getattr(attack, "mcp_context", None) or {}),
+    }
