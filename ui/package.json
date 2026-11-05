@@ -50,7 +50,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-security": "^4.0.1",
     "jsdom": "^25.0.1",
-    "msw": "^2.6.8",
+    "msw": "^3.0.3",
     "shadcn": "^4.8.3",
     "tailwindcss": "^4.1.8",
     "typescript": "^5.8.3",
