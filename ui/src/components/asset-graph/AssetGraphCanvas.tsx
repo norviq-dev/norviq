@@ -620,7 +620,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
       .attr("stroke", (d) => nsColor(d.ns)).attr("stroke-opacity", 0.3).attr("stroke-dasharray", "5,5").attr("stroke-width", 1.2);
     w.hullLabel = topG.selectAll<SVGTextElement, ViewGroup>("text").data(groups).join("text")
       .attr("fill", (d) => nsColor(d.ns)).attr("font-size", 12.5).attr("font-weight", 600)
-      .attr("font-family", "'Outfit',sans-serif").attr("text-anchor", "middle").attr("opacity", 0.9)
+      .style("font-family", "var(--font-sans)").attr("text-anchor", "middle").attr("opacity", 0.9)
       // Soft shadow instead of a thick outline (the 4.5px halo read as heavy/blurry).
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
       .style("text-rendering", "geometricPrecision");
@@ -662,7 +662,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
     nodeSel.append("circle").attr("class", "hring").attr("fill", "none").style("display", "none");
     nodeSel.append("circle").attr("class", "core");
     nodeSel.append("text").attr("class", "lbl").attr("text-anchor", "middle").attr("font-size", 11.5).attr("font-weight", 400)
-      .attr("font-family", "'Outfit',sans-serif")
+      .style("font-family", "var(--font-sans)")
       // NO stroke halo — a paint-order outline (even 2px) thickens the glyphs so 400-weight text reads as
       // bold. A soft drop-shadow keeps it legible over edges without adding weight.
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
@@ -675,7 +675,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
     // thing distinguishing a Cyrillic impostor from the real tool, so it must not be the smallest,
     // blurriest text on the canvas. Any new label added here must clear 9px AFTER the fit scale.
     nodeSel.append("text").attr("class", "lklbl").attr("text-anchor", "middle").attr("font-size", 11.5)
-      .attr("font-weight", 600).attr("font-family", "'Outfit',sans-serif").attr("fill", LOOKALIKE_COLOR)
+      .attr("font-weight", 600).style("font-family", "var(--font-sans)").attr("fill", LOOKALIKE_COLOR)
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
       .style("text-rendering", "geometricPrecision").style("pointer-events", "none");
     w.node = nodeSel;

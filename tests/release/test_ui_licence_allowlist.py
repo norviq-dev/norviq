@@ -11,18 +11,33 @@ geometry library under the Unlicense; neither license is on the allowlist and no
 This reads ui/package-lock.json, the tree `npm ci` installs in Dockerfile.ui, and checks every package
 that is not dev-only (dev-only packages build the bundle and are not shipped in it). A package with no
 recorded license fails: an unknown license is not an allowed one.
+
+Font files committed into the UI source tree are checked too: Vite copies ui/public into the bundle
+verbatim and imported assets are emitted alongside it, so a font file anywhere under ui/ ships in the
+image without appearing in the lockfile. The Outfit typeface (OFL-1.1) shipped that way. A font file
+fails unless _FONT_LICENSES lists it with an allowlisted license.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
 import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
-_LOCK = _ROOT / "ui" / "package-lock.json"
+_UI = _ROOT / "ui"
+_LOCK = _UI / "package-lock.json"
+
+_FONT_SUFFIXES = frozenset({".ttf", ".otf", ".ttc", ".woff", ".woff2", ".eot", ".pfb", ".pfa"})
+# Directories under ui/ that are not committed sources: installed packages (covered by the lockfile
+# check above) and build output generated from the sources.
+_NOT_SOURCES = frozenset({"node_modules", "dist", "coverage"})
+# Font files the UI may ship, by path relative to ui/, with the SPDX license each is under. Empty: the
+# console uses the platform's own font stacks. An entry needs a license _satisfiable() accepts.
+_FONT_LICENSES: dict[str, str] = {}
 
 # Apache-2.0 plus "Approved Licenses for Allowlist" in cncf/foundation
 # policies-guidance/allowed-third-party-license-policy.md (fetched 2026-11-04). Extend it only when that
@@ -123,6 +138,41 @@ def test_shipped_ui_packages_are_on_the_cncf_allowlist() -> None:
         if not _satisfiable(str(meta.get("license") or ""))
     )
     assert not offenders, "UI runtime packages outside the CNCF license allowlist:\n" + "\n".join(offenders)
+
+
+def _font_offenders(root: Path, licenses: dict[str, str]) -> list[str]:
+    offenders = []
+    fonts = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        if Path(dirpath) == root:
+            dirnames[:] = [d for d in dirnames if d not in _NOT_SOURCES]
+        fonts.extend(Path(dirpath) / f for f in filenames if Path(f).suffix.lower() in _FONT_SUFFIXES)
+    for path in sorted(fonts):
+        key = path.relative_to(root).as_posix()
+        license_ = licenses.get(key, "")
+        if not _satisfiable(license_):
+            offenders.append(f"{key}: {license_ or 'not listed in _FONT_LICENSES'}")
+    return offenders
+
+
+def test_ui_ships_no_font_file_outside_the_cncf_allowlist() -> None:
+    offenders = _font_offenders(_UI, _FONT_LICENSES)
+    assert not offenders, "font files under ui/ without an allowlisted license:\n" + "\n".join(offenders)
+
+
+def test_font_check_flags_unlisted_and_disallowed_fonts(tmp_path: Path) -> None:
+    (tmp_path / "public" / "fonts").mkdir(parents=True)
+    (tmp_path / "public" / "fonts" / "Outfit-Regular.ttf").write_bytes(b"\x00\x01\x00\x00")
+    (tmp_path / "src" / "assets").mkdir(parents=True)
+    (tmp_path / "src" / "assets" / "Mono.WOFF2").write_bytes(b"wOF2")
+    (tmp_path / "public" / "Listed.otf").write_bytes(b"OTTO")
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "font.ttf").write_bytes(b"\x00\x01\x00\x00")
+    licenses = {"public/fonts/Outfit-Regular.ttf": "OFL-1.1", "public/Listed.otf": "MIT"}
+    assert _font_offenders(tmp_path, licenses) == [
+        "public/fonts/Outfit-Regular.ttf: OFL-1.1",
+        "src/assets/Mono.WOFF2: not listed in _FONT_LICENSES",
+    ]
 
 
 @pytest.mark.parametrize(

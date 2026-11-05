@@ -75,7 +75,9 @@ Pills use a hard-coded `border-radius: 4px`.
 
 ## 4. Typography
 
-- **Sans: Outfit**, self-hosted TTF, 9 weights (100–900) at `ui/public/fonts/`. Not an npm dep.
+- **Sans: the platform's sans-serif face** (`--font-sans`: `system-ui, -apple-system, "Segoe UI", Roboto,
+  "Helvetica Neue", Arial, "Noto Sans", sans-serif`). No sans web font is bundled. Inline styles, SVG text
+  and echarts tooltips use `var(--font-sans)`; never name a font family directly.
 - **Mono: the platform's monospace face** (`--font-mono`: `ui-monospace, SFMono-Regular, "SF Mono", Menlo,
   Consolas, "Liberation Mono", monospace`). No mono web font is bundled. Stick to weights 400 and 500.
 

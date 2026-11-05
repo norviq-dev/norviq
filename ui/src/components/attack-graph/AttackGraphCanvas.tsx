@@ -402,7 +402,7 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     satG.append("circle").attr("r", (d) => (d.sensitive ? 6 : 4))
       .attr("fill", (d) => (d.sensitive ? "#FF3B5C" : "#20141a"))
       .attr("stroke", (d) => (d.sensitive ? "#ffb3c0" : "#6f4a52")).attr("stroke-width", (d) => (d.sensitive ? 1.6 : 1.2));
-    satG.append("text").attr("font-family", "'Outfit', sans-serif").attr("font-size", (d) => (d.sensitive ? 11 : 10))
+    satG.append("text").style("font-family", "var(--font-sans)").attr("font-size", (d) => (d.sensitive ? 11 : 10))
       .attr("font-weight", (d) => (d.sensitive ? 700 : 500)).attr("fill", (d) => (d.sensitive ? "#ffb3c0" : "#8a7a80")).attr("dy", "0.34em")
       .attr("text-anchor", (d) => (d.x < tgt.x - 4 ? "end" : "start"))
       .attr("dx", (d) => (d.x < tgt.x - 4 ? -11 : 11))
@@ -413,7 +413,7 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     // names — the same attacker-controlled text as the chain nodes. Marking only the chain left the
     // fan as an unmarked place to hide a homoglyph of the crown jewel the operator is scanning for.
     satG.filter((d) => !!d.lookalikeText).append("text")
-      .attr("class", "satlk").attr("font-family", "'Outfit', sans-serif").attr("font-size", 9).attr("font-weight", 650)
+      .attr("class", "satlk").style("font-family", "var(--font-sans)").attr("font-size", 9).attr("font-weight", 650)
       .attr("fill", "#ffcf82").attr("dy", "1.55em")
       .attr("text-anchor", (d) => (d.x < tgt.x - 4 ? "end" : "start"))
       .attr("dx", (d) => (d.x < tgt.x - 4 ? -11 : 11))
@@ -452,7 +452,7 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     // The edge count label ("N allowed" / "N denied" / mixed) renders REGULAR weight with NO stroke halo —
     // the previous 700 weight + dark outline read as a heavy bordered badge. Just the colored text, matching the
     // node-label treatment. (Applies to every attack-graph edge label; the asset graph has no such label.)
-    bEnter.append("text").attr("text-anchor", "middle").attr("dy", "0.34em").attr("font-size", 10.5).attr("font-weight", 450).attr("font-family", "'Outfit', sans-serif")
+    bEnter.append("text").attr("text-anchor", "middle").attr("dy", "0.34em").attr("font-size", 10.5).attr("font-weight", 450).style("font-family", "var(--font-sans)")
       .style("text-rendering", "geometricPrecision")
       .attr("fill", (d) => cColor(d)).text((d) => cText(d));
     w.badgeSel = bEnter;
@@ -470,13 +470,13 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     nEnter.append("g").attr("class", "ico").each(function (d) { drawIcon(d3.select(this) as d3.Selection<SVGGElement, unknown, null, undefined>, d.kind, d.role === "target" ? "#ff8296" : NODE_COLORS[d.kind]); });
     // Horizontal chain: labels BELOW the node (clear of the arrows). NORMAL weight (~450) so they read as
     // labels, not headings. NO stroke halo — a drop-shadow keeps them crisp over edges (asset-graph fix).
-    nEnter.append("text").attr("class", "lbl").attr("text-anchor", "middle").attr("font-family", "'Outfit', sans-serif").attr("font-weight", 450).attr("font-size", 12.5).attr("fill", "#e8edf5")
+    nEnter.append("text").attr("class", "lbl").attr("text-anchor", "middle").style("font-family", "var(--font-sans)").attr("font-weight", 450).attr("font-size", 12.5).attr("fill", "#e8edf5")
       .attr("x", 0).attr("y", (d) => rOf(d) + 17)
       .style("text-rendering", "geometricPrecision").style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
       .text((d) => d.id);
     // Role caption: only a DATA terminal is a "crown jewel" — a path can terminate at a TOOL (no data
     // reach observed yet), and calling that tool a sensitive crown jewel misstates what was proven.
-    nEnter.append("text").attr("class", "role").attr("text-anchor", "middle").attr("font-family", "'Outfit', sans-serif").attr("font-size", 10).attr("fill", (d) => (d.role === "target" ? "#ff8fa3" : "#a0a0a0"))
+    nEnter.append("text").attr("class", "role").attr("text-anchor", "middle").style("font-family", "var(--font-sans)").attr("font-size", 10).attr("fill", (d) => (d.role === "target" ? "#ff8fa3" : "#a0a0a0"))
       .attr("x", 0).attr("y", (d) => rOf(d) + 31)
       .style("text-rendering", "geometricPrecision")
       // The SOURCE caption reads its kind like every other node, instead of asserting "agent".
@@ -493,7 +493,7 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     // Classification-lifecycle line under TOOL nodes: what the tool DOES (verb, risk-coloured; "· learned"
     // when admin-promoted) or its observation state — the observe → infer → promote loop, on the canvas.
     nEnter.filter((d) => !!d.opText).append("text").attr("class", "oplbl").attr("text-anchor", "middle")
-      .attr("font-family", "'Outfit', sans-serif").attr("font-size", 9.5).attr("font-weight", 650)
+      .style("font-family", "var(--font-sans)").attr("font-size", 9.5).attr("font-weight", 650)
       .attr("fill", (d) => d.opColor ?? "#a0a0a0")
       .attr("x", 0).attr("y", (d) => rOf(d) + 44)
       .style("text-rendering", "geometricPrecision")
@@ -503,7 +503,7 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     // does, then "the name is not what it looks like". Without this the kill-chain drew a homoglyph
     // twin identically to the tool it impersonates.
     nEnter.filter((d) => !!d.lookalikeText).append("text").attr("class", "lklbl").attr("text-anchor", "middle")
-      .attr("font-family", "'Outfit', sans-serif").attr("font-size", 9.5).attr("font-weight", 650)
+      .style("font-family", "var(--font-sans)").attr("font-size", 9.5).attr("font-weight", 650)
       .attr("fill", "#ffcf82")
       .attr("x", 0).attr("y", (d) => rOf(d) + (d.opText ? 57 : 44))
       .style("text-rendering", "geometricPrecision")

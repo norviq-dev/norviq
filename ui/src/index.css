@@ -1,23 +1,14 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Norviq Contributors */
 
-/* Monospace text uses the platform's own monospace face (--font-mono below): no web font is bundled
-   or fetched, so the UI stays air-gap-safe and ships no third-party font files. */
+/* Text uses the platform's own sans-serif and monospace faces (--font-sans and --font-mono below): no
+   web font is bundled or fetched, so the UI stays air-gap-safe and ships no third-party font files. */
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
 
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 100; font-display: swap; src: url("/fonts/Outfit-Thin.ttf") format("truetype"); }
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 200; font-display: swap; src: url("/fonts/Outfit-ExtraLight.ttf") format("truetype"); }
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 300; font-display: swap; src: url("/fonts/Outfit-Light.ttf") format("truetype"); }
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/Outfit-Regular.ttf") format("truetype"); }
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/Outfit-Medium.ttf") format("truetype"); }
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/Outfit-SemiBold.ttf") format("truetype"); }
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 700; font-display: swap; src: url("/fonts/Outfit-Bold.ttf") format("truetype"); }
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 800; font-display: swap; src: url("/fonts/Outfit-ExtraBold.ttf") format("truetype"); }
-@font-face { font-family: "Outfit"; font-style: normal; font-weight: 900; font-display: swap; src: url("/fonts/Outfit-Black.ttf") format("truetype"); }
 
 :root {
   --bg-void: #0d0d0d;
@@ -68,7 +59,7 @@
   --shadow-glow: 0 0 20px var(--accent-glow);
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
   --transition: 150ms ease;
-  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --text-4xl: 2.5rem;
   --text-3xl: 2rem;
@@ -118,7 +109,7 @@
 html, body { margin: 0; height: 100%; }
 
 body {
-  font-family: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
   background: radial-gradient(circle at top right, #252525 0%, var(--bg-void) 45%);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
@@ -550,7 +541,6 @@ body {
 
 @theme inline {
   --font-heading: var(--font-sans);
-  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);

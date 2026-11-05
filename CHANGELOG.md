@@ -335,6 +335,8 @@ caps is retried (3 attempts) and then logged at ERROR, `NRVQ-API-7035`; it was a
 it returned read like nothing was frozen. The boot warm of namespace posture is retried the same way
 before its ERROR, `NRVQ-API-7138`.
 
+**Console.** The console now uses the system font stacks; no web fonts are bundled.
+
 **Project.** SECURITY.md names the response team and sets out the disclosure process, a 90-day
 embargo, the security bulletin channel, a supported-versions table and how dependencies are managed.
 New: issue and pull request templates (the pull request template asks for a DCO sign-off), an OpenSSF

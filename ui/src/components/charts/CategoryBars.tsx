@@ -13,7 +13,7 @@ const baseTooltip = {
   backgroundColor: "#252525",
   borderColor: "#3a3a3a",
   borderWidth: 1,
-  textStyle: { color: "#ffffff", fontFamily: "Outfit", fontSize: 12 }
+  textStyle: { color: "#ffffff", fontFamily: "var(--font-sans)", fontSize: 12 }
 };
 
 export const CategoryBars = memo(function CategoryBars({

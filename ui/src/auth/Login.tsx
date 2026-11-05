@@ -354,7 +354,7 @@ export function Login() {
       className="nv-root"
       style={{
         minHeight: "100vh", width: "100%", display: "flex", flexDirection: "column", alignItems: "center",
-        justifyContent: "flex-start", padding: 28, fontFamily: "'Outfit', system-ui, sans-serif", color: "#e8edf5",
+        justifyContent: "flex-start", padding: 28, fontFamily: "var(--font-sans)", color: "#e8edf5",
         background: "radial-gradient(circle at 50% 8%, #10141b 0%, #08090c 58%)", position: "relative",
         overflowX: "hidden", overflowY: "auto", boxSizing: "border-box"
       }}
