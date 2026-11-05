@@ -112,6 +112,30 @@ def wait_until(fn, timeout: int, interval: float = 2.0) -> bool:
     return False
 
 
+# How long a stock probe may wait for the chart's baseline to reach the engine. On a fresh install the
+# baseline exists before the first probe; on an UPGRADE helm changes the baseline NrvqPolicy (0.2.5
+# shipped it in audit, 0.2.6 in block) and the controller syncs it to the API asynchronously, a few
+# seconds after `helm --wait` returns. The probe still has to see exactly the expected decision and
+# rule; it only stops asserting inside that window. The time it took is reported.
+STOCK_CONVERGE_S = 90
+
+
+def await_decision(evaluate, tool: str, params: dict, want: str, want_rule: str,
+                   timeout: float = STOCK_CONVERGE_S, interval: float = 3.0) -> tuple[bool, str, str, float]:
+    """Evaluate until the decision is (want, want_rule) or the deadline passes.
+    Returns (matched, last decision, last rule_id, seconds waited)."""
+    start = time.monotonic()
+    got, rule = "", ""
+    while True:
+        d = evaluate(tool, params)
+        got, rule = str(d.get("decision") or ""), str(d.get("rule_id") or "")
+        if got == want and want_rule in rule:
+            return True, got, rule, time.monotonic() - start
+        if time.monotonic() - start >= timeout:
+            return False, got, rule, time.monotonic() - start
+        time.sleep(interval)
+
+
 # ---------------------------------------------------------------------------------------------
 # stage 1 — build the artifact a release would publish
 # ---------------------------------------------------------------------------------------------
@@ -340,12 +364,11 @@ def check_enforcement(ctx: str) -> str:
 
         for tool, params, want, want_rule in STOCK_PROBES:
             try:
-                d = _evaluate(tool, params)
-                got, rule = d.get("decision"), str(d.get("rule_id") or "")
+                ok, got, rule, waited = await_decision(_evaluate, tool, params, want, want_rule)
                 # The rule_id matters as much as the decision: an `audit` carrying `default_allow`
                 # would mean NOTHING fired, which is a miss wearing a detection's clothing.
-                check(f"evaluate {tool} -> {want} ({want_rule})",
-                      got == want and want_rule in rule, f"got {got} ({rule})")
+                check(f"evaluate {tool} -> {want} ({want_rule})", ok,
+                      f"got {got} ({rule})" + (f" after {waited:.0f}s" if waited >= 1 else ""))
             except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
                 check(f"evaluate {tool} -> {want}", False, str(exc))
 
