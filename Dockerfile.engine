@@ -11,6 +11,13 @@ RUN pip install --no-cache-dir --target=/deps '.[spiffe]'
 FROM python:3.12-slim
 WORKDIR /app
 COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
+# Nothing in the runtime image installs packages (the dependencies arrive above from the builder's
+# /deps), so drop the base image's own pip: it is never used here and only carries scanner findings.
+# The ensurepip wheel is the same pip, so it goes too. The `import pip` check fails the build if a
+# copied-in dependency ever brings pip back.
+RUN python -m pip uninstall -y --root-user-action=ignore pip && \
+    rm -f /usr/local/lib/python3.12/ensurepip/_bundled/pip-*.whl && \
+    ! python -c "import pip" 2>/dev/null
 COPY norviq/ norviq/
 COPY policies/ policies/
 # Kept in step with Dockerfile.api: the engine imports the same norviq.api package tree, so the
@@ -42,7 +49,7 @@ RUN apt-get update && apt-get upgrade -y && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Uniform build provenance across ALL shipped images (mirrors Dockerfile.api:18-19,41), not just
+# Uniform build provenance across ALL shipped images (mirrors Dockerfile.api:24-25,56), not just
 # api. Stamped AFTER the OPA layer so changing the SHA busts only these trivial layers, never the OPA
 # download cache. NRVQ_BUILD_GIT_SHA is the runtime NO-STALE marker; the label is the OCI revision.
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
