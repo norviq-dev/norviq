@@ -266,6 +266,8 @@ from `nginx:1.27-alpine` to `nginx:1.30-alpine`, the console's base from
 build's `apk upgrade`, and 22 in curl. A mirror behind `global.imageRegistry` needs the new tags copied
 (digest-preserving) before the upgrade. The first-party bootstrap image (the chart's TLS hooks) moves
 from `alpine:3.21` to `alpine:3.24`: Alpine 3.21 left security support on 2026-11-01.
+Image hardening: pip is removed from the api and engine runtime images, and the webhook image's base moves
+from distroless `static-debian12` to `static-debian13`.
 
 **Fixed.** `global.imageRegistry` relocates the busybox init image. An agent that retries one refused
 call no longer loses trust on every attempt. An MCP client that calls tools without listing them

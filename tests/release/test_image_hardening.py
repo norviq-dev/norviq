@@ -5,7 +5,8 @@
 
 The api and engine images take their dependencies from the builder's /deps, so nothing in the final
 stage installs packages, yet `python:3.12-slim` ships its own pip there. An unused pip is still code in
-the image and still a scanner finding.
+the image and still a scanner finding. The webhook's distroless base is held to the current Debian
+release, whose static image scans clean where debian12's carried fixable ca-certificates and tzdata.
 """
 
 from __future__ import annotations
@@ -44,3 +45,10 @@ def test_python_runtime_stage_removes_pip(name: str) -> None:
         f"{name}: the runtime stage uses pip after removing it"
     )
 
+
+def test_webhook_runtime_base_is_distroless_static_debian13() -> None:
+    stage = _final_stage(ROOT / "webhook" / "Dockerfile")
+    base = re.match(r"FROM\s+(\S+)", stage).group(1)
+    assert re.fullmatch(r"gcr\.io/distroless/static-debian13(@sha256:[0-9a-f]{64})?", base), base
+    # static-* has no libc: the binary must be built without cgo for the base to run it.
+    assert "CGO_ENABLED=0" in (ROOT / "webhook" / "Dockerfile").read_text()
