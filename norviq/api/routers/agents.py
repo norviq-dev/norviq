@@ -498,6 +498,12 @@ def _lock_timeout_ms() -> int:
     answer (which would take the outage path). At the default db_command_timeout of 5 s: 3 s."""
     return int(min(3.0, max(0.2, float(settings.db_command_timeout) - 2.0)) * 1000)
 
+def _set_local_lock_timeout_sql(ms: int):
+    """`SET LOCAL lock_timeout = '<ms>ms'` with the value BOUND: Postgres' SET takes no parameters, but
+    set_config(..., is_local => true) is the same transaction-local setting and does."""
+    return text("SELECT set_config('lock_timeout', :v, true)").bindparams(v=f"{int(ms)}ms")
+
+
 
 def _owner_ttl_ms() -> int:
     """How long a writer's claim on agent_trust_owner:<id> lives: at least 30 s and longer than the worst case of
@@ -740,7 +746,7 @@ async def _agent_lock_held(db, spiffe_id: str):
         try:
             state = "configured"
             await _apply_admin_session(conn)
-            await conn.execute(text(f"SET LOCAL lock_timeout = '{_lock_timeout_ms()}ms'"))
+            await conn.execute(_set_local_lock_timeout_sql(_lock_timeout_ms()))
             state = "maybe"
             await conn.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), _lock_key(spiffe_id))
             await conn.commit()
@@ -1241,7 +1247,7 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
             # after it on every attempt. Then each agent's lock is TRIED instead: the held ones are skipped here
             # and retried once the rest is written.
             try:
-                await session.execute(text(f"SET LOCAL lock_timeout = '{_lock_timeout_ms()}ms'"))
+                await session.execute(_set_local_lock_timeout_sql(_lock_timeout_ms()))
                 await session.execute(
                     text("SELECT count(pg_advisory_xact_lock(k)) FROM (SELECT DISTINCT hashtext('agent_trust:' || i) "
                          "AS k FROM unnest(CAST(:ids AS text[])) AS i ORDER BY k) AS keys"),
@@ -1277,7 +1283,7 @@ async def warm_agent_overrides(cache, session_factory=get_session, progress: dic
             if asyncio.get_running_loop().time() >= deadline:
                 break
             try:
-                await session.execute(text(f"SET LOCAL lock_timeout = '{_WARM_RETRY_LOCK_MS}ms'"))
+                await session.execute(_set_local_lock_timeout_sql(_WARM_RETRY_LOCK_MS))
                 await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), _lock_key(spiffe_id))
             except Exception as exc:
                 await _rollback(session)
