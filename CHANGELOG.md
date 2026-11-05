@@ -247,6 +247,7 @@ to 0.62.0 (GO-2026-6860, GO-2026-6866).
 **Security.** 0.2.6 contains security fixes; their advisories publish with the release.
 Dependency floors for pyjwt, aiohttp, urllib3, anyio, multidict, certifi and opentelemetry;
 DOMPurify 3.4.17 in the console.
+The lock moves cryptography from 50.0.0 to 50.0.2 and idna from 3.18 to 3.20; urllib3 stays at 2.8.0.
 Image builds now move `-latest` and version tags only after the scan and signature pass. The FOSSA
 dependency gate grades Python again: from 2026-08-19 `.fossa.yml` named the Python target `type: pip`,
 which is not a fossa-cli type, so no Python package was scanned and the gate passed on the console and
