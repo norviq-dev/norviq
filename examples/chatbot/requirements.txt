@@ -6,7 +6,7 @@
 # (those extras are declared in pyproject.toml and pull langchain-core + langgraph).
 langchain-groq>=0.2.0
 fastapi>=0.111.0
-uvicorn>=0.30.0
+uvicorn>=0.54.0
 # The official MCP client, used by mcp_tools.py to speak streamable-HTTP to the firewall sidecars.
 # Deliberately the protocol SDK and not langchain-mcp-adapters: that package flattens an `isError`
 # result into a generic ToolException and drops `_meta`, which is exactly where the firewall puts
