@@ -763,6 +763,35 @@ def install_published(ctx: str, version: str) -> bool:
                  "" if ok else (res.stderr or res.stdout)[-400:])
 
 
+def retire_tenant_policy(ctx: str) -> bool:
+    """Remove the pre-upgrade tenant policy once its survival has been asserted, before stage 3.
+
+    Stage 3 asserts decisions for one identity in TENANT, and those expectations are what a STOCK install
+    answers. The fresh path never has a tenant policy live there (stage 4 creates one, for the uninstall).
+    The upgrade path does: stage 2 created POLICY (strict, block, priority 400, a whole-namespace target,
+    stored at `<TENANT>:namespace:<TENANT>`) so the upgrade could be shown to keep it. Left in place it
+    is a higher-priority enforcing tier than either probe stage 3 writes, so the engine correctly answers
+    with it: the baseline-controls switch cannot relax a tenant's own strict policy (execute_sql stays
+    block / strict_default_block), and the propagation probe at 200 is outranked (search_kb stays allow on
+    BOTH replicas, which reads as a propagation failure). The two paths must assert against the same
+    state, so the policy goes away the way a tenant would remove it, and stage 3 waits for it to be gone.
+
+    Gone means the CR no longer exists: the controller drops its finalizer once the API has deleted the
+    policy (and the delete reached every replica over the policy stream), so a CR that is still there
+    means the engine may still be enforcing it. Stage 3 still polls its own decisions after this.
+    """
+    kubectl(ctx, "delete", "nrvqpolicy", POLICY, "-n", TENANT, "--ignore-not-found", "--wait=false")
+
+    def gone() -> bool:
+        r = kubectl(ctx, "get", "nrvqpolicy", POLICY, "-n", TENANT, "-o", "name")
+        return r.returncode != 0 and "NotFound" in (r.stderr or "")
+
+    t0 = time.monotonic()
+    ok = wait_until(gone, 120)
+    return check("the pre-upgrade tenant policy is removed before the stock probes", ok,
+                 f"took {int(time.monotonic() - t0)}s" if ok else "the CR is still present after 120s")
+
+
 def _api_pods(ctx: str) -> list[str]:
     """API pods that are not on their way out (a rollout lists the terminating ones too)."""
     r = kubectl(ctx, "get", "pods", "-n", NS, "-l", "app.kubernetes.io/component=api", "-o", "json")
@@ -1101,6 +1130,7 @@ def main() -> int:
                     check_api_after_upgrade(ctx)
                     if started:
                         check_upgrade_preserved(ctx, chart, before, images)
+                        retire_tenant_policy(ctx)
             else:
                 print("\nstage 2 — install it the way automation does")
                 started = install(ctx, chart, images)

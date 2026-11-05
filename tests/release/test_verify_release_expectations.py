@@ -73,3 +73,31 @@ def test_the_round_trip_actually_crosses_an_effect() -> None:
     answers = [(w, r) for _, w, r in vr.CONTROL_ROUND_TRIP]
     assert stock == ("block", "strict_default_block")
     assert any(a != stock for a in answers) and answers[-1] == stock
+
+
+# The upgrade path's stage-2 tenant policy, as the controller stores it: a whole-namespace target with no
+# clusterPriority lands on the namespace tier at the CR's own priority.
+TENANT_POLICY = {f"{vr.TENANT}:namespace:{vr.TENANT}": {"rego": baseline.preset_source("strict"),
+                                                         "priority": 400, "enforcement_mode": "block"}}
+PROPAGATION_PROBE = {f"{vr.TENANT}:chatbot": {
+    "rego": ('package norviq\ndefault decision = "allow"\nrule_id = "nrvq_verify_propagation"\n'
+             'reason = "propagation probe"\ndecision = "block" { input.tool_name == "search_kb" }\n'),
+    "priority": 200, "enforcement_mode": "block"}}
+
+
+@pytest.mark.asyncio
+async def test_a_live_tenant_policy_answers_the_stage3_probes_instead() -> None:
+    """Why the upgrade path must remove its stage-2 tenant policy before stage 3 (retire_tenant_policy).
+
+    Correct engine behaviour, not a gate expectation to loosen: the baseline-controls switch does not
+    relax a tenant's own strict policy, and a class policy at 200 does not outrank an enforcing namespace
+    tier at 400. With the tenant policy gone, the same probes answer what stage 3 asserts."""
+    sql = next(p for p in vr.STOCK_PROBES if p[0] == "execute_sql")[1]
+    monitor = _controls({"strict_default_block": "monitor"})
+    assert await _decide({**STOCK, **TENANT_POLICY, **monitor}, "execute_sql", sql) == \
+        ("block", "strict_default_block")
+    assert await _decide({**STOCK, **TENANT_POLICY, **PROPAGATION_PROBE}, "search_kb", {"q": "x"}) == \
+        ("allow", "default_allow")
+    assert await _decide({**STOCK, **monitor}, "execute_sql", sql) == ("audit", "strict_default_block")
+    assert await _decide({**STOCK, **PROPAGATION_PROBE}, "search_kb", {"q": "x"}) == \
+        ("block", "nrvq_verify_propagation")

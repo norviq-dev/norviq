@@ -238,3 +238,67 @@ def test_a_terminating_pod_of_the_current_revision_is_never_probed(monkeypatch) 
 
     monkeypatch.setattr(vr, "kubectl", kubectl)
     assert vr._current_api_pods("kind-x") == ["norviq-api-new-1"]
+
+
+# ---- the stage-2 tenant policy is gone before stage 3 ------------------------------------------------
+#
+# The upgrade path creates the tenant policy in stage 2 so the upgrade can be shown to keep it. Stage 3's
+# expectations are those of a stock install, and the fresh path never has a tenant policy live there.
+# Left in place, the strict tenant policy (priority 400, whole namespace) correctly outranks both probes,
+# and the gate failed on the upgrade path only: the controls switch read block, and the propagation
+# probe read allow on replica B.
+
+_STAGES = ("check_stamped_shape", "install_published", "create_tenant_policy", "seed_bundled_store",
+           "upgrade_to_candidate", "check_store_after_upgrade", "check_api_after_upgrade",
+           "check_upgrade_preserved", "check_injection", "check_replica_propagation", "check_helm_test",
+           "check_uninstall")
+
+
+def _run_upgrade_main(monkeypatch, policy_lingers: bool = False) -> list[str]:
+    events: list[str] = []
+
+    for name in _STAGES:
+        monkeypatch.setattr(vr, name, lambda *a, _n=name, **k: events.append(_n) or True)
+    monkeypatch.setattr(vr, "check_enforcement", lambda *a, **k: events.append("check_enforcement") or "tok")
+    monkeypatch.setattr(vr, "snapshot", lambda *a, **k: {})
+    monkeypatch.setattr(vr, "stamp", lambda version, workdir: workdir)
+    monkeypatch.setattr(vr, "resolve_upgrade_source", lambda requested, candidate: "0.2.5")
+    monkeypatch.setattr(vr, "run", lambda *a, **k: _ok())
+    monkeypatch.setattr(vr.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(vr, "wait_until", lambda fn, timeout, interval=2.0: fn())
+    deleted: list[bool] = []
+
+    def kubectl(_ctx, *args, timeout=300):
+        if args[:2] == ("delete", "nrvqpolicy") and vr.POLICY in args and vr.TENANT in args:
+            events.append("delete tenant policy")
+            deleted.append(True)
+            return _ok()
+        if args[:2] == ("get", "nrvqpolicy"):
+            if deleted and not policy_lingers:
+                return subprocess.CompletedProcess(["kubectl"], 1, "", 'Error from server (NotFound): '
+                                                   f'nrvqpolicies.norviq.io "{vr.POLICY}" not found')
+            return _ok(f"nrvqpolicy.norviq.io/{vr.POLICY}")
+        return _ok()
+
+    monkeypatch.setattr(vr, "kubectl", kubectl)
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", "--version", "0.2.6", "--skip-create", "--keep"])
+    vr.main()
+    return events
+
+
+def test_the_upgrade_path_removes_its_tenant_policy_before_the_stock_probes(monkeypatch) -> None:
+    events = _run_upgrade_main(monkeypatch)
+    assert "delete tenant policy" in events
+    # After its survival is asserted, before any stage-3 decision is.
+    assert events.index("check_upgrade_preserved") < events.index("delete tenant policy") \
+        < events.index("check_enforcement") < events.index("check_replica_propagation")
+    # Stage 4 still exercises the uninstall with a finalizer-bearing policy (it creates its own).
+    assert events.index("check_uninstall") > events.index("check_replica_propagation")
+    assert ("the pre-upgrade tenant policy is removed before the stock probes", True) in \
+        [(n, ok) for n, ok, _ in vr.results]
+
+
+def test_a_tenant_policy_that_never_goes_away_fails_the_gate(monkeypatch) -> None:
+    _run_upgrade_main(monkeypatch, policy_lingers=True)
+    assert ("the pre-upgrade tenant policy is removed before the stock probes", False) in \
+        [(n, ok) for n, ok, _ in vr.results]
