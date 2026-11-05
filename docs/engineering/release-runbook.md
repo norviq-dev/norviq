@@ -256,8 +256,8 @@ gh workflow run verify-release.yml
 #     github-release job creates and publishes it with short notes pointing at CHANGELOG.md. To
 #     write the notes yourself (always, for a release with security fixes: see 1c), create the
 #     Release as a DRAFT for the tag; the job attaches the signed assets to the draft, leaves it
-#     unpublished and then fails on purpose with an error naming the hand-made draft. That red
-#     github-release job is expected: check every other job is green, then publish the draft.
+#     unpublished and warns about it (an annotation and a note in the job summary). Check every
+#     job is green, then publish the draft.
 #     With immutable releases on, a Release published early cannot take the assets and the job
 #     fails.
 

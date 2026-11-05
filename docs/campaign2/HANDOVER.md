@@ -851,7 +851,7 @@ All on `fix/v020-eval-backlog` (26 commits off `main`), which contains the HIGH 
 Python suite **2922 passed, 6 failed, 56 errors** — and the failing set is **byte-identical to `main`**
 (all `redis`/`asyncpg` connection errors from Docker still being down). Verified by diffing the
 failing set against a clean `main` checkout after every batch, which is how the one real regression in
-this session was caught rather than assumed away.
+that campaign was caught rather than assumed away.
 
 ### Still open (unchanged, deliberately)
 

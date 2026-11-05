@@ -506,8 +506,8 @@ jobs:
       # published. Every draft this workflow creates carries a fixed marker line (an HTML comment,
       # invisible on the Release page) in its notes. If a Release already exists: a draft with the
       # marker was made by an earlier attempt of this workflow, so it gets the assets and is
-      # published; a draft without the marker was made by hand, so it gets the assets and the job
-      # FAILS, so the unpublished Release cannot go unnoticed; a published, mutable one gets the
+      # published; a draft without the marker was made by hand, so it gets the assets, stays
+      # unpublished, and the job warns (annotation + job summary); a published, mutable one gets the
       # assets; a published, immutable one cannot take them, so the job fails with an explanation
       # instead of a bare API error. Existing notes are left alone in every case.
       - name: Attach the signed assets to the GitHub Release
@@ -537,8 +537,12 @@ jobs:
                 echo "::notice::The Release for ${TAG} is a draft an earlier attempt of this workflow created; assets attached, publishing it now."
                 gh release edit "$TAG" --draft=false
               else
-                echo "::error::The Release for ${TAG} is a draft that was made by hand, not by this workflow (its notes lack the workflow's marker line). The signed assets are attached, but it was NOT published: review it and publish it by hand."
-                exit 1
+                # A hand-made draft is the documented flow for a release with security fixes (runbook 1c,
+                # 2b): leave it unpublished for the maintainer, but say so loudly instead of failing.
+                msg="The Release for ${TAG} is a draft that was made by hand (its notes lack the workflow's marker line). The signed assets are attached; it is NOT published yet: review it and publish it by hand."
+                echo "::warning::${msg}"
+                echo "### Release ${TAG} is an unpublished draft" >> "$GITHUB_STEP_SUMMARY"
+                echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
           elif grep -qi 'release not found' "$view_err"; then
