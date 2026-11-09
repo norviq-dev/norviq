@@ -137,7 +137,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
 
       # Log in first: resolving digests reads the registry, and on a rehearsal the images are
       # published by `images` above, so they are always resolvable by the time we get here.
@@ -345,7 +345,7 @@ jobs:
           overwrite: true      # a re-run after a failed PyPI upload must not stop here on a 409
 
       - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
   # ---------------------------------------------------------------------------------------------
   # After PyPI, and only on a tag: attach the released files to the GitHub Release for the tag.
@@ -385,7 +385,7 @@ jobs:
 
       # The lockfiles it reads are uv.lock, ui/package-lock.json and webhook/go.sum, among others.
       - name: Generate SBOM of the tagged source (SPDX)
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -434,7 +434,7 @@ jobs:
           ls norviq-"${VERSION}"-*.whl > /dev/null || { echo "::error::missing release asset: wheel"; exit 1; }
           ls -l
 
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
 
       # Retries for the same reason as build.yml: keyless signing calls the OIDC token endpoint and
       # Sigstore on every attempt, and those fail transiently. Still fail-closed after 5 attempts.
