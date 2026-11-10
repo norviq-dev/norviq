@@ -135,12 +135,19 @@ _OFF_SWITCHES = {
 }
 
 
+_DESCRIBES_THE_BASELINE = re.compile(r"baselineClusterPolicy|namespace baseline", re.IGNORECASE)
+
+
 def _unreleased_changelog() -> str:
-    """The newest CHANGELOG entry: `## [Unreleased]` while a version is being prepared, and the same
-    text under its dated `## [x.y.z]` heading once it is released."""
+    """The newest CHANGELOG entry that describes the namespace baseline.
+
+    This took the newest entry whatever it said, which held while 0.2.6's was on top. The first entry
+    after it with nothing to say about the baseline (a dependency-tooling note) failed for not repeating
+    0.2.6's three ways off. The guard is for an entry that says the baseline enforces, so it reads the
+    newest one that mentions the baseline at all: 0.2.6's today, and any later entry that touches it."""
     text = (_ROOT / "CHANGELOG.md").read_text()
-    start = text.index("\n## [") + 1
-    return text[start:text.index("\n## [", start + 1)]
+    entries = re.split(r"\n(?=## \[)", text)[1:]
+    return next(entry for entry in entries if _DESCRIBES_THE_BASELINE.search(entry))
 
 
 @pytest.mark.parametrize("site", [*_OFF_SWITCH_PAGES, "CHANGELOG.md"])
