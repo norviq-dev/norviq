@@ -4,3 +4,5 @@
 exemptions:
   - check: cla
     reason: "Norviq uses the Developer Certificate of Origin instead of a Contributor License Agreement: contributions are signed off under the DCO (a Signed-off-by line) from the day the DCO check is enabled on the repository; see CONTRIBUTING.md."
+  - check: dependency_update_tool
+    reason: "Dependency updates are made by the maintainer, by hand, and each one goes through CI: the FOSSA gate fails on a known vulnerability in the shipped dependency graph and Trivy fails an image with a fixable HIGH or CRITICAL finding. pip-audit and npm audit report on every change. See SECURITY.md."

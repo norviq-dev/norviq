@@ -10,6 +10,10 @@ Three versions published incompletely — `v0.1.0` shipped no chart, `v0.1.1` sh
 `v0.2.0` shipped no chart — and their headings say so: they are listed because they happened, not
 because they should be installed.
 
+## [Unreleased]
+
+- Dependabot removed; dependency updates are made by hand and gated in CI (`SECURITY.md`).
+
 ## [0.2.6] — 2026-11-05 — the namespace baseline enforces by default
 
 **Upgrade impact — read before `helm upgrade`.**

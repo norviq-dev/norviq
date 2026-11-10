@@ -130,10 +130,11 @@ How they are checked and updated:
 - Each image is scanned by Trivy after it is built (`.github/workflows/build.yml`). A fixable HIGH or
   CRITICAL finding that is not in `.trivyignore.yaml` fails the build before the image is signed or
   tagged.
-- Dependabot (`.github/dependabot.yml`) proposes weekly version updates for the Python, npm and Go
-  dependencies, GitHub Actions and the Dockerfile base images; each update is a pull request that
-  goes through the same review and CI as any other. The Helm chart's third-party images are pinned
-  by digest and bumped by hand. A vulnerable dependency with a fixed release is bumped, not accepted; one that cannot be bumped is listed below
+- Dependency updates are made by the maintainer, by hand: Python, npm and Go dependencies, GitHub
+  Actions, the Dockerfile base images and the Helm chart's third-party images, which are pinned by
+  digest. Each update is a pull request that goes through the same review and CI as any other, so the
+  FOSSA gate and the Trivy scan above apply to it; `pip-audit` and `npm audit` report on it. There is
+  no automated update bot. A vulnerable dependency with a fixed release is bumped, not accepted; one that cannot be bumped is listed below
   with the reason, and the list is reviewed each release.
 
 ## Accepted dependency exceptions

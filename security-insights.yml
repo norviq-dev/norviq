@@ -58,7 +58,7 @@ repository:
   status: active
   bug-fixes-only: false
   accepts-change-request: true
-  accepts-automated-change-request: true   # Dependabot version and security updates, .github/dependabot.yml
+  accepts-automated-change-request: false  # dependency updates are made by hand; see SECURITY.md
   no-third-party-packages: false
   core-team:
     - name: Santosh Kumar Puppala
@@ -158,12 +158,6 @@ repository:
         rulesets: [default]
         comment: Report-only.
         integration: {adhoc: true, ci: true, release: false}
-        results: {}
-      - name: Dependabot
-        type: SCA
-        rulesets: [.github/dependabot.yml]
-        comment: Weekly version-update pull requests for Python, npm, Go, GitHub Actions and Docker base images.
-        integration: {adhoc: false, ci: true, release: false}
         results: {}
       - name: OpenSSF Scorecard
         type: other
