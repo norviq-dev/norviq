@@ -70,6 +70,47 @@ def test_a_revoked_token_stays_revoked_when_respelled(use_cache: bool) -> None:
         assert asyncio.run(sr.is_revoked(cache, variant)), "a re-spelled revoked token was accepted"
 
 
+def _token_with_both_url_chars() -> str:
+    """A token whose signature holds a `-` and a `_`, so the standard-alphabet swaps below change it."""
+    for n in range(500):
+        tok = _token(f"admin-{n}")
+        if "-" in tok.split(".")[2] and "_" in tok.split(".")[2]:
+            return tok
+    raise AssertionError("no signature with both '-' and '_' in 500 tries")
+
+
+def _other_spellings(tok: str) -> dict[str, str]:
+    """Spellings beyond the last character's spare bits. PyJWT 2.13.0 accepted all of these and 2.15.x
+    still accepts a trailing '=', so a floor on the library does not settle it; the key has to."""
+    head, payload, sig = tok.split(".")
+    mid = len(sig) // 2
+    return {
+        "padding": f"{tok}=",
+        "double padding": f"{tok}==",
+        "standard alphabet": f"{head}.{payload}.{sig.replace('-', '+').replace('_', '/')}",
+        "junk inserted": f"{head}.{payload}.{sig[:mid]}***{sig[mid:]}",
+        "spaces inserted": f"{head}.{payload}.{sig[:mid]}   {sig[mid:]}",
+    }
+
+
+def test_other_spellings_share_the_key() -> None:
+    tok = _token_with_both_url_chars()
+    for name, variant in _other_spellings(tok).items():
+        assert variant != tok
+        assert sr.token_hash(variant) == sr.token_hash(tok), f"{name}: a second key for the same token"
+
+
+@pytest.mark.parametrize("use_cache", [False, True], ids=["mirror", "redis"])
+def test_a_revoked_token_stays_revoked_in_any_other_spelling(use_cache: bool) -> None:
+    cache = _FakeCache() if use_cache else None
+    tok = _token_with_both_url_chars()
+    asyncio.run(sr.revoke(cache, tok, int(time.time()) + 600))
+    if use_cache:
+        sr._mirror.clear()
+    for name, variant in _other_spellings(tok).items():
+        assert asyncio.run(sr.is_revoked(cache, variant)), f"{name}: a re-spelled revoked token was accepted"
+
+
 def test_a_different_token_is_not_caught() -> None:
     asyncio.run(sr.revoke(None, _token("admin"), int(time.time()) + 600))
     assert not asyncio.run(sr.is_revoked(None, _token("someone-else")))

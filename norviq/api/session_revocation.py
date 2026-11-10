@@ -11,9 +11,11 @@ Keyed on the decoded bytes, not the presented string, because one token has seve
 A base64url segment whose length is not a multiple of four carries spare low bits in its last
 character, and PyJWT before 2.14.0 accepted every value of them. Keyed on the raw string, a logged-out
 token re-spelled in its last character missed the denylist and still verified: logout was undone by
-editing one character. The 2.14.0 floor in pyproject closes it at decode time; this closes it here too,
-so revocation does not depend on which library version rejects what. Entries carry TTL = the token's remaining
-lifetime, so the denylist can never outgrow the set of still-live tokens.
+editing one character. Other spellings decode to the same bytes too (padding, the standard alphabet,
+characters the decoder skips), and the library floor in pyproject does not rule them out: PyJWT 2.15.1
+still verifies a token with `=` appended. Keying on the decoded bytes is what closes it, whichever
+library version rejects what. Entries carry TTL = the token's remaining lifetime, so the denylist can
+never outgrow the set of still-live tokens.
 
 Three layers. Two are checked on every JWT validation (``auth.get_current_user`` / ``auth.decode_token``):
 - an in-process mirror (always written, always checked) — keeps revocation correct on a single-replica
