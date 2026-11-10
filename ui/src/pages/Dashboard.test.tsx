@@ -678,7 +678,10 @@ describe("Overview block feeds are Monitor-aware", () => {
   // theories already ruled out. This test needs >30s on a 2-core CI runner while the whole 25-test
   // file completes in 2.3s locally on 10 cores, and I did not root-cause the 10x. The explicit
   // per-test timeout stops a green product failing its gate; it does NOT weaken the assertion — if
-  // the element never renders, this still fails, just later. Tracked in docs/campaign2/HANDOVER.md.
+  // the element never renders, this still fails, just later. Testing-library's failure dump contained
+  // the element it reported missing, so the render happens, only far too slowly there. Next thing to
+  // try: run this test in a file of its own, on the theory that 25 full Dashboard renders in one jsdom
+  // accumulate.
   it("does NOT assert the Monitor mechanism when the engine's own posture could not be read", { timeout: 90_000 }, async () => {
     server.use(
       http.get("*/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "audit", apply_mode: "enforce" })),
