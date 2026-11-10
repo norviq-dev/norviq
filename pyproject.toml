@@ -167,7 +167,8 @@ build-backend = "setuptools.build_meta"
 #   pillow   13.0.0   all 41 advisories open on 12.3.0   autogen-core, pdfplumber (crewai)
 #   filelock 4.2.1    all 12 advisories open on 3.30.2   huggingface-hub (crewai, via tokenizers)
 #   dnspython 2.9.0   CVE-2026-114605                    semantic-kernel -> aiortc -> aioice
-#   oauthlib 4.0.0    CVE-2026-49264, -49265, -49272     crewai -> chromadb -> kubernetes
+#   oauthlib 4.0.0    CVE-2026-49264, -49265             crewai -> chromadb -> kubernetes
+#            4.0.1    CVE-2026-49272 (published 2026-11-05, after the audit below)
 # Found on 2026-10-30 by auditing EVERY package in this lock, not only the runtime export, against two
 # feeds — the PyPI advisory API and the OSV PyPI export — because they disagree: the PyPI API did not
 # list CVE-2026-118667 against langgraph itself (see the langgraph extra).
@@ -177,7 +178,7 @@ constraint-dependencies = [
     "pillow>=13.0.0",
     "filelock>=4.2.1",
     "dnspython>=2.9.0",
-    "oauthlib>=4.0.0",
+    "oauthlib>=4.0.1",
 ]
 
 # Lock only for the interpreters this project actually claims (see `classifiers`: 3.11, 3.12 —
