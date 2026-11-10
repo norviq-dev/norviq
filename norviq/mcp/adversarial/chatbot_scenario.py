@@ -30,6 +30,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 
+from norviq.bearer import redact_credentials
+
 try:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -338,7 +340,8 @@ async def run(api: str, admin_token: str) -> list[Check]:
                 len({s for s in servers_seen if s}) >= 3))
         except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
             checks.append(Check("audit attribution", "-", "-", "-", "audit rows name their MCP server",
-                                f"could not read audit: {exc}", False, False))
+                                f"could not read audit: {redact_credentials(str(exc), admin_token)}",
+                                False, False))
     return checks
 
 

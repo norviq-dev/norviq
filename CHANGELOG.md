@@ -12,6 +12,9 @@ because they should be installed.
 
 ## [Unreleased]
 
+- A client that cannot send a valid request to the engine (bad token, URL or settings, TLS trust,
+  proxy refusal, an unknown error) now blocks the call instead of following `fallbackMode`.
+- Bearer tokens no longer appear in client error logs.
 - Dependabot removed; dependency updates are made by hand and gated in CI (`SECURITY.md`).
 - The admission webhook refuses a pod whose spec already carries any part the injector adds (the
   sidecar, its volumes or mounts, `NRVQ_SOCKET_PATH`, the `norviq.io/injected` annotation, MCP proxy

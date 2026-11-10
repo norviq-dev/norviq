@@ -239,8 +239,9 @@ MALFORMED_200 = {
 @pytest.mark.parametrize("body", MALFORMED_200.values(), ids=MALFORMED_200.keys())
 @pytest.mark.parametrize("mode", ["allow", "block"])
 async def test_a_malformed_answer_is_handled_as_the_sdk_client_handles_it(monkeypatch, body, mode) -> None:
-    """A 200 that is not a decision follows the fallback posture in both clients. Pinned as parity:
-    if one of them is changed to treat it differently, this fails until the other is changed too."""
+    """A 200 that is not a decision blocks in both clients, whatever the fallback posture: something
+    answered, so it is not an outage. It used to follow the posture in both. Pinned as parity: if one
+    of them is changed to treat it differently, this fails until the other is changed too."""
     monkeypatch.setattr(settings, "sdk_fallback_mode", mode, raising=False)
     ev = _evaluator(_Engine(response=body()))
     sidecar = await ev.evaluate(_event({"amount": 25}))
@@ -250,7 +251,9 @@ async def test_a_malformed_answer_is_handled_as_the_sdk_client_handles_it(monkey
         transport=httpx.MockTransport(lambda r: body()),
     )
     reference = await sdk.evaluate(_event({"amount": 25}))
-    assert sidecar.decision == reference.decision == mode
+    assert sidecar.decision == reference.decision == "block"
+    assert sidecar.rule_id == "thin_proxy_client_misconfigured"
+    assert reference.rule_id == "engine_client_misconfigured"
     await ev.close()
 
 

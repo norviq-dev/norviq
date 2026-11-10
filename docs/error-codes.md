@@ -24,14 +24,14 @@ individually described.
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
 | API | 107 | `norviq/api/main.py`, `norviq/api/routers/*` |
-| MCP | 64 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
+| MCP | 65 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
 | WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/injector_owned.go`, `webhook/controller.go`, `webhook/injector.go` |
 | ENG | 54 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | DB | 45 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
 | FLT | 39 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
-| SDK | 39 | `norviq/sdk/*` |
+| SDK | 40 | `norviq/sdk/*` |
 | REG | 25 | `norviq/engine/policy_loader.py` |
-| SDC | 31 | `norviq/sidecar/*` |
+| SDC | 32 | `norviq/sidecar/*` |
 | AUTH | 29 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py` |
 | AUD | 13 | `norviq/engine/audit_emitter.py`, `norviq/api/audit_retention.py` |
 | GRP | 10 | `norviq/engine/graph/*` |
@@ -42,7 +42,7 @@ individually described.
 | SIEM | 6 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **555** (including `*-DEBUG-*` traces). Counted 2026-11-10 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
+Total unique codes: **558** (including `*-DEBUG-*` traces). Counted 2026-11-10 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
 
 ## API
 
@@ -371,7 +371,8 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 | NRVQ-SDC-3030 | `nrvq.sidecar.remote_evaluator.ready` (thin proxy wired to the central API) | `norviq/sidecar/remote_evaluator.py` |
 | NRVQ-SDC-3031 | `nrvq.sidecar.remote_evaluator.fail_closed` — the call to the central `/evaluate` failed, so the tool call was **blocked**. A burst of these is a control-plane reachability/auth problem (missing or rejected `NRVQ_API_TOKEN`), not a policy decision. | `norviq/sidecar/remote_evaluator.py` |
 | NRVQ-SDC-3032 | Two events, both about proxy mode: `nrvq.sidecar.mode.proxy` (startup, with the resolved `api_url`) and `nrvq.sidecar.remote_evaluator.mtls_enabled` (the injected client cert/CA were accepted and internal mTLS is active). Both are startup INFO. **`remote_evaluator.fail_open` was also on this code and is now `NRVQ-SDC-3036`** — a filter written for these two was silencing it | `norviq/sidecar/proxy.py`, `norviq/sidecar/remote_evaluator.py` |
-| NRVQ-SDC-3036 | **`nrvq.sidecar.remote_evaluator.fail_open`** — the control plane was unreachable (5xx/timeout/connect error) and `sdk_fallback_mode` is `allow`, so this tool call ran **unjudged** with `rule_id="thin_proxy_fail_open"`. This is the signal that agents are currently ungoverned. Deliberately not on 3032 with the startup INFO lines, because a filter written for those hides it | `norviq/sidecar/remote_evaluator.py` |
+| NRVQ-SDC-3036 | **`nrvq.sidecar.remote_evaluator.fail_open`** — the control plane was unreachable (a 5xx or a transport error such as a timeout, a refused or reset connection, or a DNS failure) and `sdk_fallback_mode` is `allow`, so this tool call ran **unjudged** with `rule_id="thin_proxy_fail_open"`. This is the signal that agents are currently ungoverned. Deliberately not on 3032 with the startup INFO lines, because a filter written for those hides it | `norviq/sidecar/remote_evaluator.py` |
+| NRVQ-SDC-3049 | `nrvq.sidecar.remote_evaluator.client_misconfigured` — the sidecar could not send a valid request or read a decision for a reason of its own, so the call was **blocked** with `rule_id="thin_proxy_client_misconfigured"` and not retried: a token that cannot be a header value, an unusable API URL, impossible client settings, a TLS certificate that failed verification, a TLS alert naming this client's certificate as refused (expired, revoked, unknown CA), an https URL whose server does not speak TLS, a forward proxy that refused the CONNECT with a non-5xx status, an answer that is a redirect or a 2xx without a valid decision, or any error that is not a transport error. `problem` says which; it never contains the token. Blocks whatever `sdk_fallback_mode` says. The SDK client's equivalent is `NRVQ-SDK-1018`. | `norviq/sidecar/remote_evaluator.py` |
 | NRVQ-SDC-3047 | `nrvq.sidecar.remote_evaluator.unencodable` — the sidecar could not encode the evaluate request (a NaN or Infinity in the arguments, a string that is not valid UTF-8, nesting deeper than the SDK client sends, or more than 100 000 containers), so the call was **blocked** with `rule_id="thin_proxy_request_unencodable"` and the engine was not asked. Blocks whatever `sdk_fallback_mode` says: it is not an outage. The SDK client's equivalent is `NRVQ-SDK-1016` / `engine_request_unencodable`; both use the same encoder. | `norviq/sidecar/remote_evaluator.py` |
 | **NRVQ-SDC-3033** | `nrvq.sidecar.mode.embedded` — this workload evaluates **locally** with its own `RedisCache` + OPA + `PolicyLoader` instead of proxying to the central API. Expected on the `norviq-engine` Deployment, which pins `NRVQ_SIDECAR_MODE=embedded`, and on air-gapped/edge injected sidecars. Seeing it on a pod you expected to be a thin proxy means `NRVQ_SIDECAR_MODE` was overridden. | `norviq/sidecar/proxy.py` |
 | NRVQ-SDC-3045 / 3046 | Embedded engine startup could not reach a datastore: one attempt failed and is being retried (WARNING, `nrvq.startup.engine_cache_connect_retry` for Redis, `nrvq.sidecar.datastore_retry` with `store=postgres` for the policy warm) / the bounded backoff is **exhausted** and startup fails, so the pod restarts (ERROR, `…_failed` / `nrvq.sidecar.datastore_unreachable`). Same 1, 2, 4, 8 s schedule as the API (about 15 s per store). The Redis connect retries any error, like the API's; the Postgres warm retries only an unreachable store (refused, unresolvable, timed out, Postgres 57P03), so an auth failure or a bad row surfaces at once. | `norviq/sidecar/proxy.py`, `norviq/startup_retry.py` |
@@ -448,6 +449,7 @@ mentions it in a comment is not listed.
 | NRVQ-MCP-5091 | `nrvq.mcp.server.alias_key_refused` (WARNING: a server message — its envelope (`surface=envelope`, dropped), or a result, request or notification — carried a key that differs from a protocol field only by case or compatibility form; a tool result became a tool error, a resource or prompt result an error, a server request was refused, a notification dropped; list entries with such a key are withheld under the Gate A finding `mcp_a_alias_key`) | `norviq/mcp/firewall.py` |
 | NRVQ-MCP-5092 | `nrvq.mcp.notification_withheld` (WARNING: a server notification was larger than the scan budget allows, so it could not be read in full and was dropped) | `norviq/mcp/firewall.py` |
 | NRVQ-MCP-5093 | `nrvq.mcp.discover.withheld` (WARNING: an `initialize` or `server/discover` result was larger than the scan budget allows and was answered to the client with an error) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5095 | `nrvq.mcp.control_plane.client_misconfigured` (ERROR: the server registry, `store=servers`, or the pin store, `store=pins`, could not be loaded for a reason of this client's own, as `NRVQ-SDK-1018` defines it; `problem` says which. The store degrades exactly as for NRVQ-MCP-5077 / NRVQ-MCP-5046) | `norviq/mcp/servers.py`, `norviq/mcp/pins.py` |
 | NRVQ-MCP-5094 | `nrvq.mcp.input_required.withheld` (WARNING: a demand for input was larger than the scan budget allows and became a tool error) | `norviq/mcp/firewall.py` |
 
 ## REG / GRP / AUD / RED / TEL / CLI / SDK / IDT
@@ -461,7 +463,7 @@ mentions it in a comment is not listed.
 | RED | NRVQ-RED-13000..13009 (13007 = `nrvq.redteam.persist_failed`, 13008 = `suite_concurrent_rejected` (the process-wide `redteam_suite_global_concurrency` cap), 13009 = `nrvq.redteam.retention`) | `norviq/redteam/*`, `norviq/api/routers/redteam.py` |
 | TEL | NRVQ-TEL-12000..12007 | `norviq/telemetry/*` |
 | CLI | NRVQ-CLI-8000..8004 | `norviq/cli/*` |
-| SDK | NRVQ-SDK-1000, 1002, 1010..1013, 1016 (`nrvq.sdk.evaluate.unencodable`, ERROR: the evaluate request could not be encoded in this process, or carried a non-finite number that would have reached the engine as null; the call is blocked whatever `sdk_fallback_mode` says, since this is not an engine outage), 1020..1022, 1030..1032 (langchain), 1040..1044 (langgraph), 1050..1053 (crewai), 1060..1063 (autogen), 1070..1073 (semantic-kernel). 1043/1073 = output-DLP redaction (opt-in); 1044/1053/1063 = the `protect()` fail-closed-by-default warning on `allow_unwrapped=True`. | `norviq/sdk/*` |
+| SDK | NRVQ-SDK-1000, 1002, 1010..1013, 1016 (`nrvq.sdk.evaluate.unencodable`, ERROR: the evaluate request could not be encoded in this process, or carried a non-finite number that would have reached the engine as null; the call is blocked whatever `sdk_fallback_mode` says, since this is not an engine outage), 1018 (`nrvq.sdk.evaluate.client_misconfigured`, ERROR: the client could not send a valid request or read a decision for a reason of its own, the same list as NRVQ-SDC-3049, so the call is blocked with `rule_id="engine_client_misconfigured"` and not retried or counted toward the circuit breaker, whatever `sdk_fallback_mode` says), 1020..1022, 1030..1032 (langchain), 1040..1044 (langgraph), 1050..1053 (crewai), 1060..1063 (autogen), 1070..1073 (semantic-kernel). 1043/1073 = output-DLP redaction (opt-in); 1044/1053/1063 = the `protect()` fail-closed-by-default warning on `allow_unwrapped=True`. | `norviq/sdk/*` |
 | IDT | NRVQ-IDT-10000..10006 | `norviq/engine/identity.py` |
 | AUTH | NRVQ-AUTH-14000..14007, 14010..14029, 14031 (14024..14029 and 14031: durable logout revocation) | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py`, `norviq/api/main.py`, `norviq/api/session_revocation.py` |
 | FLT | NRVQ-FLT-15000..15005, 15009..15035, 15040..15042 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
@@ -519,7 +521,7 @@ NRVQ-MCP-5065, NRVQ-MCP-5066, NRVQ-MCP-5067, NRVQ-MCP-5068, NRVQ-MCP-5069, NRVQ-
 NRVQ-MCP-5072, NRVQ-MCP-5073, NRVQ-MCP-5074, NRVQ-MCP-5075, NRVQ-MCP-5076, NRVQ-MCP-5077, NRVQ-MCP-5078,
 NRVQ-MCP-5079, NRVQ-MCP-5080, NRVQ-MCP-5081, NRVQ-MCP-5082, NRVQ-MCP-5083, NRVQ-MCP-5084, NRVQ-MCP-5085,
 NRVQ-MCP-5087, NRVQ-MCP-5088, NRVQ-MCP-5089, NRVQ-MCP-5090, NRVQ-MCP-5091, NRVQ-MCP-5092, NRVQ-MCP-5093,
-NRVQ-MCP-5094
+NRVQ-MCP-5094, NRVQ-MCP-5095
 
 NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012,
 NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019,
@@ -537,7 +539,7 @@ NRVQ-FLT-15031, NRVQ-FLT-15032, NRVQ-FLT-15033, NRVQ-FLT-15034, NRVQ-FLT-15035, 
 NRVQ-FLT-15042, NRVQ-FLT-15043, NRVQ-FLT-15044, NRVQ-FLT-15045
 
 NRVQ-SDK-1000, NRVQ-SDK-1002, NRVQ-SDK-1010, NRVQ-SDK-1011, NRVQ-SDK-1012, NRVQ-SDK-1013, NRVQ-SDK-1014,
-NRVQ-SDK-1015, NRVQ-SDK-1016, NRVQ-SDK-1020, NRVQ-SDK-1021, NRVQ-SDK-1022, NRVQ-SDK-1030, NRVQ-SDK-1031,
+NRVQ-SDK-1015, NRVQ-SDK-1016, NRVQ-SDK-1018, NRVQ-SDK-1020, NRVQ-SDK-1021, NRVQ-SDK-1022, NRVQ-SDK-1030, NRVQ-SDK-1031,
 NRVQ-SDK-1032, NRVQ-SDK-1040, NRVQ-SDK-1041, NRVQ-SDK-1042, NRVQ-SDK-1043, NRVQ-SDK-1044, NRVQ-SDK-1045,
 NRVQ-SDK-1050, NRVQ-SDK-1051, NRVQ-SDK-1052, NRVQ-SDK-1053, NRVQ-SDK-1060, NRVQ-SDK-1061, NRVQ-SDK-1062,
 NRVQ-SDK-1063, NRVQ-SDK-1064, NRVQ-SDK-1070, NRVQ-SDK-1071, NRVQ-SDK-1072, NRVQ-SDK-1073, NRVQ-SDK-1074,
@@ -552,7 +554,7 @@ NRVQ-SDC-3000, NRVQ-SDC-3001, NRVQ-SDC-3002, NRVQ-SDC-3003, NRVQ-SDC-3004, NRVQ-
 NRVQ-SDC-3010, NRVQ-SDC-3011, NRVQ-SDC-3012, NRVQ-SDC-3013, NRVQ-SDC-3020, NRVQ-SDC-3021, NRVQ-SDC-3022,
 NRVQ-SDC-3023, NRVQ-SDC-3024, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3033, NRVQ-SDC-3034,
 NRVQ-SDC-3035, NRVQ-SDC-3036, NRVQ-SDC-3040, NRVQ-SDC-3041, NRVQ-SDC-3042, NRVQ-SDC-3043, NRVQ-SDC-3044,
-NRVQ-SDC-3045, NRVQ-SDC-3046, NRVQ-SDC-3047
+NRVQ-SDC-3045, NRVQ-SDC-3046, NRVQ-SDC-3047, NRVQ-SDC-3049
 
 NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005, NRVQ-AUTH-14006,
 NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013, NRVQ-AUTH-14014, NRVQ-AUTH-14015,

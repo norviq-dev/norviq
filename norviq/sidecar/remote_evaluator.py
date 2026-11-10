@@ -15,14 +15,17 @@ What happens when no decision comes back depends on whether the engine answered:
   not asked, and an unencodable call is not an outage.
 - A 4xx is the engine answering with a refusal (expired or wrong credential, malformed request). It
   is not retried and always blocks (``thin_proxy_fail_closed``), whatever the fallback posture.
-- A 5xx, timeout or connect error is retried; an unparseable body or any other unexpected error is
-  not. Once the attempts are spent, the outcome follows ``settings.sdk_fallback_mode``
+- A fault this sidecar can tell is its own (a token or URL it cannot send, a TLS trust failure, a
+  proxy refusal, an answer that is not a decision, any error that is not a transport error) is not
+  retried and blocks (``thin_proxy_client_misconfigured``, ``NRVQ-SDC-3049``); see `client_fault`.
+- A 5xx or any other transport error (timeout, refused or reset connection, DNS failure) is retried.
+  Once the attempts are spent, the outcome follows ``settings.sdk_fallback_mode``
   (``NRVQ_SDK_FALLBACK_MODE``). With the shipped default, ``allow``, the call is forwarded
   ungoverned under ``thin_proxy_fail_open`` and logged as ``NRVQ-SDC-3036``; with ``block`` it is
   dropped under ``thin_proxy_fail_closed``.
 
-So an engine outage fails OPEN by default. A refusal and an unencodable request are unconditionally
-fail-closed.
+So an engine outage fails OPEN by default. A refusal, an unencodable request and a local fault are
+unconditionally fail-closed.
 """
 
 from __future__ import annotations
@@ -37,10 +40,18 @@ import tempfile
 import httpx
 import structlog
 
+from norviq.bearer import redact_credentials
 from norviq.engine.latency import PhaseTimer
 from norviq.telemetry.metrics import record_interception_latency, record_path_phase
 from norviq.config import settings
-from norviq.sdk.client.engine import UnencodableRequest, encode_evaluate_request
+from norviq.sdk.client.engine import (
+    DECISIONS,
+    ClientFault,
+    UnencodableRequest,
+    client_fault,
+    encode_evaluate_request,
+    request_problem,
+)
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 
@@ -69,6 +80,17 @@ _FAIL_OPEN_REASON = (
     "Thin-proxy sidecar could not reach the central policy engine; forwarding UNGOVERNED because "
     "the configured fallback posture is allow"
 )
+
+
+def _client_fault_decision(problem: str) -> PolicyDecision:
+    """The block for a fault of this sidecar's own (`NRVQ-SDC-3049`)."""
+    return PolicyDecision(
+        decision="block",
+        rule_id="thin_proxy_client_misconfigured",
+        reason=(f"The sidecar could not send a valid request to the central policy engine: {problem}. "
+                "This is not an engine outage, and the fallback posture does not apply"),
+        trust_score=0.0,
+    )
 
 
 def _build_mtls_context(ca_pem: str, cert_pem: str, key_pem: str) -> ssl.SSLContext:
@@ -126,6 +148,12 @@ class RemoteEvaluator:
         (defense in depth). When the feature is off OR the URL is http, this is byte-identical to the
         prior plaintext behavior (no verify kwarg passed to httpx at all).
         """
+        problem = self._config_problem()
+        if problem is not None:
+            # No client is built; each call blocks on the same problem in `_evaluate_upstream`.
+            log.error("nrvq.sidecar.remote_evaluator.client_misconfigured", problem=problem,
+                      code="NRVQ-SDC-3049")
+            return
         headers = {"Content-Type": "application/json"}
         if self._api_token:
             headers["Authorization"] = f"Bearer {self._api_token}"
@@ -169,11 +197,35 @@ class RemoteEvaluator:
         finally:
             record_interception_latency("sidecar_proxy", "upstream", (perf_counter() - _t0) * 1000.0)
 
+    def _config_problem(self) -> str | None:
+        """Why this sidecar cannot send any request, or None."""
+        problem = request_problem(self._api_token, self._api_url)
+        if problem is not None:
+            return problem
+        if self._max_retries < 0:
+            return "the client settings are impossible (retries)"
+        return None
+
+    def _client_fault(self, problem: str) -> PolicyDecision:
+        """Block a call this sidecar could not send or read; the fallback posture does not apply."""
+        log.error("nrvq.sidecar.remote_evaluator.client_misconfigured", problem=problem,
+                  code="NRVQ-SDC-3049")
+        return _client_fault_decision(problem)
+
     async def _evaluate_upstream(self, event: ToolCallEvent) -> PolicyDecision:
-        """POST the event to the central engine. A request that cannot be encoded and a 4xx refusal
-        block; any other failure follows ``settings.sdk_fallback_mode`` (default ``allow``)."""
+        """POST the event to the central engine. A request that cannot be encoded, a local fault and a
+        4xx refusal block; a transport error or 5xx follows ``settings.sdk_fallback_mode``."""
+        problem = self._config_problem()
+        if problem is not None:
+            return self._client_fault(problem)
         if self._client is None:
-            await self.connect()
+            try:
+                await self.connect()
+            except Exception as exc:
+                problem = f"the HTTP client could not be built ({type(exc).__name__})"
+                log.error("nrvq.sidecar.remote_evaluator.client_misconfigured", problem=problem,
+                          code="NRVQ-SDC-3049")
+                return _client_fault_decision(problem)
         # Split payload / post / parse: the gap between what this client waits and what the API reports
         # measuring was ~46 ms with nowhere to attribute it. pydantic model_dump and JSON coding are CPU
         # work, and this container runs at 200m — where 8.1 ms of CPU is burned per call — so "the wire" and
@@ -209,6 +261,7 @@ class RemoteEvaluator:
         # Only transport errors and 5xx are retried: a 4xx is the engine answering with a refusal,
         # so retrying it just delays the same block.
         last_exc: Exception | None = None
+        fault: str | None = None
         for attempt in range(self._max_retries + 1):
             try:
                 with _timer.phase("post"):
@@ -217,9 +270,15 @@ class RemoteEvaluator:
                     )
                     resp.raise_for_status()
                 with _timer.phase("parse"):
-                    data = resp.json()
+                    try:
+                        data = resp.json()
+                    except ValueError:
+                        data = None
+                    if not isinstance(data, dict) or data.get("decision") not in DECISIONS:
+                        raise ClientFault(
+                            f"the engine answered HTTP {resp.status_code} without a valid decision")
                     decision = PolicyDecision(
-                        decision=data.get("decision", "block"),
+                        decision=data["decision"],
                         rule_id=data.get("rule_id", "remote_eval"),
                         trust_score=float(data.get("trust_score", 0.0)),
                         reason=data.get("reason", ""),
@@ -230,30 +289,34 @@ class RemoteEvaluator:
                 return decision
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
+                if not 400 <= exc.response.status_code < 600:
+                    fault = f"the API URL answered HTTP {exc.response.status_code}, not a decision"
+                    break
                 if exc.response.status_code < 500:
                     break  # the engine refused us (auth/bad request) — not retryable
-            except (httpx.TimeoutException, httpx.RequestError) as exc:
+            except ClientFault as exc:
+                fault = str(exc)
+                break
+            except httpx.TransportError as exc:
+                # Not retried when the fault is this sidecar's own; see `client_fault`.
+                fault = client_fault(exc)
+                if fault is not None:
+                    break
                 last_exc = exc
-            except Exception as exc:  # bad body / unexpected — not retryable
-                # Announce at the handler site with a stable code: this is the one arm that catches an
-                # unanticipated failure, and the shared fail-closed log below cannot say which arm we
-                # came from. Operators alert on the code, so a silent swallow here would be invisible.
-                #
-                # What reaches this arm now is a 200 whose body is not a decision (not JSON, not an
-                # object, a field of the wrong type), or a local fault such as a closed client. Both follow
-                # the fallback posture, as they do in the SDK client (`_handle_unknown_error`): a correct
-                # engine does not send such a body, so it means something other than the engine answered.
-                # A failure to encode the request no longer comes here; it is decided before the loop.
-                log.error(
-                    "nrvq.sidecar.remote_evaluator.unexpected_error",
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                    code="NRVQ-SDC-3033",
-                )
+            except ssl.SSLError as exc:
+                # Raised after the handshake, so httpcore did not wrap it. Not retried, as before.
+                fault = client_fault(exc)
                 last_exc = exc
                 break
+            except Exception as exc:  # unknown means block, as in the SDK client
+                problem = client_fault(exc) or "unexpected error"
+                log.error("nrvq.sidecar.remote_evaluator.client_misconfigured", problem=problem,
+                          code="NRVQ-SDC-3049")
+                return _client_fault_decision(problem)
             if attempt < self._max_retries:
                 await asyncio.sleep((self._backoff_base_ms * (2**attempt)) / 1000)
+        if fault is not None:
+            return self._client_fault(fault)
 
         # Every attempt failed. A 4xx means the engine ANSWERED and refused us (bad/expired token,
         # malformed request) — that is never an outage and must never fail open, or a revoked
@@ -266,7 +329,7 @@ class RemoteEvaluator:
         if mode == "allow":
             log.warning(
                 "nrvq.sidecar.remote_evaluator.fail_open",
-                error=str(last_exc),
+                error=redact_credentials(str(last_exc), self._api_token or ""),
                 code="NRVQ-SDC-3036",
             )
             return PolicyDecision(
@@ -275,7 +338,8 @@ class RemoteEvaluator:
                 reason=_FAIL_OPEN_REASON,
                 trust_score=0.0,
             )
-        log.error("nrvq.sidecar.remote_evaluator.fail_closed", error=str(last_exc), code="NRVQ-SDC-3031")
+        log.error("nrvq.sidecar.remote_evaluator.fail_closed",
+                  error=redact_credentials(str(last_exc), self._api_token or ""), code="NRVQ-SDC-3031")
         return PolicyDecision(
             decision="block",
             rule_id="thin_proxy_fail_closed",

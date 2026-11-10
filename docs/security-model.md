@@ -40,6 +40,21 @@ The baseline is not fail-closed: a namespace outside the list has none, the no-p
 ships `allow`, and when the engine is unreachable the sidecar follows `webhook.injection.fallbackMode`,
 which also ships `allow`.
 
+The fallback applies to a transport error (a timeout, a refused or reset connection, a DNS failure, a
+dropped TLS handshake, a proxy that cannot connect) or a 5xx. A client that can tell the fault is its
+own blocks instead, whatever the setting: a token that cannot be a header value, an unusable engine
+URL, impossible client settings, a TLS certificate that failed verification, a TLS alert naming this
+client's certificate as refused (expired, revoked, unknown CA), an https URL whose server does not
+speak TLS, a proxy that refuses the CONNECT with a non-5xx status, an answer that is not a decision,
+or any error that is not a transport error (`NRVQ-SDK-1018`, `NRVQ-SDC-3049`).
+
+What remains: with `allow`, a failure that looks like the network failing allows the call whether the
+engine is down or this client's own network path is wrong: wrong DNS, a client certificate the server
+rejects by dropping the connection or with the generic handshake_failure alert (over TLS 1.3 a refusal
+often arrives as a dropped connection), a proxy that cannot reach the engine, a client connection pool
+that is full because the workload sent too many concurrent calls. The client cannot tell these from an
+outage. Where the workload is not trusted, use `block`.
+
 Within a namespace the customer *has* chosen to enforce, evaluation is **fail-closed**: if OPA errors,
 times out, or the caller's SPIFFE identity is malformed, the call is blocked rather than silently
 allowed. See [Concepts → Decisions](concepts.md#decisions) for the full list of named fail-closed
