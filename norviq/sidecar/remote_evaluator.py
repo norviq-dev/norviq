@@ -9,6 +9,10 @@ namespace-scoped service JWT and maps the response to a ``PolicyDecision``.
 
 What happens when no decision comes back depends on whether the engine answered:
 
+- A request this process cannot encode (a non-finite number, a string that is not valid UTF-8,
+  nesting or size past what the SDK client will send) never leaves the pod. It blocks
+  (``thin_proxy_request_unencodable``, ``NRVQ-SDC-3047``) whatever the fallback posture: the engine was
+  not asked, and an unencodable call is not an outage.
 - A 4xx is the engine answering with a refusal (expired or wrong credential, malformed request). It
   is not retried and always blocks (``thin_proxy_fail_closed``), whatever the fallback posture.
 - A 5xx, timeout or connect error is retried; an unparseable body or any other unexpected error is
@@ -17,7 +21,8 @@ What happens when no decision comes back depends on whether the engine answered:
   ungoverned under ``thin_proxy_fail_open`` and logged as ``NRVQ-SDC-3036``; with ``block`` it is
   dropped under ``thin_proxy_fail_closed``.
 
-So an engine outage fails OPEN by default. Only a refusal is unconditionally fail-closed.
+So an engine outage fails OPEN by default. A refusal and an unencodable request are unconditionally
+fail-closed.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import structlog
 from norviq.engine.latency import PhaseTimer
 from norviq.telemetry.metrics import record_interception_latency, record_path_phase
 from norviq.config import settings
+from norviq.sdk.client.engine import UnencodableRequest, encode_evaluate_request
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 
@@ -48,6 +54,15 @@ _FAIL_CLOSED_REASON = "Thin-proxy sidecar could not reach the central policy eng
 _ENGINE_REFUSED_REASON = (
     "Central policy engine rejected the sidecar's request (credential or request error, not an outage)"
 )
+# The request could not be built in this pod, so the engine was never asked. Not an outage, so the
+# fallback posture does not apply.
+_UNENCODABLE_REASON = (
+    "The evaluate request could not be encoded in the sidecar (for example, a non-finite number or "
+    "nesting too deep); this is not an engine outage, and the fallback posture does not apply"
+)
+# The event fields the sidecar sends. `framework` is overridden below; the rest of the event (event_id,
+# timestamps, MCP context, PEP fields) is the SDK's and was never part of this payload.
+_REQUEST_FIELDS = {"tool_name", "tool_params", "agent_identity", "session_id", "call_depth", "framework"}
 # Reason when the central API is unreachable/unhealthy and the fallback posture is ``allow``, which
 # is the shipped default (config.sdk_fallback_mode), not an opt-in.
 _FAIL_OPEN_REASON = (
@@ -155,8 +170,8 @@ class RemoteEvaluator:
             record_interception_latency("sidecar_proxy", "upstream", (perf_counter() - _t0) * 1000.0)
 
     async def _evaluate_upstream(self, event: ToolCallEvent) -> PolicyDecision:
-        """POST the event to the central engine. A 4xx refusal blocks; any other failure follows
-        ``settings.sdk_fallback_mode`` (default ``allow``)."""
+        """POST the event to the central engine. A request that cannot be encoded and a 4xx refusal
+        block; any other failure follows ``settings.sdk_fallback_mode`` (default ``allow``)."""
         if self._client is None:
             await self.connect()
         # Split payload / post / parse: the gap between what this client waits and what the API reports
@@ -164,16 +179,29 @@ class RemoteEvaluator:
         # work, and this container runs at 200m — where 8.1 ms of CPU is burned per call — so "the wire" and
         # "serialising for the wire" have to be told apart before either is blamed.
         _timer = PhaseTimer()
+        # The body is encoded here, before the retry loop, and by the SDK client's encoder. Encoding is
+        # local work that has nothing to do with whether the engine is up, so a failure to encode is
+        # decided here, as a block.
         with _timer.phase("payload"):
-            payload = {
-                "tool_name": event.tool_name,
-                "tool_params": event.tool_params,
-                "agent_identity": event.agent_identity.model_dump(),
-                "session_id": event.session_id,
-                "call_depth": event.call_depth,
-                # Preserve the decision source so the central audit record is attributed to the sidecar.
-                "framework": event.framework or "sidecar",
-            }
+            try:
+                body = encode_evaluate_request(
+                    event,
+                    include=_REQUEST_FIELDS,
+                    # Preserve the decision source so the central audit record is attributed to the sidecar.
+                    update={"framework": event.framework or "sidecar"},
+                )
+            except UnencodableRequest as exc:
+                log.error(
+                    "nrvq.sidecar.remote_evaluator.unencodable",
+                    error=str(exc)[:200],
+                    code="NRVQ-SDC-3047",
+                )
+                return PolicyDecision(
+                    decision="block",
+                    rule_id="thin_proxy_request_unencodable",
+                    reason=_UNENCODABLE_REASON,
+                    trust_score=0.0,
+                )
         # Retry transient failures before giving up. Without this a single dropped connection — a
         # rolling norviq-api restart, a node's conntrack entry expiring, one 503 from a terminating
         # pod — blocks a live agent's tool call outright. The SDK client has always retried with
@@ -184,7 +212,9 @@ class RemoteEvaluator:
         for attempt in range(self._max_retries + 1):
             try:
                 with _timer.phase("post"):
-                    resp = await self._client.post("/api/v1/evaluate", json=payload)
+                    resp = await self._client.post(
+                        "/api/v1/evaluate", content=body, headers={"Content-Type": "application/json"}
+                    )
                     resp.raise_for_status()
                 with _timer.phase("parse"):
                     data = resp.json()
@@ -208,6 +238,12 @@ class RemoteEvaluator:
                 # Announce at the handler site with a stable code: this is the one arm that catches an
                 # unanticipated failure, and the shared fail-closed log below cannot say which arm we
                 # came from. Operators alert on the code, so a silent swallow here would be invisible.
+                #
+                # What reaches this arm now is a 200 whose body is not a decision (not JSON, not an
+                # object, a field of the wrong type), or a local fault such as a closed client. Both follow
+                # the fallback posture, as they do in the SDK client (`_handle_unknown_error`): a correct
+                # engine does not send such a body, so it means something other than the engine answered.
+                # A failure to encode the request no longer comes here; it is decided before the loop.
                 log.error(
                     "nrvq.sidecar.remote_evaluator.unexpected_error",
                     error=str(exc),

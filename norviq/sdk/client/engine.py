@@ -46,7 +46,7 @@ def _non_finite(value: Any) -> bool:
             continue
         visited.add(id(node))
         if len(visited) > _MAX_PARAM_NODES:
-            raise _UnencodableRequest(f"more than {_MAX_PARAM_NODES} containers in the call")
+            raise UnencodableRequest(f"more than {_MAX_PARAM_NODES} containers in the call")
         if isinstance(node, dict):
             # Keys too: the encoder writes a float key as a string, so an inf/nan key reaches the
             # engine as text it cannot tell from an ordinary one.
@@ -67,8 +67,38 @@ _CONTAINERS = (dict, list, tuple, set, frozenset, collections.deque)
 _MAX_PARAM_NODES = 100_000
 
 
-class _UnencodableRequest(Exception):
-    """The evaluate request could not be serialised in this process (see `PolicyEngineClient._post`)."""
+class UnencodableRequest(Exception):
+    """The evaluate request could not be serialised in this process (see `encode_evaluate_request`)."""
+
+
+def encode_evaluate_request(
+    event: ToolCallEvent,
+    *,
+    include: set[str] | None = None,
+    update: dict[str, Any] | None = None,
+) -> bytes:
+    """The `/api/v1/evaluate` request body for `event`, as it goes on the wire.
+
+    Raises `UnencodableRequest` when this process cannot produce it. Both clients of the endpoint, this
+    module's `PolicyEngineClient` and the injected sidecar's `RemoteEvaluator`, encode through here, so a
+    call one of them cannot send is refused by the other as well instead of the two drifting apart.
+    `include` limits the event fields sent (the sidecar sends a subset); `update` sets values after the
+    event is serialised and before the JSON is written, so they pass through the same checks.
+
+    Non-finite floats are refused BEFORE pydantic sees them: `model_dump(mode="json")` writes inf and
+    nan as null, so the engine would decide on `amount: null` while the tool runs with the caller's
+    real value. The JSON parameters are the ones httpx uses for `json=`.
+    """
+    if _non_finite(event.tool_params) or _non_finite(event.mcp):
+        raise UnencodableRequest("a non-finite number (inf or nan) in the call")
+    try:
+        document = event.model_dump(mode="json", include=include)
+        if update:
+            document.update(update)
+        return json.dumps(document, separators=(",", ":"), ensure_ascii=False,
+                          allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise UnencodableRequest(str(exc)) from exc
 
 
 class PolicyEngineClient:
@@ -144,18 +174,9 @@ class PolicyEngineClient:
         # `client.post` it fell to `_handle_unknown_error` and the OUTAGE fallback, so with
         # sdk_fallback_mode=allow a call nobody could evaluate was allowed. The caller chooses the
         # params, so that was a bypass on demand. A request this process cannot encode is not an
-        # outage: `evaluate` blocks it whatever the fallback mode.
-        #
-        # Non-finite floats are refused BEFORE pydantic sees them: `model_dump(mode="json")` writes inf
-        # and nan as null, so the engine would decide on `amount: null` — a threshold rule that is not
-        # written for null lets it through — while the tool runs with the caller's real value.
-        if _non_finite(event.tool_params) or _non_finite(event.mcp):
-            raise _UnencodableRequest("a non-finite number (inf or nan) in the call")
-        try:
-            body = json.dumps(event.model_dump(mode="json"), separators=(",", ":"),
-                              ensure_ascii=False, allow_nan=False).encode("utf-8")
-        except (ValueError, TypeError, RecursionError) as exc:
-            raise _UnencodableRequest(str(exc)) from exc
+        # outage: `evaluate` blocks it whatever the fallback mode. Non-finite numbers, and why they
+        # are checked before pydantic, are covered in `encode_evaluate_request`.
+        body = encode_evaluate_request(event)
         for attempt in range(self._max_retries + 1):
             try:
                 # The central API mounts the evaluate router at /api/v1 (norviq/api/main.py) — same
@@ -257,7 +278,7 @@ class PolicyEngineClient:
             decision = PolicyDecision(**(await self._post(event)))
             self._log_success(event.event_id, decision.decision)
             return decision
-        except _UnencodableRequest as exc:
+        except UnencodableRequest as exc:
             log.error("nrvq.sdk.evaluate.unencodable", event_id=event.event_id, error=str(exc)[:200],
                       code="NRVQ-SDK-1016")
             return PolicyDecision(

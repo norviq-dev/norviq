@@ -80,6 +80,11 @@ either in without changing adapter code.
   the call is blocked regardless of this setting (`rule_id="engine_rejected_request"`). Otherwise
   `fallback=allow` would turn every 401 into an allow, and a revoked credential would become a total
   governance bypass.
+
+  **Nor is a request that cannot be encoded.** A call whose arguments hold a NaN or Infinity, a string
+  that is not valid UTF-8, or nesting deeper than about 255 levels is never sent to the engine, and is
+  blocked regardless of this setting (`rule_id="engine_request_unencodable"`, or
+  `thin_proxy_request_unencodable` on the sidecar path).
 - **Retries + circuit breaker** — `PolicyEngineClient` retries transient failures with
   exponential backoff (`sdk_retry_max_attempts`, `sdk_retry_backoff_base_ms`), then opens a
   circuit breaker (`sdk_circuit_fail_threshold`, `sdk_circuit_reset_after_ms`) so a degraded
