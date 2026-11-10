@@ -178,7 +178,7 @@ esac
 # ---------------------------------------------------------------------------------------------------
 stage "5. The injector marks its work, and does not double-inject"
 ANN="$(annotations inject-a)"
-echo "$ANN" | grep -q "norviq.io/injected" && ok "pod is stamped norviq.io/injected" || note "no norviq.io/injected stamp (idempotency is keyed some other way)"
+echo "$ANN" | grep -q "norviq.io/injected" && ok "pod is stamped norviq.io/injected" || bad "no norviq.io/injected stamp — the webhook stamps every pod it injects"
 COUNT="$(containers inject-a | tr ' ' '\n' | grep -c norviq)"
 [ "${COUNT:-0}" -le 1 ] && ok "exactly one norviq container (no double-injection)" || bad "${COUNT} norviq containers — the pod was injected more than once"
 

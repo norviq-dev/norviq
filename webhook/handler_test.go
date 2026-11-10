@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -135,10 +136,8 @@ func TestMutate_NoAgentClassStillInjects(t *testing.T) {
 	}
 }
 
-// Idempotency: a pod that is ALREADY FULLY injected (the norviq-socket volume + the real sidecar image
-// with no command override + every app container wired to the socket with the correct NRVQ_SOCKET_PATH) is
-// skipped. A sidecar container ALONE does not suffice — that hardened contract closes the bypass where a
-// bare sidecar-image container suppresses injection while the app runs unwired (see the bypass tests).
+// fullyInjectedContainer is an app container wired the way the injector wires one: the norviq-socket
+// volume at socketMountPath and NRVQ_SOCKET_PATH. A pod carrying it is refused at CREATE (NRVQ-WHK-4063).
 func fullyInjectedContainer(name, image string) corev1.Container {
 	return corev1.Container{
 		Name:         name,
@@ -148,8 +147,8 @@ func fullyInjectedContainer(name, image string) corev1.Container {
 	}
 }
 
-// trustedSidecar is a sidecar container carrying the injector's real routing env (proxy mode pointed at
-// the configured engine), as the skip path now requires. extraMounts lets the drift test add the socket.
+// trustedSidecar is a sidecar container carrying the injector's routing env (proxy mode pointed at the
+// configured engine). extraMounts lets a test add the socket mount.
 func trustedSidecar(name, image string, cfg Config, mounts ...corev1.VolumeMount) corev1.Container {
 	return corev1.Container{
 		Name:         name,
@@ -162,7 +161,7 @@ func trustedSidecar(name, image string, cfg Config, mounts ...corev1.VolumeMount
 	}
 }
 
-func TestMutateAlreadyInjected(t *testing.T) {
+func TestMutateAlreadyInjectedIsRefused(t *testing.T) {
 	cfg := LoadConfig()
 	h := NewHandler(cfg)
 	pod := corev1.Pod{
@@ -173,15 +172,29 @@ func TestMutateAlreadyInjected(t *testing.T) {
 		},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
-	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected no patch for a pod already FULLY injected (volume + wired app + real sidecar)")
+	// Rewritten: this asserted SKIP (admitted, no patch). The webhook is CREATE-only, so a pod arriving
+	// already injected is a copied spec, and admission now refuses it rather than trusting the copy.
+	assertRefusedAsCopy(t, resp)
+}
+
+// assertRefusedAsCopy is the outcome for a pod that already carries injector-owned parts.
+func assertRefusedAsCopy(t *testing.T, resp admissionv1.AdmissionReview) {
+	t.Helper()
+	if resp.Response.Allowed || resp.Response.Patch != nil {
+		t.Fatalf("a pod carrying injector-owned parts must be refused; allowed=%v patched=%v",
+			resp.Response.Allowed, resp.Response.Patch != nil)
+	}
+	if resp.Response.Result == nil || !strings.HasPrefix(resp.Response.Result.Message, "NRVQ-WHK-4063: ") {
+		t.Fatalf("refused, but not under NRVQ-WHK-4063: %+v", resp.Response.Result)
 	}
 }
 
-// SECURITY (self-stamp bypass): a tenant who self-stamps norviq.io/injected=true on a pod
-// that carries NO real sidecar structure must NOT be treated as injected — the annotation is attacker-
-// controllable on an unadmitted CREATE, and trusting it lets the pod run UNPOLICED. The real sidecar MUST
-// still be injected (patch present). FAIL-ON-BUG: fails on the pre-fix code (annotation → skip → no patch).
+// A pod author can write norviq.io/injected on a CREATE, so the annotation is never evidence that a pod is
+// governed. It must never let the pod through unpatched.
+//
+// Rewritten: this asserted the pod was INJECTED with the annotation ignored. The annotation is now one of
+// the injector-owned parts, so the pod is refused instead; both outcomes keep it from running unpatched,
+// and the refusal names the annotation so the author can remove it.
 func TestMutateSelfStampAnnotationDoesNotBypassInjection(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	pod := corev1.Pod{
@@ -193,15 +206,17 @@ func TestMutateSelfStampAnnotationDoesNotBypassInjection(t *testing.T) {
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
-	if !resp.Response.Allowed || resp.Response.Patch == nil {
-		t.Fatal("self-stamped norviq.io/injected annotation must be IGNORED and the real sidecar injected (patch expected) — else the pod runs unpoliced")
+	assertRefusedAsCopy(t, resp)
+	if !strings.Contains(resp.Response.Result.Message, injectedAnnotation) {
+		t.Fatalf("the refusal must name the annotation: %q", resp.Response.Result.Message)
 	}
 }
 
-// Idempotency after an NrvqConfig image rotation: an already-injected pod is recognized by the injector's
-// structural signature (the norviq enforcement-socket mount on its sidecar) even when the container image
-// no longer matches the current default — WITHOUT trusting the attacker-controllable annotation.
-func TestMutateAlreadyInjectedAfterImageDrift(t *testing.T) {
+// An injected pod's spec, copied after an NrvqConfig image rotation so its sidecar names an older engine tag.
+//
+// Rewritten: this asserted SKIP, tolerating the tag drift as the injector's own output. Every copy is now
+// refused, whatever image its sidecar names, since the webhook builds the sidecar on every CREATE.
+func TestMutateAlreadyInjectedAfterImageDriftIsRefused(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
@@ -218,9 +233,7 @@ func TestMutateAlreadyInjectedAfterImageDrift(t *testing.T) {
 		},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
-	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected no patch for a fully-injected pod whose sidecar image drifted (same name + socket mount)")
-	}
+	assertRefusedAsCopy(t, resp)
 }
 
 // A self-wired "sidecar" from Docker Hub's `norviq` namespace must not make a pod count as already
@@ -252,9 +265,12 @@ func TestMutateDockerHubNorviqSidecarIsNotTrustedAsInjected(t *testing.T) {
 	}
 }
 
-// Decoy: an attacker-controlled container merely NAMED "norviq-sidecar" but running a
-// different image must NOT suppress injection of the real sidecar — otherwise the pod runs unpoliced.
-func TestMutateDecoySidecarNameStillInjectsRealSidecar(t *testing.T) {
+// A container merely NAMED "norviq-sidecar" but running another image must not leave the pod unpatched.
+//
+// Rewritten: this asserted the real sidecar was INJECTED beside it. That patch adds a second container
+// named norviq-sidecar, which the API server rejects as a duplicate, so the pod could never have started;
+// the name is now an injector-owned part and admission refuses the pod with a message naming it.
+func TestMutateDecoySidecarNameIsRefused(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
@@ -264,16 +280,9 @@ func TestMutateDecoySidecarNameStillInjectsRealSidecar(t *testing.T) {
 		}},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
-	if !resp.Response.Allowed || resp.Response.Patch == nil {
-		t.Fatal("expected the real sidecar to be injected despite a decoy container named norviq-sidecar with a different image")
-	}
-	var patches []patchOp
-	if err := json.Unmarshal(resp.Response.Patch, &patches); err != nil {
-		t.Fatalf("patch unmarshal failed: %v", err)
-	}
-	sidecar := patches[0].Value.(map[string]interface{})
-	if sidecar["name"] != "norviq-sidecar" || sidecar["image"] != h.cfg.SidecarImage {
-		t.Fatalf("expected the real norviq-sidecar container to be appended, got %+v", sidecar)
+	assertRefusedAsCopy(t, resp)
+	if !strings.Contains(resp.Response.Result.Message, "container norviq-sidecar takes the injected sidecar's name") {
+		t.Fatalf("the refusal must name the container: %q", resp.Response.Result.Message)
 	}
 }
 

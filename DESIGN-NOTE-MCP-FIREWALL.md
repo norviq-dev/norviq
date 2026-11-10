@@ -529,24 +529,24 @@ The limit this does **not** lift is musl: an Alpine-based MCP server image canno
 
 ### 11.2 Fail-closed rules
 
-The sidecar path's posture is "a pod carrying norviq plumbing that is not fully injected is refused,
-because skipping would run it unpoliced". MCP inherits it exactly:
+A pod that already carries any part the injector adds is refused at CREATE (`NRVQ-WHK-4063`, or
+`NRVQ-WHK-4034` for something of the pod's own placed under an injector-owned path;
+`webhook/injector_owned.go`). The webhook is registered for CREATE only, so such a pod is always a
+written or copied spec, and there is no "already injected" outcome. MCP follows the same rule:
 
 | situation | verdict | why |
 |---|---|---|
 | annotation names a container the pod lacks | **deny** | a typo that "worked" is the failure mode |
 | named container sets no explicit `command` | **deny** | its argv is the image ENTRYPOINT, which admission cannot see; prepending to `args` would run neither correctly |
-| pod pre-places the proxy volume / mount / a proxy-shaped command / the init container name | **deny** | injector-owned plumbing it did not place; a pre-occupied proxy path runs a chosen binary in place of the firewall |
-| sidecar correct but a named MCP container unwrapped | **inject** (not skip) | that server would otherwise run ungoverned |
-| exactly the injector's own output | **skip** | idempotent re-admission |
+| pod pre-places the proxy volume / mount / a proxy-shaped command / the init container name, or runs the proxy image under any name / a command naming `norviq-mcp` or the payload path | **deny** | injector-owned plumbing it did not place; a pre-occupied proxy path runs a chosen binary in place of the firewall |
+| sidecar present but a named MCP container unwrapped | **deny** | carries injector-owned parts |
+| exactly the injector's own output | **deny** | a copy; the webhook builds the plumbing itself on every CREATE |
 
-Two compositions with the existing classifier were needed. The injected init container is a
-sidecar-image container that necessarily overrides `command` (it runs a `cp`), which the
-neutered-decoy check would otherwise deny on every re-admission — so it is exempted, but only on an
-**exact** match against the spec the injector generates, which buys an attacker nothing because
-reproducing it means reproducing the real proxy copy. And `fullyInjected` now also requires every
-annotated container to be wrapped *with its own server id*, so a proxy-shaped command pointing at a
-catalogue the operator never approved does not read as already-governed.
+Earlier versions admitted the injector's own output unpatched ("skip"), which needed an exact
+recognizer of that output: an exemption for the injector's own init container, and a check that every
+annotated container was wrapped with its own server id and routing. Each field such a recognizer did
+not compare was configuration a pod author could set under the injector's name, so the skip outcome
+was removed rather than extended.
 
 ### 11.3 Off by default, byte-identically
 
@@ -581,11 +581,13 @@ proxy's arguments. Nothing in that pod required anything only the webhook can pr
 The same mistake appeared three more times once named: the delivery volume was matched by name (so a
 `hostPath` passed), the proxy mount was checked without `readOnly` (so the workload could overwrite
 its own firewall), and the wrapped container's routing env was never checked at all (so `NRVQ_API_URL`
-could point at an allow-all engine). The sidecar path had already learned this — it has
-`sidecarRoutingTrusted` for exactly that reason — and the MCP path simply had not inherited it.
+could point at an allow-all engine). The sidecar path had already learned this — it had
+`sidecarRoutingTrusted` for exactly that reason — and the MCP path simply had not inherited it. Both
+checks were removed along with the skip outcome (11.2).
 
-The rule now is the one the sidecar already followed: **re-derive what the injector would emit and
-compare, never look for injector-shaped plumbing.**
+The rule then became the one the sidecar already followed: **re-derive what the injector would emit
+and compare, never look for injector-shaped plumbing.** That rule has since been superseded by the
+one in 11.2: any injector-owned part is refused, so there is nothing to compare.
 
 **The delivery container ran too late.** It was appended to `initContainers`, so when the annotated
 target *was* an init container the payload was staged after the container that execs it — a pod that
@@ -600,14 +602,18 @@ actionable message and by `required` in the chart.
 
 **Exact image refs broke upgrades.** Recognising the injector's own init container by exact image ref
 meant rolling the proxy tag stopped it recognising its own output, denying re-admission of pods it had
-itself injected. It now compares repository name, the same rule `sameSidecarImageName` already used.
+itself injected. It was changed to compare repository name, the rule the sidecar path's
+`sameSidecarImageName` used. Since the skip outcome was removed (11.2) the injector no longer
+recognises its own output at all, so a tag roll changes nothing: a re-submitted copy is refused
+whatever its image tag.
 
 Each is locked by a test that fails against the old code:
 `TestMcpInjection_SelfWiredPodWithFakeProxyIsDenied`,
 `TestMcpInjection_UntrustedDeliveryPlumbingIsRejected`,
 `TestMcpInjection_DeliveryInitContainerRunsBeforeWrappedTarget`,
 `TestMcpInjection_RequiresAnExplicitProxyImage`,
-`TestMcpInjection_ImageTagRollStillSkips`.
+`TestMcpInjection_ImageTagRollIsRefused` (it asserted the skip across a tag roll; with the skip
+outcome removed it asserts refusal).
 
 **Still open**, deliberately not fixed here:
 

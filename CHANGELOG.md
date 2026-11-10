@@ -13,6 +13,19 @@ because they should be installed.
 ## [Unreleased]
 
 - Dependabot removed; dependency updates are made by hand and gated in CI (`SECURITY.md`).
+- The admission webhook refuses a pod whose spec already carries any part the injector adds (the
+  sidecar, its volumes or mounts, `NRVQ_SOCKET_PATH`, the `norviq.io/injected` annotation, MCP proxy
+  wrapping) with `NRVQ-WHK-4063`, opted out or not; it used to admit such a pod unpatched when the
+  parts looked like its own output. Re-creating a pod from an injected spec (`kubectl get pod -o yaml`,
+  `kubectl debug --copy-to`) now needs the injected parts removed first. An opted-out pod running the
+  sidecar image, whatever its command, is refused the same way. `NRVQ-WHK-4008` is retired. This
+  covers pods the webhook sees: with `gateOnlyAgentPods` on (the default), a pod without
+  `norviq.io/agent-class` never reaches it.
+- The injector now mounts the enforcement socket directory (`/var/run/norviq`) `readOnly` into every
+  container except the sidecar, so another container cannot remove or replace the socket through that
+  mount; `docs/security-model.md` lists the routes it does not close. Containers still connect to it
+  as before; a workload that wrote files of its own into that directory now gets a read-only
+  filesystem error.
 
 ## [0.2.6] — 2026-11-05 — the namespace baseline enforces by default
 

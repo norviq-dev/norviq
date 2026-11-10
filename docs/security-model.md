@@ -162,6 +162,17 @@ not traverse the sidecar.
   client private key is never readable by the workload and never lands on a real disk. Asserted by
   `webhook/injector_writable_tmp_test.go`, which fails if anyone "fixes" a temp-dir crash by turning
   `readOnlyRootFilesystem` off.
+- **Only the sidecar can write the socket directory.** The shared `norviq-socket` volume is mounted
+  read-write into the injected sidecar alone; every other container the injector wires (app containers,
+  init containers, native init sidecars, the MCP proxy delivery container) gets it `readOnly`.
+  Connecting to the unix socket works through a read-only mount; removing the socket or binding another
+  in its place through that mount does not. That closes the direct route, not every route. A container
+  can still displace the socket when it shares the pod's PID namespace (`shareProcessNamespace: true`)
+  and runs as the sidecar's uid, when it can remount (privileged or `CAP_SYS_ADMIN`), or when it shares a
+  writable volume that another container mounts above `/var/run/norviq` (at `/var/run`, `/run` or
+  `/var`). Every container in the pod belongs to the pod author, as the cooperative-PEP note above says;
+  this narrows what a single compromised container can do, it is not a boundary between containers.
+  Asserted by `webhook/socket_mount_mode_test.go`.
 - **The central API/engine** — validates the caller's service JWT, resolves the caller's
   `(namespace, agent_class, spiffe_id)`, collects candidate policies, computes the trust score
   server-side, and queries OPA. This is where the actual allow/block decision is made — the sidecar
@@ -237,6 +248,7 @@ implicit:
 | A manipulated / prompt-injected agent making tool calls it shouldn't | **Yes** — the core case | Policy on tool-call inputs + trust escalation |
 | A **compromised co-resident pod** dialing other pods' IPs | **Yes** | OPA binds loopback and is fronted by no Service; internal mTLS on the API path |
 | An agent workload trying to read the sidecar's mTLS key | **Yes** | tmpfs is mounted into the sidecar only, never the app container or the shared socket volume |
+| A container in the pod replacing the sidecar's socket with its own | **Partially** | The socket directory is mounted `readOnly` into every container except the sidecar; a shared PID namespace, a privileged container or a shared volume above `/var/run/norviq` still allows it |
 | A pod author self-exempting from injection | **Yes, if you close it** | `webhook.injection.allowPodOptOut=false` (default `true`) + RBAC on pod labels **and on `norviq.io/agent-class`** — see the note below, `allowPodOptOut` alone does not close it |
 | An authenticated user reaching another tenant's data | **Yes** | JWT namespace claim binding (`scoped_namespace` / `read_namespace`), per-tenant OPA packages |
 | A client asserting its own trust score | **Yes** | `trust_score` stripped from the request and recomputed server-side |
@@ -347,6 +359,16 @@ were missed:
   restore a namespace-uniform guarantee, because a pod omitting `norviq.io/agent-class` never reaches
   the injector. So the enforcement boundary is the **pod** label, not the namespace label: restrict who
   can set `norviq.io/agent-class` and the opt-out label/annotation via RBAC.
+
+  The opt-out never admits a pod that already carries injector plumbing. A routed pod whose spec holds
+  any part the injector adds (the sidecar, its volumes or mounts, `NRVQ_SOCKET_PATH`, the
+  `norviq.io/injected` annotation, MCP proxy wrapping) is refused with `NRVQ-WHK-4063`, opted out or
+  not, and so is one that places its own volume, device or termination message file under a path the
+  injector mounts at (`NRVQ-WHK-4034`). The webhook builds that plumbing itself on every CREATE, so
+  there is no "already injected" pod to admit unpatched; a spec copied from a running pod has to have
+  the injected parts removed before it is created again. An opted-out pod has nothing added beside it,
+  so there a container running the sidecar image counts as the injector's sidecar whatever command it
+  is given (the image's CMD is the sidecar process).
 - **CRD-level policy business rules are enforced by the controller, not at admission.**
   `webhook/controller.go` validates `NrvqPolicy` semantics — cross-namespace targets, `clusterPriority`
   bounds (500-1000, restricted to the admin policy namespace), and Rego content — when it syncs a CRD to

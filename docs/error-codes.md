@@ -25,7 +25,7 @@ individually described.
 |---|---:|---|
 | API | 107 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | MCP | 64 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
-| WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/controller.go`, `webhook/injector.go` |
+| WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/injector_owned.go`, `webhook/controller.go`, `webhook/injector.go` |
 | ENG | 54 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | DB | 45 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
 | FLT | 39 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
@@ -171,13 +171,13 @@ pod starts **without** a sidecar, or when a CRD write doesn't reach the console.
 | NRVQ-WHK-4005 | response marshal failed |
 | NRVQ-WHK-4006 | pod unmarshal failed |
 | NRVQ-WHK-4007 | injection opted out for this pod (`norviq-injection=disabled` / `norviq.io/skip-injection`) |
-| NRVQ-WHK-4008 | pod already fully injected, skipping |
 | NRVQ-WHK-4009 | patch creation failed; also logged when a pod-level opt-out is **ignored** because `webhook.injection.allowPodOptOut=false` |
 | NRVQ-WHK-4012 | dry-run injection (admission `dryRun`, nothing persisted) |
 | NRVQ-WHK-4013 | wrong Content-Type |
 | NRVQ-WHK-4014 | AdmissionReview read failed |
 | NRVQ-WHK-4015 | invalid agent-class label; injecting with an empty class |
-| NRVQ-WHK-4034 | **enforcement-integrity denial** — the request tried to self-stamp as already-injected or otherwise bypass injection, and was refused. Also used by the controller for a cross-namespace policy rejection. |
+| NRVQ-WHK-4034 | **enforcement-integrity denial** — a container places something of the pod's own (a volume mount, a block device, a termination message file) at or below a path the injector mounts its plumbing at: the socket directory `/var/run/norviq` (or `/run/norviq`), and with MCP injection on `/norviq/mcp` and `/norviq-mcp-staging`, with SPIFFE injection on `/spiffe-workload-api`. Refused whether or not the pod opts out. Also used by the controller for a cross-namespace policy rejection. |
+| NRVQ-WHK-4063 | **pod carries injector-owned parts** — refused at CREATE because the spec already holds something the webhook adds: the `norviq.io/injected` annotation, a `norviq-socket`/`norviq-tmp` volume (with MCP injection on, `norviq-mcp-proxy`; with SPIFFE injection on, `spiffe-workload-api`) or a mount of one, a container named `norviq-sidecar` (or `norviq-mcp-init` with MCP injection on), a container running the sidecar image with neither command nor args (on a pod that opts out of injection, a container running the sidecar image or another image the sidecar allowlist accepts, whatever its command), `NRVQ_SOCKET_PATH` (and `NRVQ_SPIFFE_MODE`/`NRVQ_SPIFFE_SOCKET` with SPIFFE injection on), with MCP injection on a container running the MCP proxy image under any name or a command that runs under the MCP proxy, names its `norviq-mcp` executable or refers to its payload path, or a reference to a `norviq-sidecar-*` credential Secret. The message names the part. Usually a spec copied from a running pod (`kubectl get pod -o yaml`, `kubectl debug --copy-to`): remove the injected parts and create the pod again; the webhook adds them. Refused whether or not the pod opts out. There is no "already injected" outcome: until this release such a pod could be admitted unpatched, logged as `NRVQ-WHK-4008`, which is no longer emitted. |
 
 **CRD controller** — `webhook/controller.go`
 
@@ -492,14 +492,14 @@ NRVQ-API-7145, NRVQ-API-7146, NRVQ-API-7147, NRVQ-API-7149, NRVQ-API-7150, NRVQ-
 NRVQ-API-7160, NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
-NRVQ-WHK-4007, NRVQ-WHK-4008, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,
+NRVQ-WHK-4007, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,
 NRVQ-WHK-4014, NRVQ-WHK-4015, NRVQ-WHK-4020, NRVQ-WHK-4021, NRVQ-WHK-4022, NRVQ-WHK-4023, NRVQ-WHK-4024,
 NRVQ-WHK-4025, NRVQ-WHK-4026, NRVQ-WHK-4027, NRVQ-WHK-4028, NRVQ-WHK-4029, NRVQ-WHK-4030, NRVQ-WHK-4031,
 NRVQ-WHK-4032, NRVQ-WHK-4033, NRVQ-WHK-4034, NRVQ-WHK-4035, NRVQ-WHK-4036, NRVQ-WHK-4037, NRVQ-WHK-4038,
 NRVQ-WHK-4039, NRVQ-WHK-4040, NRVQ-WHK-4041, NRVQ-WHK-4042, NRVQ-WHK-4043, NRVQ-WHK-4044, NRVQ-WHK-4045,
 NRVQ-WHK-4046, NRVQ-WHK-4047, NRVQ-WHK-4048, NRVQ-WHK-4049, NRVQ-WHK-4050, NRVQ-WHK-4051, NRVQ-WHK-4052,
 NRVQ-WHK-4053, NRVQ-WHK-4054, NRVQ-WHK-4055, NRVQ-WHK-4056, NRVQ-WHK-4057, NRVQ-WHK-4058, NRVQ-WHK-4059,
-NRVQ-WHK-4060, NRVQ-WHK-4061, NRVQ-WHK-4062
+NRVQ-WHK-4060, NRVQ-WHK-4061, NRVQ-WHK-4062, NRVQ-WHK-4063
 
 NRVQ-ENG-2000, NRVQ-ENG-2001, NRVQ-ENG-2002, NRVQ-ENG-2003, NRVQ-ENG-2004, NRVQ-ENG-2005, NRVQ-ENG-2006,
 NRVQ-ENG-2010, NRVQ-ENG-2015, NRVQ-ENG-2020, NRVQ-ENG-2021, NRVQ-ENG-2030, NRVQ-ENG-2031, NRVQ-ENG-2040,
