@@ -32,6 +32,8 @@ ACCEPTED = frozenset({
     # its four; semantic-kernel's fixes all need a pre-release azure-ai-agents.
     "CVE-2026-45829", "CVE-2026-45830", "CVE-2026-45831", "CVE-2026-45833",
     "CVE-2026-26030", "CVE-2026-25592",
+    # pybars4 (via semantic-kernel, its Handlebars prompt templates): 0.9.13 is the latest and has no fix.
+    "CVE-2026-119716",
     # litellm: a spurious match, like the k8s ones below. The advisory (GHSA-53gh-p8jc-7rg8) covers
     # 1.40.3.dev2 through 1.40.12 only; the lock is at 1.100.4.
     "CVE-2024-6825",
