@@ -10,7 +10,7 @@ Three versions published incompletely — `v0.1.0` shipped no chart, `v0.1.1` sh
 `v0.2.0` shipped no chart — and their headings say so: they are listed because they happened, not
 because they should be installed.
 
-## [0.2.7] — 2026-11-10 — a pod that carries the injector's parts is refused
+## [0.2.7] — 2026-11-11 — a pod that carries the injector's parts is refused
 
 **Upgrade impact — read before `helm upgrade`.**
 
