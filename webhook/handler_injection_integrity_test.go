@@ -2,12 +2,10 @@
 // Copyright 2026 Norviq Contributors
 package main
 
-// Webhook enforcement-integrity: the norviq-socket volume, the socket mount, the
-// NRVQ_SOCKET_PATH env and the sidecar container are injector-owned. A tenant with pod-create RBAC could
-// otherwise run UNPOLICED by presenting a fake/partial/pre-occupied version of that plumbing so injection
-// is skipped, or a genuine sidecar that leaves the app unwired. The webhook: DENIES a neutered decoy
-// (command/args override), DENIES any pod that carries norviq artifacts without being FULLY injected, and
-// wires initContainers too.
+// Webhook enforcement-integrity: the norviq-socket volume, the socket mount, the NRVQ_SOCKET_PATH env and
+// the sidecar container are injector-owned. A pod that presents any of them at CREATE is refused, whether
+// it looks partial, pre-occupied or complete, so pod-supplied plumbing never stands in for the injected
+// sidecar. Init containers are wired like app containers.
 
 import (
 	"strings"
@@ -132,10 +130,12 @@ func TestMutateInitContainerWorkloadIsWired(t *testing.T) {
 	}
 }
 
-// --- FALSE-POSITIVE GUARD: a genuinely FULLY-injected pod (app with its own command, correctly wired,
-// real sidecar) is recognized and skipped — NOT denied. -----------------------------------------------
+// --- a pod that is already fully wired (app with its own command, real sidecar) ----------------------
+//
+// Rewritten: this asserted SKIP, as a guard against refusing the injector's own output. Re-submitting
+// that output is now refused by decision (the webhook is CREATE-only, so such a pod is a copy).
 
-func TestMutateFullyInjectedPodWithAppCommandSkips(t *testing.T) {
+func TestMutateFullyInjectedPodWithAppCommandIsRefused(t *testing.T) {
 	cfg := LoadConfig()
 	pod := enabledPod("legit", corev1.PodSpec{
 		Volumes: []corev1.Volume{{Name: "norviq-socket"}},
@@ -147,16 +147,11 @@ func TestMutateFullyInjectedPodWithAppCommandSkips(t *testing.T) {
 		},
 	})
 	resp := sendReview(t, NewHandler(cfg), makeReviewFromPod(pod, gvkPod(), "default"))
-	if !resp.Response.Allowed {
-		t.Fatal("a fully-injected pod (wired app + real sidecar) must NOT be denied")
-	}
-	if resp.Response.Patch != nil {
-		t.Fatal("a fully-injected pod must be recognized as already-injected (no patch)")
-	}
+	assertRefusedAsCopy(t, resp)
 }
 
 // A REAL-image sidecar whose NRVQ_API_URL is swung to a co-located allow-all engine
-// enforces nothing — must be DENIED, not skipped. (fullyInjected re-derives the injector's routing env.)
+// enforces nothing — must be DENIED.
 func TestMutateSidecarWithRogueApiUrlIsDenied(t *testing.T) {
 	cfg := LoadConfig()
 	pod := enabledPod("attacker", corev1.PodSpec{
@@ -175,8 +170,8 @@ func TestMutateSidecarWithRogueApiUrlIsDenied(t *testing.T) {
 	}
 }
 
-// A duplicate NRVQ_SOCKET_PATH (valid first, evil last — K8s uses the last) on the
-// app container must NOT pass containerWired. The pod is then not fully injected → DENIED.
+// A duplicate NRVQ_SOCKET_PATH (valid first, another last — K8s uses the last) on the
+// app container → DENIED.
 func TestMutateDuplicateSocketEnvIsDenied(t *testing.T) {
 	cfg := LoadConfig()
 	pod := enabledPod("attacker", corev1.PodSpec{
@@ -198,9 +193,7 @@ func TestMutateDuplicateSocketEnvIsDenied(t *testing.T) {
 }
 
 // A same-NAME but untrusted-REGISTRY fake sidecar (attacker/norviq-engine, which
-// the injector's own allowlist would refuse) with a self-wired app must be DENIED — not accepted as
-// "already injected" and skipped. The skip path enforces the registry-pinned allowlist; the broad
-// same-name match is only safe on the deny paths.
+// the injector's own allowlist would refuse) with a self-wired app must be DENIED.
 func TestMutateSameNameUntrustedRegistrySidecarIsDenied(t *testing.T) {
 	cfg := LoadConfig()
 	// trusted routing env on the fake sidecar isolates the check: only the REGISTRY allowlist denies it.
@@ -233,9 +226,8 @@ func TestMutateFreshPodInjects(t *testing.T) {
 // instruct — they equal NRVQ_SIDECAR_IMAGE exactly and read as neutered decoys. The example admitted
 // before only because it pinned a STALE engine tag, i.e. by accident.
 //
-// They carry no socket mount, no NRVQ_SOCKET_PATH, and are not named norviq-sidecar, so they cannot
-// occupy the enforcement path: `fullyInjected` needs the pod-level norviq-socket volume, which is
-// absent, so the pod is injected rather than skipped and the workload stays governed.
+// They carry no socket mount, no NRVQ_SOCKET_PATH, are not named norviq-sidecar and set their own
+// args, so they are none of the injector's parts: the pod is injected and the workload stays governed.
 func TestMutateChatbotMcpProxySidecarsAreAdmitted(t *testing.T) {
 	cfg := LoadConfig()
 	mcp := func(name string) corev1.Container {

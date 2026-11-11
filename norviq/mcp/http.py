@@ -46,6 +46,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from norviq.bearer import redact_credentials
 from norviq.config import settings
 from norviq.engine.identity import SPIFFEResolver
 from norviq.mcp import protocol as P
@@ -240,7 +241,8 @@ class HttpProxy:
         except Exception as exc:  # noqa: BLE001 — availability choice, see the docstring
             log.error(
                 "nrvq.mcp.http.pin_store_degraded",
-                error=str(exc), server_id=self._server_id, code="NRVQ-MCP-5046",
+                error=redact_credentials(str(exc), settings.api_token), server_id=self._server_id,
+                code="NRVQ-MCP-5046",
                 hint="cross-pod drift detection is unavailable until the control plane is reachable; "
                      "enforcement is unaffected; retrying in the background",
             )

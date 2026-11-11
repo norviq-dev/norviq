@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 
 from norviq.api.db.models import AgentRegistryEntry, AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.bearer import redact_credentials
 from norviq.config import settings
 from norviq.fleet.oidc_cc import ClientCredentialsToken
 
@@ -63,7 +64,7 @@ class FleetRelayForwarder:
             try:
                 await self.relay_once()
             except Exception as exc:  # pragma: no cover - network/DB transient; fire-and-forget
-                log.error("nrvq.fleet.relay_failed", error=str(exc), code="NRVQ-FLT-15001")
+                log.error("nrvq.fleet.relay_failed", error=redact_credentials(str(exc)), code="NRVQ-FLT-15001")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=settings.fleet_relay_interval_s)
             except asyncio.TimeoutError:

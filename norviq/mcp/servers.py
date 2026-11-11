@@ -34,6 +34,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from norviq.bearer import redact_credentials
 from norviq.config import settings
 
 import structlog
@@ -214,7 +215,12 @@ class ControlPlaneServerStore:
         """Pull this namespace's server decisions into memory. Never raises; True on success."""
         import httpx  # local: keeps the module importable where httpx is absent (pure-unit tests)
 
+        from norviq.sdk.client.engine import ClientFault, client_fault, request_problem
+
         try:
+            problem = request_problem(self._token, self._api_url)
+            if problem is not None:
+                raise ClientFault(problem)
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
                 resp = await client.get(
                     f"{self._api_url}/api/v1/mcp/servers",
@@ -226,9 +232,16 @@ class ControlPlaneServerStore:
         except Exception as exc:  # noqa: BLE001 — availability choice, see the class docstring
             self._degraded = True
             self._registry.degraded = True   # the firewall reads the registry, not this store
+            # Same degrade either way; a fault of this client's own is named as one.
+            problem = None if isinstance(exc, httpx.HTTPStatusError) else client_fault(exc)
+            if problem is not None:
+                log.error("nrvq.mcp.control_plane.client_misconfigured", store="servers",
+                          namespace=self.namespace, problem=problem, code="NRVQ-MCP-5095")
+                return False
             log.error(
                 "nrvq.mcp.servers.control_plane_unreachable",
-                namespace=self.namespace, error=str(exc), code="NRVQ-MCP-5077",
+                namespace=self.namespace, error=redact_credentials(str(exc), self._token),
+                code="NRVQ-MCP-5077",
                 detail=("no server decision is being enforced at discovery" if not self._loaded
                         else "serving the last known decisions; a change made since is not visible"),
                 hint="Gate B is unaffected — every tool call is still evaluated against policy",

@@ -187,8 +187,8 @@ func initContainerPatch(hasInitContainers bool, container map[string]interface{}
 }
 
 // injectedAnnotationPatch stamps injectedAnnotation ("norviq.io/injected": "true") on every patched pod
-// as an operator-visible marker only. It is NOT a trust input: classifyPod (handler.go) recognizes an
-// injected pod by its structural wiring, never by this annotation (a tenant can self-stamp it).
+// as an operator-visible marker only. It is never evidence of injection: a pod that arrives at admission
+// already carrying it is refused as a copied spec (injector_owned.go).
 func injectedAnnotationPatch(annotations map[string]string) patchOp {
 	if len(annotations) == 0 {
 		return patchOp{Op: "add", Path: "/metadata/annotations", Value: map[string]string{injectedAnnotation: "true"}}
@@ -207,9 +207,18 @@ func volumePatch(hasVolumes bool, volume map[string]interface{}) patchOp {
 	return patchOp{Op: "add", Path: "/spec/volumes", Value: []map[string]interface{}{volume}}
 }
 
+// socketMountForClient is the norviq-socket mount for every container the injector wires except the
+// sidecar. It is readOnly: connecting to a unix socket needs no write access to its directory, while
+// removing the socket or binding another in its place does. A writable mount would let any container in
+// the pod replace the sidecar's socket with its own while the sidecar kept running and passing its
+// probes. The sidecar's own mount (newSidecarTemplate) is the only writable one.
+func socketMountForClient() map[string]interface{} {
+	return map[string]interface{}{"name": "norviq-socket", "mountPath": socketMountPath, "readOnly": true}
+}
+
 // kind is the pod-spec container slice being wired: "containers" or "initContainers".
 func mountPatches(kind string, containerCount int, states []containerPatchState, spiffeInject bool) []patchOp {
-	mounts := []map[string]interface{}{{"name": "norviq-socket", "mountPath": socketMountPath}}
+	mounts := []map[string]interface{}{socketMountForClient()}
 	if spiffeInject {
 		mounts = append(mounts, map[string]interface{}{"name": "spiffe-workload-api", "mountPath": spiffeMountPath, "readOnly": true})
 	}
@@ -375,6 +384,7 @@ func (inj *Injector) buildSidecar(agentClass string, namespace string, workload 
 
 func newSidecarTemplate(cfg Config) map[string]interface{} {
 	mounts := []map[string]interface{}{
+		// The one writable mount of the socket directory: the sidecar binds the socket there.
 		{"name": "norviq-socket", "mountPath": socketMountPath},
 		// Writable scratch for the mTLS cert/key materialization; see tmpVolumeTemplate.
 		{"name": tmpVolumeName, "mountPath": tmpMountPath},

@@ -10,6 +10,8 @@ import click
 import httpx
 import structlog
 
+from norviq.bearer import redact_credentials
+
 log = structlog.get_logger()
 REQUEST_TIMEOUT_SECONDS = 10.0
 
@@ -60,6 +62,10 @@ class APIClient:
             self._fatal("Request timed out. Try again or narrow your query.")
         except httpx.HTTPStatusError as exc:
             self._http_error(exc)
+        except httpx.HTTPError as exc:
+            error = redact_credentials(str(exc), self.token)
+            log.error("nrvq.cli.request_failed", error=error, code="NRVQ-CLI-8004")
+            self._fatal(f"Request failed: {error}")
         except ValueError:
             log.error("nrvq.cli.bad_json", method=method, path=path, code="NRVQ-CLI-8004")
             self._fatal("Malformed API response.")

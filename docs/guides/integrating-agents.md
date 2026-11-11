@@ -80,6 +80,27 @@ either in without changing adapter code.
   the call is blocked regardless of this setting (`rule_id="engine_rejected_request"`). Otherwise
   `fallback=allow` would turn every 401 into an allow, and a revoked credential would become a total
   governance bypass.
+
+  **Nor is a request that cannot be encoded.** A call whose arguments hold a NaN or Infinity, a string
+  that is not valid UTF-8, or nesting deeper than about 255 levels is never sent to the engine, and is
+  blocked regardless of this setting (`rule_id="engine_request_unencodable"`, or
+  `thin_proxy_request_unencodable` on the sidecar path).
+
+  **Nor is a fault the client can tell is its own.** A token that cannot be a header value (surrounding
+  whitespace, such as the trailing newline of a Secret's file, is removed when settings load), an
+  unusable engine URL, impossible settings, a TLS certificate that failed verification, a TLS alert
+  naming this client's certificate as refused (expired, revoked, unknown CA), an https URL whose server
+  does not speak TLS, a proxy that refuses the CONNECT with a non-5xx status, an answer that is not a
+  decision, or any error that is not a transport error. The call is blocked, not retried and not
+  counted toward the circuit breaker (`rule_id="engine_client_misconfigured"`, `NRVQ-SDK-1018`;
+  `thin_proxy_client_misconfigured`, `NRVQ-SDC-3049` on the sidecar path).
+
+  **What `allow` still allows.** A failure that looks like the network failing allows the call whether
+  the engine is down or this client's own network path is wrong: wrong DNS, a client certificate the
+  server rejects by dropping the connection or with the generic handshake_failure alert (over TLS 1.3 a
+  refusal often arrives as a dropped connection), a proxy that cannot reach the engine, a client
+  connection pool that is full because the workload sent too many concurrent calls. Where the workload
+  is not trusted, use `block`.
 - **Retries + circuit breaker** — `PolicyEngineClient` retries transient failures with
   exponential backoff (`sdk_retry_max_attempts`, `sdk_retry_backoff_base_ms`), then opens a
   circuit breaker (`sdk_circuit_fail_threshold`, `sdk_circuit_reset_after_ms`) so a degraded

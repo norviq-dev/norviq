@@ -160,7 +160,7 @@ func sidecarSecretName(workload, agentClass string) string {
 	sanitized := nonDNS1123.ReplaceAllString(strings.ToLower(raw), "-")
 	sanitized = strings.Trim(sanitized, "-")
 
-	const prefix = "norviq-sidecar-"
+	const prefix = sidecarSecretPrefix
 	const maxLen = 63 // Secret names are DNS-1123 labels in practice; stay inside the strictest bound.
 	const hashLen = 8
 	budget := maxLen - len(prefix)
@@ -181,6 +181,10 @@ func sidecarSecretName(workload, agentClass string) string {
 		return prefix + sanitized + "-" + suffix
 	}
 }
+
+// sidecarSecretPrefix starts every sidecar credential Secret name. Admission refuses a pod that refers
+// to such a Secret itself (injector_owned.go): only the sidecar the webhook builds reads it.
+const sidecarSecretPrefix = "norviq-sidecar-"
 
 var nonDNS1123 = regexp.MustCompile(`[^a-z0-9-]+`)
 

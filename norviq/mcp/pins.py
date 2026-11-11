@@ -56,6 +56,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Protocol
 
+from norviq.bearer import redact_credentials
 from norviq.config import settings
 
 import structlog
@@ -456,7 +457,12 @@ class ControlPlanePinStore:
         """Pull this (namespace, server) pair's approved pins into memory. Never raises."""
         import httpx  # local: keeps the module importable where httpx is absent (pure-unit tests)
 
+        from norviq.sdk.client.engine import ClientFault, client_fault, request_problem
+
         try:
+            problem = request_problem(self._token, self._api_url)
+            if problem is not None:
+                raise ClientFault(problem)
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
                 resp = await client.get(
                     f"{self._api_url}/api/v1/mcp/pins",
@@ -467,11 +473,18 @@ class ControlPlanePinStore:
                 rows = resp.json()
         except Exception as exc:
             self._degraded = True
+            # Same degrade either way; a fault of this client's own is named as one.
+            problem = None if isinstance(exc, httpx.HTTPStatusError) else client_fault(exc)
+            if problem is not None:
+                log.error("nrvq.mcp.control_plane.client_misconfigured", store="pins",
+                          server=self._server_id, problem=problem, code="NRVQ-MCP-5095")
+                return
             log.error(
                 "nrvq.mcp.pins.control_plane_unreachable",
                 detail="falling back to per-process TOFU; Gate B enforcement is unaffected, but "
                        "cross-pod drift detection is degraded until the control plane returns",
-                server=self._server_id, error=str(exc), code="NRVQ-MCP-5046",
+                server=self._server_id, error=redact_credentials(str(exc), self._token),
+                code="NRVQ-MCP-5046",
             )
             return
 
@@ -541,4 +554,4 @@ class ControlPlanePinStore:
             # A failed report is a VISIBILITY loss, not an enforcement loss: the local decision was
             # already made from the loaded state and the call path is unaffected.
             log.warning("nrvq.mcp.pins.report_failed", server=self._server_id,
-                        error=str(exc), code="NRVQ-MCP-5048")
+                        error=redact_credentials(str(exc), self._token), code="NRVQ-MCP-5048")

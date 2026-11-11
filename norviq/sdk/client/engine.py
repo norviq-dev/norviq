@@ -9,13 +9,17 @@ import asyncio
 import collections
 import json
 import math
+import re
+import ssl
 import weakref
-from typing import Any
+from typing import Any, get_args
 from time import monotonic
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
 
+from norviq.bearer import bearer_token_problem, redact_credentials
 from norviq.config import settings
 from norviq.exceptions import NorviqError, NorviqTimeoutError
 from norviq.sdk.core.decisions import PolicyDecision
@@ -46,7 +50,7 @@ def _non_finite(value: Any) -> bool:
             continue
         visited.add(id(node))
         if len(visited) > _MAX_PARAM_NODES:
-            raise _UnencodableRequest(f"more than {_MAX_PARAM_NODES} containers in the call")
+            raise UnencodableRequest(f"more than {_MAX_PARAM_NODES} containers in the call")
         if isinstance(node, dict):
             # Keys too: the encoder writes a float key as a string, so an inf/nan key reaches the
             # engine as text it cannot tell from an ordinary one.
@@ -67,8 +71,150 @@ _CONTAINERS = (dict, list, tuple, set, frozenset, collections.deque)
 _MAX_PARAM_NODES = 100_000
 
 
-class _UnencodableRequest(Exception):
-    """The evaluate request could not be serialised in this process (see `PolicyEngineClient._post`)."""
+class UnencodableRequest(Exception):
+    """The evaluate request could not be serialised in this process (see `encode_evaluate_request`)."""
+
+
+def encode_evaluate_request(
+    event: ToolCallEvent,
+    *,
+    include: set[str] | None = None,
+    update: dict[str, Any] | None = None,
+) -> bytes:
+    """The `/api/v1/evaluate` request body for `event`, as it goes on the wire.
+
+    Raises `UnencodableRequest` when this process cannot produce it. Both clients of the endpoint, this
+    module's `PolicyEngineClient` and the injected sidecar's `RemoteEvaluator`, encode through here, so a
+    call one of them cannot send is refused by the other as well instead of the two drifting apart.
+    `include` limits the event fields sent (the sidecar sends a subset); `update` sets values after the
+    event is serialised and before the JSON is written, so they pass through the same checks.
+
+    Non-finite floats are refused BEFORE pydantic sees them: `model_dump(mode="json")` writes inf and
+    nan as null, so the engine would decide on `amount: null` while the tool runs with the caller's
+    real value. The JSON parameters are the ones httpx uses for `json=`.
+    """
+    if _non_finite(event.tool_params) or _non_finite(event.mcp):
+        raise UnencodableRequest("a non-finite number (inf or nan) in the call")
+    try:
+        document = event.model_dump(mode="json", include=include)
+        if update:
+            document.update(update)
+        return json.dumps(document, separators=(",", ":"), ensure_ascii=False,
+                          allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise UnencodableRequest(str(exc)) from exc
+
+
+class ClientFault(Exception):
+    """This client cannot send a valid request, or cannot read a decision from the answer.
+
+    Deterministic: the next attempt fails the same way, so it is not an outage and the fallback mode
+    does not apply. The message never contains the token.
+    """
+
+
+#: The decisions an engine answer may carry.
+DECISIONS = frozenset(get_args(PolicyDecision.model_fields["decision"].annotation))
+
+# ssl.SSLError reasons for an https URL whose server answered without TLS. With OpenSSL 3.5.4 (and on
+# the Ubuntu 26.04 CI runner) a plain HTTP answer is RECORD_LAYER_FAILURE; with 3.5.7, 3.6 and 4.1 it is
+# WRONG_VERSION_NUMBER. Only a handshake error counts (see client_fault), and in none of those builds
+# is a dropped or reset handshake reported this way.
+_NOT_TLS = frozenset({"WRONG_VERSION_NUMBER", "HTTP_REQUEST", "HTTPS_PROXY_REQUEST", "UNKNOWN_PROTOCOL",
+                      "PACKET_LENGTH_TOO_LONG", "RECORD_LAYER_FAILURE"})
+# TLS alerts that name the certificate this client presented, or the lack of one, as refused. The
+# server sends the same alert on every attempt while its configuration stands. A server whose own CRL
+# is missing or stale also sends UNKNOWN_CA or CERTIFICATE_EXPIRED; that blocks too, as the engine
+# refusing. HANDSHAKE_FAILURE is not here: a server sends it for no shared cipher or no certificate of
+# its own as well, so it does not say whose fault it is.
+_CERT_REFUSED = frozenset({"TLSV1_ALERT_UNKNOWN_CA", "SSLV3_ALERT_CERTIFICATE_EXPIRED",
+                           "SSLV3_ALERT_BAD_CERTIFICATE", "SSLV3_ALERT_CERTIFICATE_REVOKED",
+                           "SSLV3_ALERT_CERTIFICATE_UNKNOWN", "SSLV3_ALERT_UNSUPPORTED_CERTIFICATE",
+                           "TLSV13_ALERT_CERTIFICATE_REQUIRED", "TLSV1_ALERT_ACCESS_DENIED"})
+# The status a forward proxy answered the CONNECT with, as httpx reports it: "407 Proxy Authentication
+# Required". A 5xx is the proxy failing to reach the engine; any other status is its refusal.
+_PROXY_STATUS = re.compile(r"(\d+)\b")
+
+
+def engine_url_problem(url: str) -> str | None:
+    """Why `url` cannot reach any engine, or None when it may."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return "it cannot be parsed"
+    if parts.scheme not in ("http", "https"):
+        return "its scheme is missing or is not http or https"
+    if not parts.hostname:
+        return "it has no host"
+    if port is not None and not 1 <= port <= 65535:
+        return "its port is outside 1-65535"
+    return None
+
+
+def _ssl_reason(err: ssl.SSLError) -> str | None:
+    """The OpenSSL reason name of `err`. CPython leaves `reason` None for a code newer than its own
+    table, which 3.12 and 3.13 do for RECORD_LAYER_FAILURE, so that one is read from the message."""
+    reason = getattr(err, "reason", None)
+    if reason is None and "record layer failure" in str(err):
+        return "RECORD_LAYER_FAILURE"
+    return reason
+
+
+def request_problem(token: str, url: str) -> str | None:
+    """Why no request with `token` can be sent to `url`, or None. Never contains the token."""
+    problem = bearer_token_problem(token or "")
+    if problem is not None:
+        return f"the API token cannot be sent: {problem}"
+    problem = engine_url_problem(url)
+    if problem is not None:
+        return f"the engine URL is unusable: {problem}"
+    return None
+
+
+def client_fault(exc: BaseException) -> str | None:
+    """Why `exc`, raised by a request to the engine, is this client's own fault, or None.
+
+    None means an `httpx.TransportError` that looks like the network or the engine failing (a timeout,
+    a refused or reset connection, a DNS failure, a dropped TLS handshake, a proxy 5xx). Those follow
+    the fallback mode. So does a bare `ssl.SSLError`: httpcore wraps TLS errors from the handshake
+    only, and one raised after it (a corrupted record, an alert) arrives unwrapped. Anything else that
+    is not a transport error is a fault: unknown means block.
+    """
+    if isinstance(exc, ClientFault):
+        return str(exc)
+    if isinstance(exc, (httpx.LocalProtocolError, httpx.UnsupportedProtocol, httpx.InvalidURL)):
+        return f"the request could not be sent ({type(exc).__name__})"
+    if isinstance(exc, httpx.ProxyError):
+        status = _PROXY_STATUS.match(str(exc))
+        if status is None or 500 <= int(status.group(1)) < 600:
+            return None
+        return f"the forward proxy refused the connection (HTTP {status.group(1)})"
+    if not isinstance(exc, (httpx.TransportError, ssl.SSLError)):
+        return f"unexpected error ({type(exc).__name__})"
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if isinstance(link, ssl.SSLCertVerificationError):
+            return "the engine's TLS certificate failed verification"
+        if isinstance(link, ssl.SSLError) and isinstance(exc, httpx.ConnectError) and _ssl_reason(link) in _NOT_TLS:
+            return "the engine URL is https but the server did not answer with TLS"
+        if isinstance(link, ssl.SSLError) and _ssl_reason(link) in _CERT_REFUSED:
+            return f"the engine refused this client's TLS certificate ({_ssl_reason(link)})"
+        link = link.__cause__ or link.__context__
+    return None
+
+
+def _decision_body(response: httpx.Response) -> dict:
+    """The decision in a 2xx answer, or `ClientFault` when the body is not one."""
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or data.get("decision") not in DECISIONS:
+        raise ClientFault(f"the engine answered HTTP {response.status_code} without a valid decision")
+    return data
 
 
 class PolicyEngineClient:
@@ -144,18 +290,9 @@ class PolicyEngineClient:
         # `client.post` it fell to `_handle_unknown_error` and the OUTAGE fallback, so with
         # sdk_fallback_mode=allow a call nobody could evaluate was allowed. The caller chooses the
         # params, so that was a bypass on demand. A request this process cannot encode is not an
-        # outage: `evaluate` blocks it whatever the fallback mode.
-        #
-        # Non-finite floats are refused BEFORE pydantic sees them: `model_dump(mode="json")` writes inf
-        # and nan as null, so the engine would decide on `amount: null` — a threshold rule that is not
-        # written for null lets it through — while the tool runs with the caller's real value.
-        if _non_finite(event.tool_params) or _non_finite(event.mcp):
-            raise _UnencodableRequest("a non-finite number (inf or nan) in the call")
-        try:
-            body = json.dumps(event.model_dump(mode="json"), separators=(",", ":"),
-                              ensure_ascii=False, allow_nan=False).encode("utf-8")
-        except (ValueError, TypeError, RecursionError) as exc:
-            raise _UnencodableRequest(str(exc)) from exc
+        # outage: `evaluate` blocks it whatever the fallback mode. Non-finite numbers, and why they
+        # are checked before pydantic, are covered in `encode_evaluate_request`.
+        body = encode_evaluate_request(event)
         for attempt in range(self._max_retries + 1):
             try:
                 # The central API mounts the evaluate router at /api/v1 (norviq/api/main.py) — same
@@ -164,7 +301,7 @@ class PolicyEngineClient:
                                              headers={"content-type": "application/json"})
                 response.raise_for_status()
                 self._record_success()
-                return response.json()
+                return _decision_body(response)
             except httpx.HTTPStatusError as exc:
                 # Only a SILENT engine may trip the breaker. A 4xx is the engine answering, and
                 # `_handle_http_error` is what turns it into a block — but the breaker is checked at
@@ -175,7 +312,7 @@ class PolicyEngineClient:
                 # to prevent. Worse, the breaker only resets on a SUCCESS, so a permanently bad
                 # credential never recovered — it settled into a mostly-ungoverned state, and the
                 # 30-day sidecar credential cliff produces precisely that 401 storm.
-                if exc.response.status_code >= 500:
+                if 500 <= exc.response.status_code < 600:
                     self._record_failure()
                 raise
             except httpx.TimeoutException as exc:
@@ -183,7 +320,11 @@ class PolicyEngineClient:
                 if attempt >= self._max_retries:
                     raise NorviqTimeoutError(timeout_ms=self._timeout_ms) from exc
                 await asyncio.sleep((self._backoff_base_ms * (2**attempt)) / 1000)
-            except httpx.RequestError:
+            except httpx.TransportError as exc:
+                # Not retried or counted when the fault is this client's own; see `client_fault`.
+                fault = client_fault(exc)
+                if fault is not None:
+                    raise ClientFault(fault) from None
                 self._record_failure()
                 if attempt >= self._max_retries:
                     raise
@@ -205,6 +346,27 @@ class PolicyEngineClient:
         )
         return self._fallback_decision(event)
 
+    def _config_problem(self) -> str | None:
+        """Why this client cannot send any request, or None."""
+        problem = request_problem(self._token, self._base_url)
+        if problem is not None:
+            return problem
+        if not self._timeout_ms > 0 or self._max_retries < 0 or settings.sdk_http_max_connections <= 0:
+            return "the client settings are impossible (timeout, retries or max connections)"
+        return None
+
+    def _client_fault(self, event: ToolCallEvent, problem: str) -> PolicyDecision:
+        """Block a call this client could not send or read; the fallback mode does not apply."""
+        log.error("nrvq.sdk.evaluate.client_misconfigured", event_id=event.event_id, problem=problem,
+                  code="NRVQ-SDK-1018")
+        return PolicyDecision(
+            decision="block",
+            rule_id="engine_client_misconfigured",
+            reason=(f"This client could not send a valid request to the policy engine: {problem}. "
+                    "This is not an engine outage, and the fallback mode does not apply."),
+            event_id=event.event_id,
+        )
+
     def _handle_http_error(self, event: ToolCallEvent, exc: httpx.HTTPStatusError) -> PolicyDecision:
         """Handle HTTP error path.
 
@@ -219,6 +381,9 @@ class PolicyEngineClient:
         genuinely not answering — honour the operator's configured posture.
         """
         status = exc.response.status_code
+        if status < 400 or status >= 600:
+            # A redirect (not followed) or a non-standard status is not the engine answering here.
+            return self._client_fault(event, f"the engine URL answered HTTP {status}, not a decision")
         if 400 <= status < 500:
             log.error(
                 "nrvq.sdk.evaluate.rejected",
@@ -244,12 +409,16 @@ class PolicyEngineClient:
         return self._fallback_decision(event)
 
     def _handle_unknown_error(self, event: ToolCallEvent, exc: Exception) -> PolicyDecision:
-        """Handle unexpected error path and return fallback decision."""
-        log.error("nrvq.sdk.evaluate.error", event_id=event.event_id, error=str(exc), code="NRVQ-SDK-1000")
+        """The engine could not be reached on any attempt; return the fallback decision."""
+        log.error("nrvq.sdk.evaluate.error", event_id=event.event_id,
+                  error=redact_credentials(str(exc), self._token or ""), code="NRVQ-SDK-1000")
         return self._fallback_decision(event)
 
     async def evaluate(self, event: ToolCallEvent) -> PolicyDecision:
         """Send ToolCallEvent to engine and return PolicyDecision."""
+        problem = self._config_problem()
+        if problem is not None:
+            return self._client_fault(event, problem)
         if self._is_circuit_open():
             log.warning("nrvq.sdk.evaluate.circuit_open", event_id=event.event_id, code="NRVQ-SDK-1013")
             return self._fallback_decision(event)
@@ -257,7 +426,7 @@ class PolicyEngineClient:
             decision = PolicyDecision(**(await self._post(event)))
             self._log_success(event.event_id, decision.decision)
             return decision
-        except _UnencodableRequest as exc:
+        except UnencodableRequest as exc:
             log.error("nrvq.sdk.evaluate.unencodable", event_id=event.event_id, error=str(exc)[:200],
                       code="NRVQ-SDK-1016")
             return PolicyDecision(
@@ -267,12 +436,23 @@ class PolicyEngineClient:
                         "nested too deeply); this is not an engine outage, and fail-open does not apply."),
                 event_id=event.event_id,
             )
+        except ClientFault as exc:
+            return self._client_fault(event, str(exc))
         except NorviqTimeoutError as exc:
             return self._handle_timeout(event, exc)
         except httpx.HTTPStatusError as exc:
             return self._handle_http_error(event, exc)
-        except Exception as exc:
+        except httpx.TransportError as exc:
             return self._handle_unknown_error(event, exc)
+        except ssl.SSLError as exc:
+            # Raised after the handshake, so httpcore did not wrap it. Not retried or counted, as before.
+            fault = client_fault(exc)
+            if fault is not None:
+                return self._client_fault(event, fault)
+            return self._handle_unknown_error(event, exc)
+        except Exception as exc:
+            # Unknown means block: only a transport error may follow the fallback mode.
+            return self._client_fault(event, client_fault(exc) or "unexpected error")
 
     def _fallback_decision(self, event: ToolCallEvent) -> PolicyDecision:
         """Return the configured fallback decision when the engine is genuinely unavailable.

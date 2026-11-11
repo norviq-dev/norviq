@@ -19,6 +19,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, scoped_cluster
+from norviq.bearer import redact_credentials
 from norviq.config import settings
 from norviq.fleet.bundle import RESERVED_SCOPES, rfc3339_z, sign_bundle
 from norviq.fleet.db import fleet_get_session
@@ -312,7 +313,8 @@ async def drilldown(
             resp.raise_for_status()
             rows = resp.json()
     except Exception as exc:
-        log.warning("nrvq.fleet.drilldown_failed", cluster_id=cluster_id, error=str(exc), code="NRVQ-FLT-15025")
+        log.warning("nrvq.fleet.drilldown_failed", cluster_id=cluster_id,
+                    error=redact_credentials(str(exc), token), code="NRVQ-FLT-15025")
         return {"cluster_id": cluster_id, "records": [], "error": "cluster unreachable"}
     records = [{"timestamp": r.get("timestamp"), "tool_name": r.get("tool_name"), "decision": r.get("decision"),
                 "agent_class": r.get("agent_class"), "namespace": r.get("namespace"), "rule_id": r.get("rule_id")}

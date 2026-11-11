@@ -90,7 +90,6 @@ MIXED_LEVELS: dict[str, tuple[str, ...]] = {
     "NRVQ-REG-5017": ('nrvq.policy.remote_reloaded', 'nrvq.policy.version_rehydrate_failed'),
     "NRVQ-SDC-3001": ('nrvq.sidecar.close_failed', 'nrvq.sidecar.connection_error'),
     "NRVQ-SDC-3013": ('nrvq.sidecar.log_level_applied', 'nrvq.sidecar.readyz.opa_unreachable'),
-    "NRVQ-SDC-3033": ('nrvq.sidecar.mode.embedded', 'nrvq.sidecar.remote_evaluator.unexpected_error'),
     "NRVQ-SDK-1041": ('nrvq.langgraph.allowed', 'nrvq.langgraph.denied'),
 }
 

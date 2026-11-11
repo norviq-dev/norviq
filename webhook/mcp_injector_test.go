@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
+	admissionv1 "k8s.io/api/admission/v1"
 )
 
 // mcpTestConfig is a config with MCP injection on and a signing secret present, so the minted
@@ -323,27 +324,29 @@ func TestMcpInjection_OffEmitsIdenticalPatch(t *testing.T) {
 	}
 }
 
-// -- idempotency and enforcement integrity -------------------------------------------------------
+// -- re-admission and enforcement integrity ------------------------------------------------------
 
-// Re-admitting the injector's own output must SKIP. This is the regression guard for the whole
-// composition: the MCP init container is a sidecar-image container that overrides command, which the
-// neutered-decoy check would otherwise deny.
-func TestMcpInjection_ReadmissionOfOwnOutputIsSkipped(t *testing.T) {
+// admitMcp sends pod through the admission handler under cfg.
+func admitMcp(t *testing.T, cfg Config, pod *corev1.Pod) admissionv1.AdmissionReview {
+	t.Helper()
+	return sendReview(t, NewHandler(cfg), makeReviewFromPod(*pod, gvkPod(), "agents"))
+}
+
+// Rewritten: this asserted that re-admitting the injector's own MCP output was SKIPPED. The webhook is
+// CREATE-only, so such a pod is a copied spec, and it is now refused.
+func TestMcpInjection_ReadmissionOfOwnOutputIsRefused(t *testing.T) {
 	cfg := mcpTestConfig()
 	out := applyPatch(t, cfg, mcpPod(
 		map[string]string{mcpServersAnnotation: "mcp"},
 		[]corev1.Container{{Name: "mcp", Command: []string{"mcp-server"}}},
 	), "sales", "agents")
-
-	verdict, reason := classifyPod(cfg, out)
-	if verdict != verdictSkip {
-		t.Fatalf("re-admission of injected pod: got verdict %v (%s), want skip", verdict, reason)
-	}
+	assertRefusedAsCopy(t, admitMcp(t, cfg, out))
 }
 
-// A pod with a correct sidecar but an UNWRAPPED MCP container must not be skipped — that server
-// would run unpoliced.
-func TestMcpInjection_SidecarWithoutWrapIsNotFullyInjected(t *testing.T) {
+// A pod with a correct sidecar but an UNWRAPPED MCP container must not be admitted unpatched — that
+// server would run unpoliced. (Rewritten from a fullyInjected check, which no longer exists: the pod is
+// refused for carrying the sidecar at all.)
+func TestMcpInjection_SidecarWithoutWrapIsRefused(t *testing.T) {
 	cfg := mcpTestConfig()
 	out := applyPatch(t, cfg, mcpPod(
 		map[string]string{mcpServersAnnotation: "mcp"},
@@ -356,14 +359,13 @@ func TestMcpInjection_SidecarWithoutWrapIsNotFullyInjected(t *testing.T) {
 			out.Spec.Containers[i].Command = []string{"mcp-server"}
 		}
 	}
-	if fullyInjected(cfg, out) {
-		t.Fatal("pod with an unwrapped MCP container must not count as fully injected")
-	}
+	assertRefusedAsCopy(t, admitMcp(t, cfg, out))
 }
 
 // A proxy-shaped command with the server id swung elsewhere pins against a catalogue the operator
-// never approved, so it must not read as already-governed.
-func TestMcpInjection_ForeignServerIDIsNotWrappedCorrectly(t *testing.T) {
+// never approved, so it must not read as already-governed. (Rewritten from an mcpFullyInjected check to
+// the admission outcome.)
+func TestMcpInjection_ForeignServerIDIsRefused(t *testing.T) {
 	cfg := mcpTestConfig()
 	out := applyPatch(t, cfg, mcpPod(
 		map[string]string{mcpServersAnnotation: "mcp"},
@@ -375,11 +377,11 @@ func TestMcpInjection_ForeignServerIDIsNotWrappedCorrectly(t *testing.T) {
 			out.Spec.Containers[i].Command = []string{mcpProxyBinary, "--server-id", "attacker", "--", "mcp-server"}
 		}
 	}
-	if mcpFullyInjected(cfg, out) {
-		t.Fatal("a foreign --server-id must not satisfy the MCP injection check")
-	}
+	assertRefusedAsCopy(t, admitMcp(t, cfg, out))
 }
 
+// Rewritten from classifyPod verdicts to injectorPlumbing, which replaced it; the outcome (refused) is
+// unchanged for every case.
 func TestMcpInjection_PreOccupiedPlumbingIsDenied(t *testing.T) {
 	cfg := mcpTestConfig()
 	cases := []struct {
@@ -406,27 +408,33 @@ func TestMcpInjection_PreOccupiedPlumbingIsDenied(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			verdict, reason := classifyPod(cfg, tc.pod())
-			if verdict != verdictDeny {
-				t.Fatalf("pre-occupied %s: got verdict %v (%s), want deny", tc.name, verdict, reason)
+			if _, reason, found := injectorPlumbing(cfg, tc.pod()); !found {
+				t.Fatalf("pre-occupied %s: not found (%s), want refused", tc.name, reason)
+			}
+			if resp := admitMcp(t, cfg, tc.pod()); resp.Response.Allowed {
+				t.Fatalf("pre-occupied %s was admitted", tc.name)
 			}
 		})
 	}
 }
 
 // The same pre-occupied plumbing must NOT change admission when the feature is off, so enabling MCP
-// injection is the only thing that changes behavior.
+// injection is the only thing that changes behavior. (Rewritten from classifyPod to the admission
+// outcome: the pod is injected.)
 func TestMcpInjection_PreOccupiedPlumbingIgnoredWhenOff(t *testing.T) {
 	off := LoadConfig()
 	off.McpInject = false
 	pod := mcpPod(nil, []corev1.Container{{Name: "app", Command: []string{mcpProxyBinary, "--", "sh"}}})
-	if verdict, _ := classifyPod(off, pod); verdict != verdictInject {
-		t.Fatalf("with McpInject off an MCP-shaped command must not affect admission, got %v", verdict)
+	if _, reason, found := injectorPlumbing(off, pod); found {
+		t.Fatalf("with McpInject off an MCP-shaped command must not affect admission, got %s", reason)
+	}
+	if resp := admitMcp(t, off, pod); !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("with McpInject off the pod must be injected")
 	}
 }
 
-// The injector's own init container must be exempt from the neutered-decoy check, but ONLY on an
-// exact match: a same-named container with a different command is still a decoy.
+// A copy of the injector's output whose init container was changed to copy nothing. (Rewritten: the
+// exact-match recognizer of the injector's own init container no longer exists; the copy is refused.)
 func TestMcpInjection_DecoyInitContainerStillDenied(t *testing.T) {
 	cfg := mcpTestConfig()
 	out := applyPatch(t, cfg, mcpPod(
@@ -439,12 +447,7 @@ func TestMcpInjection_DecoyInitContainerStillDenied(t *testing.T) {
 			out.Spec.InitContainers[i].Command = []string{"/bin/sh", "-c", "true"} // copies nothing
 		}
 	}
-	if isInjectorMcpInitContainer(cfg, out.Spec.InitContainers[len(out.Spec.InitContainers)-1]) {
-		t.Fatal("a tampered init container must not be recognized as the injector's own")
-	}
-	if verdict, _ := classifyPod(cfg, out); verdict != verdictDeny {
-		t.Fatal("an init container that presents as the injector's but copies nothing must be denied")
-	}
+	assertRefusedAsCopy(t, admitMcp(t, cfg, out))
 }
 
 // -- annotation parsing --------------------------------------------------------------------------
@@ -516,12 +519,8 @@ func TestMcpInjection_SelfWiredPodWithFakeProxyIsDenied(t *testing.T) {
 		VolumeMounts: []corev1.VolumeMount{{Name: mcpVolumeName, MountPath: "/stage"}, {Name: "norviq-socket", MountPath: socketMountPath}},
 	}}
 
-	if mcpFullyInjected(cfg, pod) {
-		t.Fatal("a tenant-authored pod must never satisfy mcpFullyInjected")
-	}
-	if verdict, reason := classifyPod(cfg, pod); verdict != verdictDeny {
-		t.Fatalf("self-wired pod with a fake proxy: got verdict %v (%s), want deny", verdict, reason)
-	}
+	// Rewritten from mcpFullyInjected/classifyPod to the admission outcome: refused.
+	assertRefusedAsCopy(t, admitMcp(t, cfg, pod))
 }
 
 func TestMcpInjection_UntrustedDeliveryPlumbingIsRejected(t *testing.T) {
@@ -575,13 +574,12 @@ func TestMcpInjection_UntrustedDeliveryPlumbingIsRejected(t *testing.T) {
 			}
 		},
 	}
+	// Rewritten from mcpFullyInjected to the admission outcome: every tampered copy is refused.
 	for name, tamper := range cases {
 		t.Run(name, func(t *testing.T) {
 			pod := base()
 			tamper(pod)
-			if mcpFullyInjected(cfg, pod) {
-				t.Fatalf("tampered pod (%s) must not read as fully injected", name)
-			}
+			assertRefusedAsCopy(t, admitMcp(t, cfg, pod))
 		})
 	}
 }
@@ -635,8 +633,11 @@ func TestMcpInjection_RequiresAnExplicitProxyImage(t *testing.T) {
 	}
 }
 
-// Rolling the proxy image tag must not make the injector stop recognizing its own output.
-func TestMcpInjection_ImageTagRollStillSkips(t *testing.T) {
+// The injector's output under one proxy image tag, submitted again after the tag rolled.
+//
+// Rewritten: this asserted SKIP across the roll. Re-submitting the injector's output is refused under
+// every configuration now, so the roll changes nothing.
+func TestMcpInjection_ImageTagRollIsRefused(t *testing.T) {
 	cfg := mcpTestConfig()
 	out := applyPatch(t, cfg, mcpPod(
 		map[string]string{mcpServersAnnotation: "mcp"},
@@ -645,9 +646,7 @@ func TestMcpInjection_ImageTagRollStillSkips(t *testing.T) {
 
 	rolled := cfg
 	rolled.McpProxyImage = "ghcr.io/norviq-dev/norviq-mcp-proxy:v2"
-	if verdict, reason := classifyPod(rolled, out); verdict != verdictSkip {
-		t.Fatalf("after an image tag roll: got verdict %v (%s), want skip", verdict, reason)
-	}
+	assertRefusedAsCopy(t, admitMcp(t, rolled, out))
 }
 
 func TestMcpInjection_NoDuplicateSpiffeEnv(t *testing.T) {

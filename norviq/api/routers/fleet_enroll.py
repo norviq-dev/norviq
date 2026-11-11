@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import FleetBundleState, FleetJoinState
 from norviq.api.db.session import get_session
+from norviq.bearer import redact_credentials
 from norviq.config import settings
 from norviq.fleet.join_token import verify_join_token
 from norviq.fleet.oidc_cc import fleet_service_bearer
@@ -110,7 +111,8 @@ async def fleet_join(
         if r.status_code != 200:
             raise HTTPException(status_code=409, detail=f"join token claim failed at hub ({r.status_code}): {r.text[:120]}")
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"could not reach hub to claim token: {exc}") from exc
+        raise HTTPException(status_code=502,
+                            detail=f"could not reach hub to claim token: {redact_credentials(str(exc))}") from exc
     # persist + apply + start.
     row = (await session.execute(select(FleetJoinState).where(FleetJoinState.id == 1))).scalar_one_or_none()
     if row is None:

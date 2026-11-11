@@ -6,7 +6,7 @@
 import os
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,10 +81,14 @@ class NorviqSettings(BaseSettings):
     #
     # Read per call rather than captured at import so flipping it takes effect without a restart.
     monitor_exempt_rate_limit: bool = True
-    sdk_timeout_ms: int = 5000
-    # What a PEP does when the engine is GENUINELY unavailable — 5xx, timeout, connect error, or an
-    # open circuit. A 4xx never reaches here: the engine answered and refused, so it always blocks
-    # regardless of this setting (see EngineClient._handle_http_error).
+    # Constrained so a value no client can work with fails at startup instead of on every call.
+    sdk_timeout_ms: int = Field(default=5000, gt=0)
+    # What a PEP does when the engine looks unavailable — 5xx, a transport error (timeout, refused or
+    # reset connection, DNS failure), or an open circuit. That is not only an outage: the client's own
+    # network path can fail the same way (docs/security-model.md). A 4xx never reaches here: the
+    # engine answered and refused, so it always blocks regardless of this setting (see
+    # EngineClient._handle_http_error). Nor does a fault the client can tell is its own
+    # (`norviq.sdk.client.engine.client_fault`), which blocks too.
     #
     # "allow" (default) — the customer's agents keep working through a Norviq outage.
     # "block" — no call proceeds unjudged, at the cost of taking the agents down with us.
@@ -101,11 +105,11 @@ class NorviqSettings(BaseSettings):
     # calls went unjudged and for how long. An allow that is indistinguishable from a normal allow
     # would be the unacceptable version of this default.
     sdk_fallback_mode: str = "allow"
-    sdk_retry_max_attempts: int = 2
+    sdk_retry_max_attempts: int = Field(default=2, ge=0)
     sdk_retry_backoff_base_ms: int = 100
     sdk_circuit_fail_threshold: int = 3
     sdk_circuit_reset_after_ms: int = 2000
-    sdk_http_max_connections: int = 20
+    sdk_http_max_connections: int = Field(default=20, gt=0)
     sdk_http_max_keepalive_connections: int = 10
     spiffe_socket: str = "/tmp/spiffe-mock.sock"  # nosec B108 - Settings default (dev/test mock path), overridden by NRVQ_SPIFFE_SOCKET in prod
     spiffe_cache_ttl_s: int = 300
@@ -422,6 +426,14 @@ class NorviqSettings(BaseSettings):
     # Bearer token the thin-proxy sidecar presents to /evaluate (role=service, namespace-scoped). The
     # webhook mints + injects this per workload; empty in embedded mode. NRVQ_API_TOKEN.
     api_token: str = ""
+
+    @field_validator("api_token", mode="before")
+    @classmethod
+    def _strip_api_token(cls, value: object) -> object:
+        """Remove whitespace around the token: a Secret created from a file written by `echo` carries
+        the file's trailing newline, which no token contains and no HTTP header can carry."""
+        return value.strip() if isinstance(value, str) else value
+
     # --- auto-mTLS (internal control-plane TLS). OFF by default -> plaintext http, EXACTLY as today
     # (byte-identical behavior keeps the whole suite + k8s probes green). When true AND api_url is https,
     # the sidecar builds a mutual-TLS ssl.SSLContext: trusts the internal CA (internal_api_ca_pem) and

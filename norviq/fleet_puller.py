@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from norviq.api.db.models import FleetBundleState
 from norviq.api.db.session import get_session
+from norviq.bearer import redact_credentials
 from norviq.config import settings
 from norviq.fleet.bundle import RESERVED_SCOPES, BundleVerifyError, canonical_bytes, parse_rfc3339, verify_bundle
 from norviq.fleet.oidc_cc import ClientCredentialsToken
@@ -67,7 +68,7 @@ class FleetPolicyPuller:
             try:
                 await self.pull_once()
             except Exception as exc:  # pragma: no cover - network/DB transient; fire-and-forget
-                log.error("nrvq.fleet.pull_failed", error=str(exc), code="NRVQ-FLT-15043")
+                log.error("nrvq.fleet.pull_failed", error=redact_credentials(str(exc)), code="NRVQ-FLT-15043")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=settings.fleet_pull_interval_s)
             except asyncio.TimeoutError:
@@ -149,8 +150,8 @@ class FleetPolicyPuller:
                 await self._loader.delete(ns, ac)
                 log.info("nrvq.fleet.bundle_retracted", key=key, version=version, code="NRVQ-FLT-15028")
         except Exception as exc:
-            log.error("nrvq.fleet.bundle_apply_failed", error=str(exc), code="NRVQ-FLT-15022")
-            await self._report(version, "failed", last, str(exc)[:200])
+            log.error("nrvq.fleet.bundle_apply_failed", error=redact_credentials(str(exc)), code="NRVQ-FLT-15022")
+            await self._report(version, "failed", last, redact_credentials(str(exc))[:200])
             return {"applied": False, "reason": "apply_failed"}
 
         # (6) persist version + manifest ONLY after the full apply+reconcile succeeds (partial -> re-applies next cycle)
@@ -211,7 +212,8 @@ class FleetPolicyPuller:
             })
             log.debug("nrvq.fleet.rollout_reported", state=state, code="NRVQ-FLT-15020")
         except Exception as exc:  # pragma: no cover - best-effort
-            log.debug("nrvq.fleet.rollout_report_failed", error=str(exc), code="NRVQ-FLT-15020")
+            log.debug("nrvq.fleet.rollout_report_failed", error=redact_credentials(str(exc)),
+                      code="NRVQ-FLT-15020")
 
     async def stop(self) -> None:
         self._stop.set()

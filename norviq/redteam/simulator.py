@@ -15,6 +15,7 @@ import structlog
 # only import of norviq.config, and importing it runs `_preload_env_files` (docs/cli.md, ".env
 # loading"). Dropping it would silently stop `norviq` reading the repository-root .env.
 import norviq.config  # noqa: F401
+from norviq.bearer import redact_credentials
 from norviq.redteam.attacks import ATTACKS, AttackCategory, AttackDefinition, attack_request, get_attack_by_id
 
 log = structlog.get_logger()
@@ -181,9 +182,10 @@ def _extract_decision(data: dict) -> tuple[str, str]:
 def _build_error_result(attack: AttackDefinition, started: float, exc: Exception) -> AttackResult:
     """Create attack result for execution errors."""
     latency_ms = (time.perf_counter() - started) * 1000
-    log.error("nrvq.redteam.attack_error", attack=attack.id, error=str(exc), code="NRVQ-RED-13002")
+    error = redact_credentials(str(exc))
+    log.error("nrvq.redteam.attack_error", attack=attack.id, error=error, code="NRVQ-RED-13002")
     return AttackResult(
-        attack.id, attack.name, attack.category.value, attack.tool_name, attack.expected_decision, "error", attack.expected_rule, "", False, latency_ms, 0.0, str(exc)
+        attack.id, attack.name, attack.category.value, attack.tool_name, attack.expected_decision, "error", attack.expected_rule, "", False, latency_ms, 0.0, error
     )
 
 
