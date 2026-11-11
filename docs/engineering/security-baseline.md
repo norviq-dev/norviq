@@ -51,7 +51,7 @@ deps. OS/image CVEs are trivy's job (`build.yml`); FOSSA covers the dependency g
 One row per item that is knowingly carried. Every entry here must correspond to a live line in an
 ignore/allow-list file — if you remove the ignore, remove the row.
 
-**Currently empty.** The three rows that lived here (`CVE-2026-39822`, `GHSA-hrxh-6v49-42gf`,
+**Trivy: one row, `CVE-2026-78661` (2026-11-11), in the table below.** Before it, no Trivy finding was carried: the three rows that lived here (`CVE-2026-39822`, `GHSA-hrxh-6v49-42gf`,
 `CVE-2026-56852`) were all cleared on 2026-08-13 by pinning **OPA 1.19.0** in place of 1.18.0 — every
 one of them was an accepted risk in the *third-party* OPA static binary, and each carried an exit
 condition naming the dependency version that would close it. 1.19.0 met all three at once: built with
@@ -75,6 +75,7 @@ instead: the amd64 and arm64 images match the release binaries in everything but
 
 | Date | Tool | ID / finding | Where | Why baselined (not fixed now) | Exit condition |
 |------|------|--------------|-------|-------------------------------|----------------|
+| 2026-11-11 | Trivy (image) | `CVE-2026-78661` (GO-2026-6860), HIGH, x/net/html quadratic text-node coalescing | `usr/local/bin/opa` (OPA 1.21.4-static, x/net v0.60.0) in the api and engine images | No OPA release through v1.22.3 requires x/net >= 0.62.0. The package is not linked: `go tool nm` finds no `golang.org/x/net/html` symbol in the amd64 or arm64 release binary (206 for `x/net/http2`), and `govulncheck -mode=binary` reports it at module level only | An OPA release that requires x/net >= 0.62.0 |
 | 2026-07, 2026-10 | FOSSA | `CVE-2026-45829`, `CVE-2026-45830`, `CVE-2026-45831`, `CVE-2026-45833` (chromadb); `CVE-2026-26030`, `CVE-2026-25592` (semantic-kernel); `CVE-2024-6825` (litellm, spurious) | `ACCEPTED` in `scripts/check_fossa_issues.py` **and** marked *Ignored* in the FOSSA project UI (reason: vulnerable code not in execute path; version-scoped) so the FOSSA GitHub App's "Security Analysis" check also passes | All live only in **optional** SDK framework-adapter extras (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`), never in a shipped container image. chromadb has no fixed release; every semantic-kernel fix needs a pre-release `azure-ai-agents`; litellm 1.100.4 is outside CVE-2024-6825's affected range (1.40.3.dev2-1.40.12). Per-CVE reachability rationale is the table in [`SECURITY.md`](../../SECURITY.md#accepted-dependency-exceptions) — that table, this allow-list, and the FOSSA-UI ignore must stay in lockstep. The 2026-10-30 relock moved chromadb and litellm, so their version-scoped UI ignores need re-review. | Reviewed each release; drop the moment upstream ships a fixed release reachable without a pre-release dependency (and un-ignore in the FOSSA UI). |
 | 2026-09 | FOSSA | `CVE-2018-1002105`, `CVE-2019-11250`, `CVE-2020-8565` (k8s.io modules, admission webhook) | `ACCEPTED` in `scripts/check_fossa_issues.py` and the SECURITY.md table | Spurious matches: FOSSA flagged them against any v0.x, while the advisories end at kubernetes 1.12.3 / client-go 0.17.0 / 0.19.6 and the webhook pins v0.37.0. | Drop if FOSSA's data gains the upper bounds (its 2026-10-27 scan of `webhook/` raised none of the three). |
 

@@ -11,8 +11,26 @@
 # Adding an entry is a security decision, not a build fix. Each needs: what the finding is, where it
 # comes from, why it is not exploitable in Norviq, and what would let us drop the line.
 
-vulnerabilities: []
-# EMPTY, and that is a result rather than an oversight — all three entries were cleared at once by
+vulnerabilities:
+  # SCOPED ON PURPOSE, like CVE-2026-56852 was: the webhook binary pins golang.org/x/net v0.62.0
+  # (webhook/go.mod), which fixes this, and without `paths` this entry would disarm the gate there.
+  - id: CVE-2026-78661
+    paths:
+      - usr/local/bin/opa
+    statement: >-
+      HIGH, quadratic time when golang.org/x/net/html coalesces text nodes (GO-2026-6860), fixed in
+      x/net 0.62.0. Reported against x/net v0.60.0 in the PINNED OPA binary (opa 1.21.4-static) in
+      the api/engine images. NOT FIXABLE BY BUMP TODAY: every OPA release from v1.21.4 through
+      v1.22.3 (2026-11-10) requires x/net v0.60.0. ACCEPTED: the vulnerable package is not in the
+      binary. `go tool nm` on the released opa_linux_amd64_static and opa_linux_arm64_static (the
+      sha256s Dockerfile.api and Dockerfile.engine verify) finds no golang.org/x/net/html symbol,
+      against 206 for golang.org/x/net/http2, and `govulncheck -mode=binary` reports GO-2026-6860 at
+      module level only, while it reports 125 symbol-level findings in the same binary. The chart's
+      OPA sidecar image is a build of the same OPA commit. Revisit when an OPA release requires
+      x/net >= 0.62.0.
+
+# Before CVE-2026-78661 the list was empty, and that was a result rather than an oversight: all
+# three earlier entries were cleared at once by
 # pinning OPA 1.19.0 (F-001). Each had an explicit exit condition written when it was added, and the
 # bump met all three:
 #
