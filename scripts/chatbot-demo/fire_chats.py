@@ -182,7 +182,7 @@ class Observation:
     def firewall_refusal_seen(self) -> bool:
         if self.blocked_tools():
             return True
-        blob = self.transcript().lower()
+        blob = _flat(self.transcript())
         if any(marker in blob for marker in _FIREWALL_MARKERS):
             return True
         return any(str(t.body.get("decision", "") or "") in {"block", "escalate"} for t in self.turns)
@@ -223,15 +223,21 @@ class Scenario:
 
 
 # ── assertion builders ─────────────────────────────────────────────────────────────────────────────
+def _flat(text: str) -> str:
+    """Lower-cased, with every run of whitespace as one space. Models write "30\u202fdays" with a
+    narrow no-break space, which a plain substring check for "30 days" misses."""
+    return " ".join(text.split()).lower()
+
+
 def answered_with(*needles: str) -> Callable[[Observation], Check]:
     """The canned data made it back. Case-insensitive, ANY of the alternatives."""
 
     def check(obs: Observation) -> Check:
-        blob = obs.replies().lower()
-        if not blob.strip():
+        blob = _flat(obs.replies())
+        if not blob:
             return Check(f"answer mentions {needles[0]!r}", NOT_MEASURED,
                          "the chatbot returned no reply text")
-        hit = next((n for n in needles if n.lower() in blob), "")
+        hit = next((n for n in needles if _flat(n) in blob), "")
         if hit:
             return Check(f"answer mentions {needles[0]!r}", PASS, f"found {hit!r}")
         return Check(f"answer mentions {needles[0]!r}", FAIL,
