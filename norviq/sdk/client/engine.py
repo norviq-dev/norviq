@@ -116,9 +116,12 @@ class ClientFault(Exception):
 #: The decisions an engine answer may carry.
 DECISIONS = frozenset(get_args(PolicyDecision.model_fields["decision"].annotation))
 
-# ssl.SSLError reasons for an https URL whose server answered without TLS.
+# ssl.SSLError reasons for an https URL whose server answered without TLS. With OpenSSL 3.5.4 (and on
+# the Ubuntu 26.04 CI runner) a plain HTTP answer is RECORD_LAYER_FAILURE; with 3.5.7, 3.6 and 4.1 it is
+# WRONG_VERSION_NUMBER. Only a handshake error counts (see client_fault), and in none of those builds
+# is a dropped or reset handshake reported this way.
 _NOT_TLS = frozenset({"WRONG_VERSION_NUMBER", "HTTP_REQUEST", "HTTPS_PROXY_REQUEST", "UNKNOWN_PROTOCOL",
-                      "PACKET_LENGTH_TOO_LONG"})
+                      "PACKET_LENGTH_TOO_LONG", "RECORD_LAYER_FAILURE"})
 # TLS alerts that name the certificate this client presented, or the lack of one, as refused. The
 # server sends the same alert on every attempt while its configuration stands. A server whose own CRL
 # is missing or stale also sends UNKNOWN_CA or CERTIFICATE_EXPIRED; that blocks too, as the engine
@@ -147,6 +150,15 @@ def engine_url_problem(url: str) -> str | None:
     if port is not None and not 1 <= port <= 65535:
         return "its port is outside 1-65535"
     return None
+
+
+def _ssl_reason(err: ssl.SSLError) -> str | None:
+    """The OpenSSL reason name of `err`. CPython leaves `reason` None for a code newer than its own
+    table, which 3.12 and 3.13 do for RECORD_LAYER_FAILURE, so that one is read from the message."""
+    reason = getattr(err, "reason", None)
+    if reason is None and "record layer failure" in str(err):
+        return "RECORD_LAYER_FAILURE"
+    return reason
 
 
 def request_problem(token: str, url: str) -> str | None:
@@ -186,11 +198,10 @@ def client_fault(exc: BaseException) -> str | None:
         seen.add(id(link))
         if isinstance(link, ssl.SSLCertVerificationError):
             return "the engine's TLS certificate failed verification"
-        if (isinstance(link, ssl.SSLError) and isinstance(exc, httpx.ConnectError)
-                and getattr(link, "reason", None) in _NOT_TLS):
+        if isinstance(link, ssl.SSLError) and isinstance(exc, httpx.ConnectError) and _ssl_reason(link) in _NOT_TLS:
             return "the engine URL is https but the server did not answer with TLS"
-        if isinstance(link, ssl.SSLError) and getattr(link, "reason", None) in _CERT_REFUSED:
-            return f"the engine refused this client's TLS certificate ({link.reason})"
+        if isinstance(link, ssl.SSLError) and _ssl_reason(link) in _CERT_REFUSED:
+            return f"the engine refused this client's TLS certificate ({_ssl_reason(link)})"
         link = link.__cause__ or link.__context__
     return None
 

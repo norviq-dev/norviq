@@ -32,7 +32,7 @@ from pydantic import ValidationError
 
 from norviq.bearer import REDACTED, bearer_token_problem, redact_credentials
 from norviq.config import NorviqSettings, settings
-from norviq.sdk.client.engine import PolicyEngineClient
+from norviq.sdk.client.engine import PolicyEngineClient, client_fault
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 from norviq.sidecar.remote_evaluator import RemoteEvaluator
 
@@ -541,6 +541,25 @@ async def test_https_to_a_server_without_tls_blocks_and_is_not_retried(allow, se
     assert decision.decision == "block" and decision.rule_id == rule
     assert engine.hits == 1
     assert any(entry.get("code") == code for entry in logs), logs
+
+
+def _wrapped(err: ssl.SSLError) -> httpx.ConnectError:
+    """`err` as a handshake failure reaches the client: an httpx.ConnectError raised from it."""
+    try:
+        raise httpx.ConnectError(str(err)) from err
+    except httpx.ConnectError as exc:
+        return exc
+
+
+def test_the_openssl_3_5_4_report_of_a_server_without_tls_is_recognised() -> None:
+    """OpenSSL 3.5.4 reports a plain HTTP answer as "record layer failure", a code CPython 3.12 and 3.13
+    do not name, so `reason` is None. The test above meets it only where that OpenSSL is linked (the CI
+    runner); this one builds it. After the handshake the same error is the network's, and so is an EOF."""
+    report = ssl.SSLError(1, "[SSL] record layer failure (_ssl.c:1032)")
+    assert getattr(report, "reason", None) is None
+    assert client_fault(_wrapped(report)) == "the engine URL is https but the server did not answer with TLS"
+    assert client_fault(report) is None
+    assert client_fault(_wrapped(ssl.SSLEOFError(8, "EOF occurred in violation of protocol (_ssl.c:1129)"))) is None
 
 
 # 6. A forward proxy that refuses the CONNECT with a non-5xx status. Its reason phrase is not echoed.
