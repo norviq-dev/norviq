@@ -5,30 +5,40 @@ versions follow SemVer. Each 0.2.x entry is a summary — the linked GitHub rele
 grouped by upgrade impact, security relevance and operator-visible behaviour. Entries for 0.2.0 and
 earlier are taken from the annotated tags, the only record those versions have.
 
-Eighteen released versions. The `pre-public-cleanup-20260712` tag is not a release and is omitted.
+Nineteen released versions. The `pre-public-cleanup-20260712` tag is not a release and is omitted.
 Three versions published incompletely — `v0.1.0` shipped no chart, `v0.1.1` shipped it unsigned,
 `v0.2.0` shipped no chart — and their headings say so: they are listed because they happened, not
 because they should be installed.
 
-## [Unreleased]
+## [0.2.7] — 2026-11-10 — a pod that carries the injector's parts is refused
 
-- A client that cannot send a valid request to the engine (bad token, URL or settings, TLS trust,
-  proxy refusal, an unknown error) now blocks the call instead of following `fallbackMode`.
-- Bearer tokens no longer appear in client error logs.
-- Dependabot removed; dependency updates are made by hand and gated in CI (`SECURITY.md`).
-- The admission webhook refuses a pod whose spec already carries any part the injector adds (the
+**Upgrade impact — read before `helm upgrade`.**
+
+- **The admission webhook refuses a pod whose spec already carries any part the injector adds** (the
   sidecar, its volumes or mounts, `NRVQ_SOCKET_PATH`, the `norviq.io/injected` annotation, MCP proxy
-  wrapping) with `NRVQ-WHK-4063`, opted out or not; it used to admit such a pod unpatched when the
-  parts looked like its own output. Re-creating a pod from an injected spec (`kubectl get pod -o yaml`,
-  `kubectl debug --copy-to`) now needs the injected parts removed first. An opted-out pod running the
-  sidecar image, whatever its command, is refused the same way. `NRVQ-WHK-4008` is retired. This
-  covers pods the webhook sees: with `gateOnlyAgentPods` on (the default), a pod without
-  `norviq.io/agent-class` never reaches it.
-- The injector now mounts the enforcement socket directory (`/var/run/norviq`) `readOnly` into every
-  container except the sidecar, so another container cannot remove or replace the socket through that
-  mount; `docs/security-model.md` lists the routes it does not close. Containers still connect to it
-  as before; a workload that wrote files of its own into that directory now gets a read-only
-  filesystem error.
+  wrapping) with `NRVQ-WHK-4063`, opted out or not, and a pod placing its own volume, device or
+  termination message file under a path the injector mounts at with `NRVQ-WHK-4034`. Re-creating a pod
+  from an injected spec (`kubectl get pod -o yaml`, `kubectl debug --copy-to`) now needs the injected
+  parts removed first. An opted-out pod running the sidecar image, whatever its command, is refused the
+  same way. `NRVQ-WHK-4008` is retired. This covers pods the webhook sees: with `gateOnlyAgentPods` on
+  (the default), a pod without `norviq.io/agent-class` never reaches it.
+- **The enforcement socket directory (`/var/run/norviq`) is mounted `readOnly` into every container
+  except the sidecar.** Containers still connect to the socket as before; a workload that wrote files of
+  its own into that directory now gets a read-only filesystem error. `docs/security-model.md` lists what
+  the mount does not cover. It takes effect as agent pods are re-created.
+- **A client that cannot send a valid request to the engine now blocks the call instead of following
+  `fallbackMode`** (bad token, URL or settings, TLS trust, proxy refusal, an answer that is not a
+  decision, an unknown error), logged as `NRVQ-SDK-1018` by the SDK client and `NRVQ-SDC-3049` by the
+  sidecar, and is not retried. A failure that looks like an outage still follows `fallbackMode`;
+  `docs/security-model.md` lists them. Whitespace around `NRVQ_API_TOKEN` is stripped at load.
+- **The sidecar blocks a request it cannot encode** (`NRVQ-SDC-3047`), as the SDK client has since
+  0.2.6, instead of following `fallbackMode`.
+
+**Security.** 0.2.7 contains security fixes; their advisories publish with the release. Bearer tokens
+no longer appear in client error logs. The oauthlib floor moves to 4.0.1 (CVE-2026-49272) for the
+crewai and frameworks extras, and the PyPI publish action to v1.14.3.
+
+**Project.** Dependabot removed; dependency updates are made by hand and gated in CI (`SECURITY.md`).
 
 ## [0.2.6] — 2026-11-05 — the namespace baseline enforces by default
 
