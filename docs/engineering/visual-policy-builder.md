@@ -98,7 +98,12 @@ Rules that are load-bearing rather than stylistic:
   constraints yields a policy quietly *more* permissive than what they wrote.
 - **Blocks are attributed distinctly.** A constraint failure reports `intent_constraint_violation`,
   separate from `intent_refinement_mismatch`. The two rule bodies are mutually exclusive because
-  `rule_id` is a complete rule and two simultaneously-true bodies is a rego eval *conflict*.
+  `rule_id` is a complete rule and two simultaneously-true bodies is a rego eval *conflict*. A call
+  that fails a refinement *and* its grant is reported as `intent_constraint_violation`, so the id alone
+  does not say a refinement held. The policy dry run (`POST /api/v1/policies/dry-run`) counts a
+  value-less record's refusal as "cannot evaluate" only after it re-evaluates the call with every grant
+  assumed met and the call is then allowed, and only when every line of the tool's grant reads an
+  argument (`_refused_only_on_argument_values`, `norviq/api/routers/policies.py`).
 - **`hostIn` escapes its host literals.** Unescaped, the `.` in `api.example.com` would also match
   `apiXexample.com` — a host allowlist matching hosts it must not. It is anchored at the scheme and
   terminated at the first `/?#`, and excludes `@`, so neither a path-embedded lookalike

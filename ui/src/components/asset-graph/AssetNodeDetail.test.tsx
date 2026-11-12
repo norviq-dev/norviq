@@ -101,6 +101,48 @@ describe("AssetNodeDetail (inspector redesign)", () => {
     expect(screen.getByText("DEFENDED")).toBeInTheDocument();
   });
 
+  // A Monitor would-block RAN. The panel used to count it as guarded and show DEFENDED; the API now
+  // reports it as `monitored`, and the inspector must say so — amber, not the green reassurance row.
+  it("renders a monitored verb as MONITOR ONLY, with no Defend button and no DEFENDED", () => {
+    const dataNode = model.nodes.find((n) => n.id === "data:smtp")!;
+    const monitored = {
+      verb: "delete" as const, risk: "critical" as const, technique: "AML.T0048", label: "delete / drop",
+      status: "monitored" as const, granted: true, observed: true, defended: false, monitored: true,
+      recommendation: "calls were logged as would-block but ran (Monitor) — nothing stopped delete on PostgreSQL; enforce the policy or namespace to block it",
+      agent_classes: ["report-gen"]
+    };
+    dataNode.capability = {
+      source_type: "postgresql", source_class: "datastore", source_display: "PostgreSQL",
+      worst: monitored, findings: [monitored]
+    };
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <AssetNodeDetail node={dataNode} model={model} reach={new Set(["data:smtp"])} side="left" onClose={vi.fn()} />
+        </ToastProvider>
+      </MemoryRouter>
+    );
+    expect(screen.getByText(/MONITOR ONLY · DELETE/)).toBeInTheDocument();
+    expect(screen.getByText(/would-block but ran/)).toBeInTheDocument();
+    expect(screen.queryByText("DEFENDED")).toBeNull();
+    expect(screen.queryByTestId("cap-defend")).toBeNull();
+  });
+
+  it("shows an edge's would-block count beside allow/block instead of hiding it", () => {
+    const m = buildModel(NODES, [
+      { source: "agent-1", target: "tool:send_email", type: "calls", weight: 1, properties: { decision_history: { allow: 9, block: 0, escalate: 0, would_block: 4 } } },
+      EDGES[1]
+    ]);
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <AssetNodeDetail node={m.nodes.find((n) => n.id === "agent-1")!} model={m} reach={reach} side="right" onClose={vi.fn()} />
+        </ToastProvider>
+      </MemoryRouter>
+    );
+    expect(screen.getByText("9 allow · 0 block · 4 would-block (ran)")).toBeInTheDocument();
+  });
+
   // CAP→POLICY: the worst open finding offers a one-click defense that calls the API + surfaces a toast
   // with a "Review in Policies" hand-off (never auto-enforces).
   it("defends an undefended verb → creates a draft and offers the Policies hand-off", async () => {

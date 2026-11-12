@@ -11,6 +11,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from norviq.api.framework_mapping import techniques_for_rule, techniques_for_tool
 from norviq.engine.attack_graph_models import (
     AttackPath,
     AttackStep,
@@ -35,15 +36,6 @@ DANGEROUS_TOOLS = {
 
 # Data resources considered sensitive
 SENSITIVE_DATA_PATTERNS = ["customers", "users", "payments", "pii", "secrets"]
-
-# MITRE ATLAS technique mapping (basic heuristic)
-MITRE_BY_TOOL_TYPE = {
-    "delete_record": ["AML.T0048"],  # Data Destruction
-    "drop_table": ["AML.T0048"],
-    "execute_sql": ["AML.T0049"],  # Discovery
-    "send_email": ["AML.T0040"],  # ML Model Inference API
-    "search_kb": [],
-}
 
 
 class AttackGraphEngine:
@@ -452,8 +444,17 @@ class AttackGraphEngine:
         return "low"
 
     def _extract_mitre_techniques(self, steps: list[AttackStep]) -> list[str]:
-        techniques = set()
+        """The ATLAS techniques of a path's tool steps, read from the one mapping Red Team reads.
+
+        A step a mapped rule decided is credited to that rule's techniques, as Red Team credits an
+        attack. Otherwise the tool's name picks the rule that guards it (`rule_for_tool`). This used a
+        table of its own that put delete_record and drop_table under AML.T0048 External Harms, while
+        Red Team scores attacks on the same tools under AML.T0053.
+        """
+        techniques: set[str] = set()
         for s in steps:
-            for t in MITRE_BY_TOOL_TYPE.get(s.node_name, []):
-                techniques.add(t)
+            if s.node_type != "tool":
+                continue
+            found = techniques_for_rule(s.matched_rule) or techniques_for_tool(s.node_name)
+            techniques.update(tid for tid, _ in found)
         return sorted(techniques)

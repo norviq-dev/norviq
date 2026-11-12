@@ -12,7 +12,10 @@ const COLORS: Record<string, string> = {
   high: "#00E5A0",
   medium: "#FFB020",
   low: "#FF3B5C",
-  frozen: "#666666"
+  frozen: "#666666",
+  // Shown only when some agent is in that state (lib/agentTrust.ts::trustDistribution).
+  unscored: "#8A8F98",
+  "freeze unknown": "#B48CFF"
 };
 const FALLBACK = ["#00E5A0", "#FFB020", "#FF3B5C", "#666666"];
 

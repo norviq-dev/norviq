@@ -224,32 +224,35 @@ OWASP / vector breakdown and no durable history; those exist only on the API/con
 
 ### 2.2 The corpus
 
-34 attacks (`norviq/redteam/attacks.py:65-123`), each carrying an ATLAS technique id, an expected
-decision, an expected `rule_id`, and — for the newest ones — an MCP vector id and a forged
-`input.mcp` document:
+34 attacks (`norviq/redteam/attacks.py`), each carrying an expected decision, an expected `rule_id`,
+and — for the newest ones — an MCP vector id and a forged `input.mcp` document. An attack carries no
+framework id of its own. Its ATLAS techniques and OWASP controls are every entry in
+`policies/mitre_mapping.json` and `policies/owasp_llm_mapping.json` whose `policies` list contains its
+expected rule (`norviq/api/framework_mapping.py`), the same files and the same rule lists the
+Compliance page reads. A block by that rule proves exactly the techniques Compliance would credit it to.
 
-| Category (enum) | Attacks | OWASP control derived? | Conditional? |
-|---|---|---|---|
-| `OWASP_LLM01` prompt injection | 3 | `LLM01:2025` | no |
-| `OWASP_LLM02` data leakage | 5 | `LLM02:2025` | no |
-| `OWASP_LLM05` supply chain | 2 | `LLM05:2025` | no |
-| `OWASP_LLM06` excessive agency | 3 | `LLM06:2025` | no |
-| `OWASP_LLM10` unbounded consumption | 1 | `LLM10:2025` | expects `allow` |
-| `CROSS_TENANT` | 2 | — | no |
-| `SQL_INJECTION` | 3 | — | no |
-| `SHELL_INJECTION` | 2 | — | no |
-| `TRUST_MANIPULATION` | 1 | — | no |
-| `CHAIN_EXPLOIT` | 2 | — | one expects `allow` |
-| `POLICY_BYPASS` | 2 | — | no |
-| `SECTOR_POLICY` | 3 | — | **yes** — sector pack |
-| `MCP_IDENTITY` | 3 | — | **yes** — MCP guardrail |
-| `POLICY_COMPOSITION` | 2 | — | no |
+| Category (enum) | Attacks | Expected rule | ATLAS | OWASP |
+|---|---|---|---|---|
+| `OWASP_LLM01` prompt injection | 3 | `llm01_prompt_injection` | `AML.T0051`, `AML.T0054` | `LLM01:2025` |
+| `POLICY_BYPASS` | 2 | `llm01_prompt_injection` | `AML.T0051`, `AML.T0054` | `LLM01:2025` |
+| `OWASP_LLM02` data leakage | 3 | `llm02_data_leakage` | `AML.T0057`, `AML.T0055` | `LLM02:2025` |
+| `OWASP_LLM02` data leakage | 2 | `pii_detection`, `pci_card_numbers` | `AML.T0057` | `LLM02:2025` |
+| `OWASP_LLM06` excessive agency | 3 | `llm06_excessive_agency` | `AML.T0053` | `LLM06:2025` |
+| `TRUST_MANIPULATION` | 1 | `llm06_excessive_agency` | `AML.T0053` | `LLM06:2025` |
+| `SQL_INJECTION` | 3 | `deny_sql_injection` | `AML.T0049` | `LLM05:2025` |
+| `SHELL_INJECTION` | 2 | `deny_shell_execution` | `AML.T0054`, `AML.T0050` | `LLM06:2025` |
+| `SUPPLY_CHAIN` | 2 | `llm05_supply_chain` | `AML.T0053` | — |
+| `CROSS_TENANT` | 2 | `cross_tenant_access` | `AML.T0012` | — |
+| `POLICY_COMPOSITION` | 2 | `llm02_data_leakage`, `cross_tenant_access` | as for that rule | as for that rule |
+| `OWASP_LLM10` unbounded consumption | 1 | `default_allow` (expects `allow`) | — | — |
+| `CHAIN_EXPLOIT` | 2 | `chain_depth_limit`, `default_allow` | — | — |
+| `SECTOR_POLICY` | 3 | sector pack rules (conditional) | — | — |
+| `MCP_IDENTITY` | 3 | MCP guardrail rules (conditional) | — | — |
 
-The OWASP control id is derived by string surgery on the **enum name**, not the value:
-`OWASP_LLM01` → `LLM01:2025` (`redteam_efficacy.py:50-58`). A category not starting with `OWASP_LLM`
-returns `None` and carries only an ATLAS technique. This is why `attacks.py:29-32` carries an
-explicit warning: naming a future category `OWASP_LLM*` when it is not that control would silently
-fabricate an OWASP mapping.
+A dash means no entry in the mapping lists that rule. The rule `llm05_supply_chain` keeps its old
+name, but OWASP 2025 numbers Supply Chain `LLM03`, which the mapping marks out of scope, so the
+supply-chain attacks carry no OWASP control. The category is only a label for the CLI and the results
+table; nothing is derived from its name.
 
 ### 2.3 How efficacy is computed
 
@@ -311,27 +314,24 @@ excluded_synthetic 0
 
 | Breakdown | Key | Denominator | Missing-key behaviour |
 |---|---|---|---|
-| `by_technique` | `attacks.py` `mitre_technique` (ATLAS id), display name resolved from `policies/mitre_mapping.json` | block-expected, applicable rows carrying that id | defaults to `"unknown"` — every attack is supposed to carry a technique, so that bucket is an alarm for a broken mapping (`redteam_efficacy.py:169-171`) |
-| `by_owasp` | derived from the category enum name | block-expected, applicable rows whose category maps to an OWASP control | **skipped** when absent |
+| `by_technique` | every ATLAS technique whose `policies` lists the attack's expected rule | block-expected, applicable rows mapped to that technique | an attack whose rule no technique lists goes to one bucket, `unmapped`, named "No ATLAS technique maps this rule", so the table still accounts for every scored attack |
+| `by_owasp` | every OWASP control whose `policies` lists the attack's expected rule | block-expected, applicable rows mapped to that control | **skipped** when absent. The console says so instead: the attack's row reads "not mapped to an OWASP control", and a line under the OWASP table counts the scored attacks it leaves out (the supply-chain attacks, for one) |
 | `by_vector` | `attacks.py` `mcp_vector`, title from `vectors.py` | block-expected, applicable rows carrying a vector id | **skipped** when absent — the 29 attacks predating the dimension exercise *no* MCP vector, and bucketing them as "unknown" would assert they exercise an unidentified one (`redteam_efficacy.py:182-193`) |
 
 Every denominator is per-row, so with N target classes each bucket's `total` is N × the attacks in it.
 
-Two honest wrinkles in the ATLAS breakdown, both visible in the console today:
+An attack whose rule several techniques list counts under each of them, as a block by that rule counts
+toward each of them on the Compliance page. The per-technique totals can therefore add up to more than
+`overall.total`.
 
-- **`AML.T0010` has no entry in `policies/mitre_mapping.json`.** The three `MCP_IDENTITY` attacks
-  declare it, so when the guardrail is enabled the breakdown renders a row reading
-  `AML.T0010 · AML.T0010` — the display name falls back to the raw id (`redteam_efficacy.py:67`). The
-  technique also never appears on the Compliance page, which iterates the mapping file.
-- **The id on an attack is the attack's own declaration, not a cross-check against the mapping's
-  meaning.** Two ids currently carry attacks whose subject matter does not match the mapping's name
-  for that id: `AML.T0048` ("External Harms", which the ATLAS mapping marks **out_of_scope**) is the
-  corpus's catch-all and carries ten of the 34 — the prompt-injection, jailbreak, chain,
-  policy-bypass and rate-limit attacks plus two sector attacks (`FIN-001`, `OT-001`) — while
-  `AML.T0051` ("LLM Prompt Injection") carries the four destructive-tool attacks (`EA-001/2/3`,
-  `TM-001`). Read the attack names in the results table, not the technique label, and do not
-  reconcile a Red Team `AML.T0048` row against the Compliance page's `AML.T0048` row — they are not
-  describing the same thing.
+A stored run keeps the mapping it was written with. When a run is read back with its rows,
+`/redteam/results/*` re-maps the rows and recounts every part of the efficacy blob that comes from
+rows (`overall`, the three breakdowns, and the `non_enforcement` / `sector_not_enabled` /
+`excluded_synthetic` counts) with the current mapping and the current per-row verdict. So a run from
+before the mapping was shared does not keep showing the old per-attack ids, and a run stored while a
+throttled block still counted as caught does not show a stale `overall` beside recounted breakdowns.
+The history list uses the same recount. `vector_coverage` stays as stored. A run whose rows were
+pruned keeps everything it was stored with.
 
 ### 2.6 Durability and retention
 

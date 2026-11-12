@@ -453,10 +453,22 @@ def _regenerate(name: str) -> str | None:
     return None  # written by the console (TypeScript); its current output is pinned in vitest
 
 
+def _policy_lines(rego: str) -> list[str]:
+    """Every line OPA reads, and every comment a program reads (the `# nrvq...` markers and manifests).
+
+    Leaves out only the prose comments. Those are explanation for a human, and a generator's explanation
+    can be corrected between releases: 0.2.8 stopped `generate_intent_rego` calling an allowlist
+    "TIGHTEN-ONLY", which it is not against a namespace-tier policy. A byte comparison would pin the
+    released prose, so that correction could only land by editing the released module in the fixture.
+    """
+    return [line for line in rego.splitlines() if not line.startswith("#") or line.startswith("# nrvq")]
+
+
 @pytest.mark.parametrize("name", sorted(n for n in LEGACY if _regenerate(n) is not None))
 def test_a_rewritten_module_is_what_the_generator_writes_today(name: str) -> None:
-    """The strongest form of "same policy": byte-identical to a fresh generation from the same inputs."""
-    assert upgrade_legacy(LEGACY[name]["rego"])[0] == _regenerate(name)
+    """The strongest form of "same policy": line-identical to a fresh generation from the same inputs,
+    in every line OPA or a program reads."""
+    assert _policy_lines(upgrade_legacy(LEGACY[name]["rego"])[0]) == _policy_lines(_regenerate(name))
 
 
 @pytest.mark.parametrize(

@@ -84,7 +84,10 @@ class TestMITREMapping:
             )
         ]
         techniques = engine._extract_mitre_techniques(steps)
-        assert "AML.T0048" in techniques
+        # The shared ATLAS table lists llm06_excessive_agency, the rule guarding delete_record, under
+        # AML.T0053 alone. This graph's own table said AML.T0048 External Harms, which Red Team does not
+        # use for this tool and the table marks out of scope.
+        assert techniques == ["AML.T0053"]
 
     def test_empty_for_unknown_tools(self):
         engine = AttackGraphEngine(evaluator=None)

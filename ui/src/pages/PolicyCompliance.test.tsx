@@ -241,6 +241,27 @@ describe("remediation", () => {
     expect(screen.getByTestId("pc-open-audit-r2-support").getAttribute("href")).toContain("agent=r2-support");
   });
 
+  // A block-mode policy's match is refused only where the namespace enforces. In a Monitor namespace it
+  // was logged and let through, and the footnote said "the calls above were refused" either way.
+  it("says block-mode matches were let through when the namespace is in Monitor", async () => {
+    mockAll({ controls: [control("customer_data_to_untrusted_recipient", ["r2-support"], 4)] });
+    vi.spyOn(client, "fetchSettings").mockResolvedValue({
+      namespace: "chatbot-prod", enforcement_mode: "audit", enforcement_mode_source: "namespace", trust_threshold: 0.7, rate_limit: 60
+    } as never);
+    renderPage();
+    expect(await screen.findByText(/chatbot-prod is in Monitor mode, so these block-mode policies logged the calls above as would-blocks/)).toBeInTheDocument();
+    expect(screen.queryByText(/the calls above were refused/)).toBeNull();
+  });
+
+  it("CONTROL: says they were refused when the namespace enforces", async () => {
+    mockAll({ controls: [control("customer_data_to_untrusted_recipient", ["r2-support"], 4)] });
+    vi.spyOn(client, "fetchSettings").mockResolvedValue({
+      namespace: "chatbot-prod", enforcement_mode: "block", enforcement_mode_source: "namespace", trust_threshold: 0.7, rate_limit: 60
+    } as never);
+    renderPage();
+    expect(await screen.findByText(/These policies are enforcing, so the calls above were refused/)).toBeInTheDocument();
+  });
+
   it("says nothing to remediate only when policies exist and all are clean", async () => {
     mockAll({ controls: [] });
     renderPage();

@@ -293,6 +293,10 @@ describe("McpServers", () => {
 
     // The risk is not the deletion — it is that re-pinning under `tofu` adopts the drift on sight.
     expect(screen.getByTestId("mcp-forget-consequence")).toHaveTextContent(/auto-approved on sight/i);
+    // Forgetting a server does not touch policies. In a Monitor namespace they log instead of blocking, so the
+    // dialog makes no claim about enforcement.
+    expect(screen.getByText(/Policies are unchanged\./)).toBeInTheDocument();
+    expect(screen.queryByText(/keep enforcing/i)).not.toBeInTheDocument();
     expect(screen.getByTestId("mcp-forget-submit")).toBeDisabled();
     await user.type(screen.getByTestId("mcp-forget-input"), "postgres");
     await user.click(screen.getByTestId("mcp-forget-submit"));

@@ -10,6 +10,47 @@ Three versions published incompletely — `v0.1.0` shipped no chart, `v0.1.1` sh
 `v0.2.0` shipped no chart — and their headings say so: they are listed because they happened, not
 because they should be installed.
 
+## [Unreleased]
+
+**Upgrade impact — read before `helm upgrade`.**
+
+- **A "tighten-only" policy can no longer allow a call that a namespace-tier policy blocks.** A class
+  policy outranked the namespace's base policy by priority, so a rule built in tighten-only mode could
+  loosen it. A block from either now wins.
+- **Attack-path ids now include the chokepoint**, so sibling tools are separate paths. An old `?path=`
+  link shows that the path no longer exists or was renamed.
+- **`PUT /api/v1/agents/{id}/trust` answers with the controls it set (`frozen`, `trust_cap`)** instead of
+  `score` and `category`. A cap or a lifted freeze no longer writes a display score; the agent's trust is
+  what `GET /api/v1/agents` reports. A script that reads `score` from this response needs changing.
+- **Handing an intent to the policy builder starts tighten-only rules with a default of allow**, so the
+  saved policy only adds blocks. It used to keep the allowlist's default of block.
+- **Compliance counts change.** AML.T0057 and LLM02:2025 now list `pii_detection` and
+  `pci_card_numbers`, and Red Team reads the same ATLAS and OWASP LLM Top 10 2025 table as Compliance
+  (it used a per-attack copy with 2023 OWASP numbers).
+
+**The console says what is enforced, not what is configured.**
+
+- Compliance, the policy catalog, the builder and the baseline controls no longer say "ENFORCED" or
+  "enforcing" in a namespace that is in Monitor (audit), and a policy card no longer shows a policy
+  saved in audit mode as enforcing.
+- The Overview shows Blocked and Would-block for the window whatever the current posture, so a switch
+  between Block and Monitor no longer hides half the window. Tool Call Volume includes audit and
+  escalate decisions.
+- The Attack Graph and the Asset Graph count a Monitor would-block as monitored, not blocked. A path
+  with allowed end-to-end traffic now reads exploitable.
+- A frozen agent stays frozen in the Agents list, the trust chart, search and the notification bell;
+  it used to read as its last score about 30 s after the freeze. Unfreeze lifts the freeze without
+  leaving a trust cap behind, Reset Trust calls the reset endpoint, an active cap is shown and can be
+  removed, and Freeze asks for confirmation. While the trust store cannot be read, the console shows
+  the freeze as unknown instead of "not frozen".
+- Proposing a policy from traffic no longer grants a tool whose every recorded call was blocked or
+  would-blocked. A tool that was also allowed is still proposed, and the console says how often it was
+  refused. A dry run reports a call recorded without argument values as "cannot evaluate" instead of
+  "newly blocked" when the refusal depends only on those values; other refusals are still counted.
+
+**Fixes.** The asset graph no longer loses tool calls when the API runs more than one replica: saves
+merge instead of overwriting, and removing a node is kept as a tombstone every replica honours.
+
 ## [0.2.7] — 2026-11-11 — a pod that carries the injector's parts is refused
 
 **Upgrade impact — read before `helm upgrade`.**

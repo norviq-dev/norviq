@@ -3,10 +3,11 @@
 
 """Red-team catalog mapping + efficacy roll-up — pure, DB-free, unit-testable.
 
-Every attack maps to a MITRE ATLAS technique (``mitre_technique``) and, where applicable, an OWASP LLM
-control (derived from the attack ``category`` enum name, e.g. ``OWASP_LLM01`` -> ``LLM01:2025``). Technique /
-control display names are resolved from the SAME shipped mapping files the Compliance feature reads
-(``policies/mitre_mapping.json`` + ``policies/owasp_llm_mapping.json``), so the two views never drift.
+An attack's MITRE ATLAS techniques and OWASP LLM controls are looked up from the rule it expects to fire
+(``expected_rule``) in the mapping Compliance reads (``norviq/api/framework_mapping.py`` over
+``policies/mitre_mapping.json`` + ``policies/owasp_llm_mapping.json``). An attack counts under every
+technique and control that lists its rule, which is exactly the set of techniques Compliance credits when
+that rule blocks real traffic. A rule no technique lists is reported as unmapped, never under a made-up id.
 
 Given the result rows from a suite run, compute a caught-vs-got-through efficacy roll-up — overall and per
 ATLAS technique + per OWASP control. Only "block-expected" attacks count toward the proven-blocking ratio (an
@@ -16,67 +17,50 @@ as a miss). Synthetic / probe target identities are EXCLUDED so the number refle
 
 from __future__ import annotations
 
-import json
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
+from norviq.api.framework_mapping import techniques_for_rule
 from norviq.api.routers.system_health import non_policy_rule_for  # a fault or a throttle is not a detection
 from norviq.api.synthetic import is_synthetic_identity
+from norviq.redteam.attacks import get_attack_by_id
 from norviq.redteam.vectors import VECTORS_BY_ID, EVALUATE_REACHABLE, coverage_denominators
 
-_POLICIES_DIR = Path(__file__).resolve().parent.parent.parent / "policies"
-
-
-@lru_cache(maxsize=1)
-def _mitre_names() -> dict[str, str]:
-    """AML.T00xx -> display name (from the shipped ATLAS mapping)."""
-    try:
-        data = json.loads((_POLICIES_DIR / "mitre_mapping.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return {tid: str(v.get("name", tid)) for tid, v in data.items() if isinstance(v, dict)}
-
-
-@lru_cache(maxsize=1)
-def _owasp_names() -> dict[str, str]:
-    """LLM0x:2025 -> display name (from the shipped OWASP LLM mapping)."""
-    try:
-        data = json.loads((_POLICIES_DIR / "owasp_llm_mapping.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return {cid: str(v.get("name", cid)) for cid, v in data.items() if isinstance(v, dict)}
-
-
-def owasp_control_for_category(category_name: str) -> str | None:
-    """Map an AttackCategory ENUM NAME (e.g. ``OWASP_LLM01``) to its OWASP control id (``LLM01:2025``).
-
-    Non-OWASP categories (SQL_INJECTION, CROSS_TENANT, …) return None — they still carry an ATLAS technique.
-    """
-    if not category_name.startswith("OWASP_LLM"):
-        return None
-    suffix = category_name.removeprefix("OWASP_")  # LLM01
-    return f"{suffix}:2025"
+# The ATLAS bucket for a block-expected attack whose rule no technique lists. It names the condition
+# instead of posing as a technique, and it sorts after every AML.T id.
+UNMAPPED_TECHNIQUE = "unmapped"
+UNMAPPED_TECHNIQUE_NAME = "No ATLAS technique maps this rule"
 
 
 def attack_mapping(attack: Any) -> dict[str, Any]:
-    """The ATLAS + OWASP mapping for one attack definition (display-name resolved)."""
-    tid = attack.mitre_technique
-    category_name = attack.category.name  # enum NAME, e.g. OWASP_LLM01
-    owasp_id = owasp_control_for_category(category_name)
+    """Every ATLAS technique and OWASP control the shared mapping lists ``attack.expected_rule`` under."""
+    rule = getattr(attack, "expected_rule", "") or ""
     return {
-        "atlas": {"technique_id": tid, "technique_name": _mitre_names().get(tid, tid)},
-        "owasp": (
-            {"control_id": owasp_id, "control_name": _owasp_names().get(owasp_id, owasp_id)}
-            if owasp_id
-            else None
-        ),
+        "atlas": [{"technique_id": t, "technique_name": n} for t, n in techniques_for_rule(rule, "atlas")],
+        "owasp": [{"control_id": c, "control_name": n} for c, n in techniques_for_rule(rule, "owasp")],
+    }
+
+
+def mapping_fields(attack: Any) -> dict[str, Any]:
+    """The framework fields a catalog entry and a result row carry.
+
+    The lists are the mapping. The single ``atlas_technique`` / ``owasp_control`` fields are the first
+    entry of each list (None when the list is empty), kept for readers written before an attack could
+    map to more than one technique.
+    """
+    m = attack_mapping(attack)
+    atlas, owasp = m["atlas"], m["owasp"]
+    return {
+        "atlas_techniques": atlas,
+        "owasp_controls": owasp,
+        "atlas_technique": atlas[0]["technique_id"] if atlas else None,
+        "atlas_technique_name": atlas[0]["technique_name"] if atlas else None,
+        "owasp_control": owasp[0]["control_id"] if owasp else None,
+        "owasp_control_name": owasp[0]["control_name"] if owasp else None,
     }
 
 
 def catalog_entry(attack: Any) -> dict[str, Any]:
     """One enriched catalog row (attack fields + resolved ATLAS/OWASP mapping)."""
-    m = attack_mapping(attack)
     return {
         "attack_id": attack.id,
         "name": attack.name,
@@ -87,10 +71,7 @@ def catalog_entry(attack: Any) -> dict[str, Any]:
         "expected_decision": attack.expected_decision,
         "expected_rule": attack.expected_rule,
         "tags": list(attack.tags),
-        "atlas_technique": m["atlas"]["technique_id"],
-        "atlas_technique_name": m["atlas"]["technique_name"],
-        "owasp_control": m["owasp"]["control_id"] if m["owasp"] else None,
-        "owasp_control_name": m["owasp"]["control_name"] if m["owasp"] else None,
+        **mapping_fields(attack),
         "mcp_vector": getattr(attack, "mcp_vector", "") or None,
         "mcp_vector_title": (
             VECTORS_BY_ID[attack.mcp_vector].title
@@ -98,6 +79,58 @@ def catalog_entry(attack: Any) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def with_current_mapping(results: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Copies of stored result rows with their framework fields re-read from the current mapping.
+
+    A stored run keeps the mapping it was written with, and every run written before the mapping was
+    shared carries the old per-attack literals: its prompt injections under External Harms and its
+    supply-chain attacks under LLM05:2025. The newest run per namespace is the one the console shows
+    and it always keeps its rows, so those rows are re-mapped on the way out. A row whose attack is no
+    longer in the catalog keeps what it was written with.
+    """
+    if results is None:
+        return None
+    out = []
+    for r in results:
+        attack = get_attack_by_id(str(r.get("attack_id") or ""))
+        out.append({**r, **mapping_fields(attack)} if attack is not None else dict(r))
+    return out
+
+
+# The parts of an efficacy blob counted from the result rows. `vector_coverage` is not one of them:
+# its denominators come from the catalog and are stored on the run on purpose (`_vector_coverage`).
+ROW_COUNTED_FIELDS = (
+    "overall", "by_technique", "by_owasp", "by_vector", "non_enforcement", "sector_not_enabled",
+    "excluded_synthetic",
+)
+
+
+def with_current_breakdowns(efficacy: Any, results: list[dict[str, Any]] | None) -> Any:
+    """A stored efficacy blob with every row-counted part recounted from ``results``.
+
+    Pass rows that went through ``with_current_mapping``. Only ``by_technique`` / ``by_owasp`` used to
+    be recounted, while ``overall`` was served as stored. ``row_outcome`` has changed since runs were
+    first stored (a throttled or faulted block is no longer caught, a monitored detection is
+    would_block), so a stored ``overall`` could disagree with the breakdowns served beside it. Every
+    part is now counted by the same pass. A run whose rows were pruned keeps what it was written with.
+    """
+    if not isinstance(efficacy, dict) or not results:
+        return efficacy
+    fresh = compute_efficacy(results)
+    return {**efficacy, **{k: fresh[k] for k in ROW_COUNTED_FIELDS}}
+
+
+def _row_frameworks(r: dict[str, Any], plural: str, single: str, name_key: str, id_key: str) -> list[tuple[str, str]]:
+    """(id, name) pairs a row is credited to. A row stored before the lists existed has only the
+    single field, so that is read when the list is absent."""
+    entries = r.get(plural)
+    if isinstance(entries, list):
+        return [(str(e.get(id_key)), str(e.get(name_key) or e.get(id_key))) for e in entries
+                if isinstance(e, dict) and e.get(id_key)]
+    one = r.get(single)
+    return [(str(one), str(r.get(f"{single}_name") or one))] if one else []
 
 
 # Decisions that actually STOP the call. `escalate` belongs here: the firewall holds the call for human
@@ -300,25 +333,27 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
         overall["total"] += 1
         overall[outcome] += 1
 
-        tid = r.get("atlas_technique") or "unknown"
-        tb = by_technique.setdefault(tid, {**_blank_bucket(), "technique_id": tid,
-                                            "technique_name": r.get("atlas_technique_name") or tid})
-        tb["total"] += 1
-        tb[outcome] += 1
+        # An attack counts under EVERY technique and control its rule is mapped to, as Compliance credits
+        # a block to every technique that lists the rule. So the per-technique totals can sum to more
+        # than `overall.total`. A row with no technique goes to the named unmapped bucket, so the ATLAS
+        # table still accounts for every scored attack; a row with no OWASP control is left out of
+        # `by_owasp`, as before.
+        techniques = _row_frameworks(r, "atlas_techniques", "atlas_technique", "technique_name", "technique_id")
+        for tid, tname in techniques or [(UNMAPPED_TECHNIQUE, UNMAPPED_TECHNIQUE_NAME)]:
+            tb = by_technique.setdefault(tid, {**_blank_bucket(), "technique_id": tid, "technique_name": tname})
+            tb["total"] += 1
+            tb[outcome] += 1
 
-        cid = r.get("owasp_control")
-        if cid:
-            ob = by_owasp.setdefault(cid, {**_blank_bucket(), "control_id": cid,
-                                           "control_name": r.get("owasp_control_name") or cid})
+        for cid, cname in _row_frameworks(r, "owasp_controls", "owasp_control", "control_name", "control_id"):
+            ob = by_owasp.setdefault(cid, {**_blank_bucket(), "control_id": cid, "control_name": cname})
             ob["total"] += 1
             ob[outcome] += 1
 
-        # SKIPPED when absent, following `by_owasp` and NOT `by_technique`. `by_technique` defaults to
-        # "unknown" because every attack is supposed to carry a technique, so that bucket is an alarm
-        # for a broken mapping. An MCP vector is legitimately absent for every attack that predates the
-        # dimension — bucketing those as "unknown" would assert they exercise an unidentified MCP
-        # vector, which is false, and would render one row of ~29xN attacks that dominates the table
-        # and means nothing.
+        # SKIPPED when absent, following `by_owasp` and NOT `by_technique`. `by_technique` keeps an
+        # explicit unmapped bucket so the ATLAS table accounts for every scored attack. An MCP vector is
+        # legitimately absent for every attack that predates the dimension — bucketing those as
+        # "unknown" would assert they exercise an unidentified MCP vector, which is false, and would
+        # render one row of ~29xN attacks that dominates the table and means nothing.
         vid = r.get("mcp_vector")
         if vid:
             vb = by_vector.setdefault(vid, {**_blank_bucket(), "vector_id": vid,

@@ -435,8 +435,8 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
       .attr("stroke-width", (d) => (effDec(d) === "block" ? 3.6 : 2.8))
       .attr("stroke-linecap", "round")
       .attr("marker-end", (d) => `url(#ak${effDec(d)})`)
-      // Dashed = the hop is (or would be) stopped: enforced block AND monitor would-block both dash;
-      // would-block stays amber so "covered but not enforcing" never reads as an enforced red block.
+      // Dashed = a policy matched the hop: an enforced block, or a Monitor would-block (which RAN — it
+      // stays amber so "matched but not enforcing" never reads as an enforced red block).
       .attr("stroke-dasharray", (d) => (effDec(d) === "block" || effDec(d) === "would_block" ? "7 6" : null));
 
     // ---- count label on EVERY hop (denied vs allowed) ----

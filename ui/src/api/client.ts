@@ -206,6 +206,10 @@ export async function fetchSystemHealth(): Promise<SystemHealth> {
 export type RuntimeSettings = {
   namespace: string;
   enforcement_mode: "block" | "audit";
+  /** Where `enforcement_mode` came from. The engine relaxes policy blocks to would-block only when the
+   *  namespace sets "audit" itself; an "audit" inherited from the cluster default touches the no-policy
+   *  default alone, and the namespace's policy blocks still block. Absent from an older API. */
+  enforcement_mode_source?: "namespace" | "cluster_default";
   trust_threshold: number;
   rate_limit: number;
   sector?: string | null;
@@ -609,8 +613,12 @@ export type RedteamEfficacy = {
   excluded_synthetic: number;
 };
 export type RedteamRunResult = RedteamResult & {
-  atlas_technique?: string;
-  atlas_technique_name?: string;
+  // Every ATLAS technique and OWASP control the Compliance mapping lists this attack's rule under. The
+  // single fields below are the first of each list, and the only fields a row from an older API has.
+  atlas_techniques?: { technique_id: string; technique_name: string }[];
+  owasp_controls?: { control_id: string; control_name: string }[];
+  atlas_technique?: string | null;
+  atlas_technique_name?: string | null;
   owasp_control?: string | null;
   owasp_control_name?: string | null;
   mcp_vector?: string | null;
@@ -783,13 +791,17 @@ export async function fetchTools(namespace?: string, range: string = "30d"): Pro
   return apiGet<ToolRegistryEntry[]>(`/api/v1/tools?${params.toString()}`);
 }
 
+/** One /audit/volume bucket. The API counts every decision; `audit` is the would-block a Monitor
+ *  namespace or an audit-mode policy logs instead of blocking. */
+export type VolumeBucket = { time: string; allow: number; block: number; escalate?: number; audit?: number };
+
 export async function fetchVolume(
   range: string = "24h",
   namespace?: string
-): Promise<Array<{ time: string; allow: number; block: number }>> {
+): Promise<VolumeBucket[]> {
   const params = new URLSearchParams({ range });
   if (namespace && namespace !== "all") params.set("namespace", namespace);
-  return apiGet<Array<{ time: string; allow: number; block: number }>>(`/api/v1/audit/volume?${params.toString()}`);
+  return apiGet<VolumeBucket[]>(`/api/v1/audit/volume?${params.toString()}`);
 }
 
 export type MitreTechnique = {
@@ -808,6 +820,9 @@ export type MitreTechnique = {
   covered: boolean;
   observed?: number;
   blocked?: number;
+  // The technique's rules blocked or escalated real traffic in the window (mitre.py: `blocked > 0`). The only
+  // per-technique basis for saying "proven"; `status: "enforced"` is rules present and says nothing about it.
+  proven?: boolean;
   // Per-rule blocked counts { rule_id: blocked } over the selected range. The evidence rows render
   // each covered rule's OWN count from this map; `blocked` above is the technique-wide total (sum over all
   // covered policies) kept for the headline, and must NOT be shown per-row (it over-attributes when a
@@ -833,6 +848,12 @@ export type MitreCoverage = {
   // Count of synthetic/simulated + red-team events excluded from observed/blocked so the
   // evidence pack counts real traffic only (product decision) and can state the exclusion.
   synthetic_excluded?: number;
+  // `enforced` is RULES PRESENT: the mapped rule is defined in the loaded rego. It says nothing about
+  // whether the rule acted. `proven` counts the enforced techniques whose rules blocked or escalated real
+  // traffic in this window; `degraded` means the audit join failed, so every count is 0 for no reason.
+  basis?: "rules_present";
+  proven?: number;
+  degraded?: boolean;
   last_exported?: string | null;
   techniques: MitreTechnique[];
 };
@@ -1015,6 +1036,69 @@ export async function fetchAgentTrustHistory(
   return apiGet<TrustHistoryPoint[]>(`/api/v1/agents/${encodeURIComponent(spiffeId)}/trust-history?${params.toString()}`);
 }
 
+/**
+ * The trust fields of one `/api/v1/agents` row, as `GET /api/v1/agents/{id}` also returns them.
+ *
+ * `frozen` and `trust_cap` are the admin controls the engine enforces, read live on every request. `score`
+ * and `category` agree with them: a frozen agent is `0` / `"frozen"`, a capped one is `min(score, cap)`,
+ * and an agent whose freeze was lifted, or whose score was held at a cap since removed or raised, is
+ * `null` / `"unscored"` until its next call is evaluated. `controls` is `"unavailable"` when the trust store
+ * could not be read: then `frozen`, `trust_cap` and `score` are `null` and the category is `"unknown"`
+ * (see lib/agentTrust.ts).
+ */
+export type AgentTrust = {
+  spiffe_id: string;
+  score: number | null;
+  category: string;
+  frozen?: boolean | null;
+  trust_cap?: number | null;
+  controls?: "live" | "unavailable";
+  violation_count?: number;
+  signals?: Record<string, number>;
+  dominant_signal?: string;
+  recommendation?: string;
+};
+
+/** What `PUT /api/v1/agents/{id}/trust` put in force. It answers with the control, never a score. */
+export type AgentControl = { spiffe_id: string; frozen: boolean; trust_cap: number | null };
+
+/** What `POST /api/v1/agents/{id}/trust/reset` removed. It leaves a freeze or a cap in place. */
+export type TrustHistoryReset = {
+  reset: boolean;
+  spiffe_id: string;
+  score_before: number | null;
+  violation_count: number;
+  history_entries_cleared: number;
+  history_blocks_cleared: number;
+  keys_cleared: string[];
+  frozen: boolean;
+  trust_cap: number | null;
+};
+
+export async function fetchAgent(spiffeId: string): Promise<AgentTrust> {
+  return apiGet<AgentTrust>(`/api/v1/agents/${encodeURIComponent(spiffeId)}`);
+}
+
+/** Freeze: every call the agent makes is blocked, and any cap is cleared. */
+export async function freezeAgent(spiffeId: string): Promise<AgentControl> {
+  return apiSend<AgentControl>(`/api/v1/agents/${encodeURIComponent(spiffeId)}/trust`, "PUT", { score: 0 });
+}
+
+/**
+ * Lift both the freeze and the cap: back to purely behavioural trust.
+ *
+ * Score 1.0 is the endpoint's "clear". Any score between 0 and 1 is a durable, tighten-only CAP, which is
+ * why the console's old Unfreeze and Reset Trust (both 0.8) left every agent they touched capped at 0.8.
+ */
+export async function liftAgentControls(spiffeId: string): Promise<AgentControl> {
+  return apiSend<AgentControl>(`/api/v1/agents/${encodeURIComponent(spiffeId)}/trust`, "PUT", { score: 1.0 });
+}
+
+/** Clear the agent's behavioural history and learned profile; trust is recomputed from its next call. */
+export async function resetAgentTrustHistory(spiffeId: string): Promise<TrustHistoryReset> {
+  return apiSend<TrustHistoryReset>(`/api/v1/agents/${encodeURIComponent(spiffeId)}/trust/reset`, "POST");
+}
+
 export async function fetchAgents(namespace?: string): Promise<Array<{ category?: string }>> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);
@@ -1071,9 +1155,14 @@ export type SearchAuditRecord = { tool_name?: string; decision?: string; timesta
 export type SearchAgent = {
   spiffe_id?: string;
   agent_class?: string;
-  score?: number;
-  trust_score?: number;
+  score?: number | null;
+  /** From /api/v1/search, as /api/v1/agents serves it: 0 while frozen, never above a cap, null when unknown
+   *  (a lifted freeze or cap with no call since, or a trust store that could not be read). */
+  trust_score?: number | null;
   category?: string;
+  frozen?: boolean | null;
+  trust_cap?: number | null;
+  controls?: "live" | "unavailable";
 };
 /** A ⌘K policy hit. `mode` is DELIBERATELY absent from /api/v1/search: `_search_policies` reads the
  *  loader's in-memory entry, which carries only {rego, priority} — the real enforcement_mode would need a
@@ -1110,6 +1199,15 @@ export type DryRunReplay = {
   newly_blocked?: number; // decision flips: currently-allowed calls this candidate would newly block
   newly_allowed?: number;
   newly_blocked_samples?: Array<{ tool_name?: string; was?: string; now?: string; rule_id?: string }>;
+  /** Replayed calls a builder allowlist refused only on the tool's argument grant (every refinement
+   *  met, every grant line an argument), from records kept without argument values. The replay cannot
+   *  judge them, so they are in no count above. Any other refusal is counted as it replays. `cannot_evaluate_samples` names at
+   *  most 8. */
+  cannot_evaluate?: number;
+  cannot_evaluate_samples?: Array<{ tool_name?: string; was?: string; now?: string; rule_id?: string }>;
+  /** Why a 0 above may not mean what it looks like. Empty when the run was sound. */
+  advisory?: string | null;
+  params_captured?: boolean;
   block_rate_pct?: number;
   truncated?: boolean;
   scope?: { namespace?: string; agent_class?: string | null };

@@ -110,10 +110,14 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(screen.getAllByText("customer-support").length).toBeGreaterThan(0);
     expect(screen.queryByText(/no class policies configured/i)).not.toBeInTheDocument();
 
-    // Fix 7: enforcing policies live under a distinct "Active policies" section with a right-aligned
+    // Fix 7: loaded policies live under a distinct "Active policies" section with a right-aligned
     // status chip (quiet border-only pill), separate from the dry-run drafts panel.
+    // This renders under "All namespaces". The chip used to read "Enforcing" there with no posture read
+    // at all, while any one namespace in the list could be in Monitor. Each card now carries its own
+    // namespace's posture, so the section chip makes no single claim.
     expect(screen.getByText(/active policies/i)).toBeInTheDocument();
-    expect(screen.getByTestId("active-policies-mode")).toHaveTextContent(/Enforcing/i);
+    expect(screen.getByTestId("active-policies-mode")).toHaveTextContent("Loaded · posture per namespace");
+    expect(screen.getByTestId("active-policies-mode")).not.toHaveTextContent(/Enforcing/i);
   });
 
   // Phase 2f consolidation: the top create menu is exactly two entry points — the form-based Visual
@@ -523,9 +527,10 @@ describe("PolicyCatalog (#3 / #4)", () => {
     // The compliance draft renders under the "From Compliance gaps" group.
     const group = await screen.findByTestId("draft-group-compliance");
     expect(within(group).getByTestId("intent-draft-d-comp")).toBeInTheDocument();
-    // It is SUPERSEDED (an enforcing policy already exists) with the target-linkage version.
+    // It is SUPERSEDED (a live policy already exists) with the target-linkage version. The line used to
+    // say "v8 enforcing", which is false in a Monitor namespace; that v8 is loaded is true in both.
     expect(screen.getByTestId("intent-draft-status-d-comp")).toHaveTextContent(/superseded/i);
-    expect(screen.getByTestId("intent-draft-target-d-comp")).toHaveTextContent("currently v8 enforcing");
+    expect(screen.getByTestId("intent-draft-target-d-comp")).toHaveTextContent("currently v8 loaded");
     // The wave4e2e test draft is HIDDEN by default; a toggle reveals it.
     expect(screen.queryByTestId("intent-draft-d-test")).not.toBeInTheDocument();
     const toggle = screen.getByTestId("draft-toggle-test");
@@ -578,7 +583,11 @@ describe("PolicyCatalog — create (raw rego) / delete (guardrails)", () => {
   it("editor Delete confirms ns+class+version + enforcing warning, then DELETEs that scope", async () => {
     seedHandlers("class");
     let deletePath = "";
+    // "currently enforcing" is now read from the target namespace's posture, so the fixture supplies one.
     server.use(
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({ namespace: "default", enforcement_mode: "block", enforcement_mode_source: "namespace", trust_threshold: 0.7, rate_limit: 60 })
+      ),
       http.delete("/api/v1/policies/:ns/:cls", ({ params }) => {
         deletePath = `${params.ns}/${params.cls}`;
         return HttpResponse.json({ deleted: true });

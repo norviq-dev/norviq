@@ -241,6 +241,17 @@ export interface BuilderDefaults {
 }
 
 /**
+ * The default a tighten-only ("rules" mode) policy carries: a call no rule matches keeps the outcome
+ * the other layers give it. The engine collects a rules-mode module with this default as an overlay
+ * (norviq/engine/composition.py), so its `allow` changes nothing any other layer decides — the floors,
+ * and a namespace- or workload-tier policy at a lower priority alike. This is the one default that adds
+ * blocks and nothing else. A `block` default instead denies every unmatched call, which is
+ * deny-by-default under the tighten-only label, and the engine resolves it by priority.
+ * Allowlist mode never reads `defaults`; it compiles its own deny triple.
+ */
+export const TIGHTEN_ONLY_DEFAULTS: BuilderDefaults = { decision: "allow", reason: "No builder rule matched" };
+
+/**
  * Phase 2c: a graph's MODE. "rules" (the default) is the existing tighten-only OR-of-AND rule rail,
  * unchanged. "allowlist" is a whole different POLICY SHAPE — default-deny, allow only the listed tools
  * — which cannot compose with `rules[]` in one class policy (see builderCompile.ts's `buildFullRego`

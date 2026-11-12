@@ -28,19 +28,22 @@ opa test --v0-compatible policies/
 
 ## comprehensive.rego — what it enforces (canonical horizontal rule_ids)
 
-| rule_id | Detects | OWASP / MITRE |
+The last column is what `mitre_mapping.json` and `owasp_llm_mapping.json` list each rule under. Those two
+files are the mapping; Compliance and Red Team both read them, and a test keeps this column in step.
+
+| rule_id | Detects | OWASP LLM 2025 / MITRE ATLAS |
 |---|---|---|
-| `llm01_prompt_injection` | "ignore previous instructions", jailbreak patterns (+ homoglyph/zero-width skeleton) | LLM01 · AML.T0048 |
-| `deny_sql_injection` | SQL-injection shapes in tool params | Tool safety |
-| `deny_shell_execution` | shell/command execution | AML.T0054 |
-| `llm06_excessive_agency` | destructive / high-impact / wildcard tool use | LLM06 · AML.T0051 |
-| `llm02_data_leakage` | sensitive data to external tools | LLM02 · AML.T0057 |
-| `llm05_supply_chain` | untrusted code / risky URLs | LLM05 · AML.T0053 |
-| `pii_detection` | SSN / PII shapes in params | Data protection |
-| `pci_card_numbers` | PAN by field name or Luhn-valid value | Data protection (PCI) |
-| `cross_tenant_access` | cross-namespace / cross-tenant access | AML.T0049 |
-| `base64_decoded_threat` | base64-encoded evasion (block on decoded SQL/shell/PII threat) | Evasion |
-| `scope_violation_dangerous_tool` | out-of-scope dangerous tool | Least privilege |
+| `llm01_prompt_injection` | "ignore previous instructions", jailbreak patterns (+ homoglyph/zero-width skeleton) | LLM01:2025 · AML.T0051, AML.T0054 |
+| `deny_sql_injection` | SQL-injection shapes in tool params | LLM05:2025 · AML.T0049 |
+| `deny_shell_execution` | shell/command execution | LLM06:2025 · AML.T0054, AML.T0050 |
+| `llm06_excessive_agency` | destructive / high-impact / wildcard tool use | LLM06:2025 · AML.T0053 |
+| `llm02_data_leakage` | sensitive data to external tools | LLM02:2025 · AML.T0057, AML.T0055 |
+| `llm05_supply_chain` | untrusted code / risky URLs (the name is from the 2023 list; 2025's Supply Chain control is out of scope) | AML.T0053 |
+| `pii_detection` | SSN / PII shapes in params | LLM02:2025 · AML.T0057 |
+| `pci_card_numbers` | PAN by field name or Luhn-valid value | LLM02:2025 · AML.T0057 |
+| `cross_tenant_access` | cross-namespace / cross-tenant access | AML.T0012 |
+| `base64_decoded_threat` | base64-encoded evasion (block on decoded SQL/shell/PII threat) | LLM02:2025, LLM05:2025 · AML.T0057 |
+| `scope_violation_dangerous_tool` | out-of-scope dangerous tool | not mapped |
 
 ## Sector packs (F047)
 

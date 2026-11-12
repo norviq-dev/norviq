@@ -98,7 +98,8 @@ async def assert_apply_allowed(session: AsyncSession, namespace: str) -> None:
         raise HTTPException(
             status_code=409,
             detail=f"namespace '{namespace}' is in dry-run-only mode — policy applies are disabled "
-                   "(dry-run and draft saves are still allowed). An admin can re-enable enforcement in Settings.",
+                   "(dry-run and draft saves are still allowed). An admin can re-enable applies by setting "
+                   "change control to Live in Target Settings.",
         )
 
 
@@ -107,6 +108,11 @@ def _effective(row: NamespaceSettings | None) -> dict:
     return {
         "apply_mode": (getattr(row, "apply_mode", None) if row and getattr(row, "apply_mode", None) else "enforce"),
         "enforcement_mode": (row.enforcement_mode if row and row.enforcement_mode else app_settings.enforcement_mode),
+        # Where `enforcement_mode` came from. The engine relaxes policy blocks to would-block ONLY on the
+        # namespace's own override (evaluator `_resolve_posture`); the cluster-wide value reaches just the
+        # no-policy default. So "audit" inherited from the cluster does not mean this namespace's policy
+        # blocks are relaxed, and a console that labels a namespace Monitor has to know which it is.
+        "enforcement_mode_source": ("namespace" if row and row.enforcement_mode else "cluster_default"),
         "trust_threshold": (
             row.trust_threshold if row and row.trust_threshold is not None else app_settings.trust_threshold
         ),

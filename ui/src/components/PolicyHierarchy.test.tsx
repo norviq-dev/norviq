@@ -30,12 +30,24 @@ const LAYERS = [
   { scope: "__cluster__:__baseline__", label: "cluster baseline (comprehensive)", priority: 100, overlay: false }
 ];
 
-function handlers(layers: unknown[] = LAYERS, enforcementMode: "block" | "audit" = "block") {
+// GET /settings as the API returns it: `namespace` and `enforcement_mode_source` are always present
+// (settings_router `{"namespace": namespace, **_effective(row)}`). The mocks used to omit both, which only
+// worked while this component read the merged `enforcement_mode` on its own; lib/posture rejects a read that
+// does not say which namespace it answers for.
+function settingsBody(enforcementMode: "block" | "audit", source: "namespace" | "cluster_default" = "namespace") {
+  return { namespace: "default", enforcement_mode: enforcementMode, enforcement_mode_source: source, apply_mode: "enforce" };
+}
+
+function handlers(
+  layers: unknown[] = LAYERS,
+  enforcementMode: "block" | "audit" = "block",
+  source: "namespace" | "cluster_default" = "namespace"
+) {
   server.use(
     http.get("/api/v1/policies", () => HttpResponse.json([{ agent_class: "customer-support", target_type: "class" }])),
     http.get("/api/v1/policies/effective", () => HttpResponse.json({ namespace: "default", agent_class: "customer-support", layers, note: "overlay layers are tighten-only" })),
     // CATHIER-MODE-01: the Mode column now reflects the effective per-ns posture from GET /settings.
-    http.get("/api/v1/settings", () => HttpResponse.json({ enforcement_mode: enforcementMode, apply_mode: "enforce" }))
+    http.get("/api/v1/settings", () => HttpResponse.json(settingsBody(enforcementMode, source)))
   );
 }
 
@@ -147,7 +159,7 @@ describe("PolicyHierarchy", () => {
       http.get("/api/v1/policies", () => HttpResponse.json([{ agent_class: "customer-support", target_type: "class" }])),
       http.get("/api/v1/policies/effective", () =>
         HttpResponse.json({ namespace: "default", agent_class: "customer-support", layers: STACK, superseded: SUPERSEDED, note: "" })),
-      http.get("/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "block", apply_mode: "enforce" }))
+      http.get("/api/v1/settings", () => HttpResponse.json(settingsBody("block")))
     );
     render(<PolicyHierarchy namespace="default" />);
     await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(STACK.length));
@@ -172,7 +184,7 @@ describe("PolicyHierarchy", () => {
           layers: [{ scope: "default:customer-support", label: "agent-class policy", priority: 100, overlay: false }],
           superseded: [{ scope: "default:__baseline__", label: "namespace baseline", priority: 1, superseded_by: "default:__controls__" }],
           note: "" })),
-      http.get("/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "block", apply_mode: "enforce" }))
+      http.get("/api/v1/settings", () => HttpResponse.json(settingsBody("block")))
     );
     render(<PolicyHierarchy namespace="default" />);
     await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(1));
@@ -217,7 +229,7 @@ describe("PolicyHierarchy", () => {
       // the ns-wide overlays resolve for ANY class (packs apply namespace-wide) — the fix queries with "*"
       http.get("/api/v1/policies/effective", () =>
         HttpResponse.json({ namespace: "durab-ns", agent_class: "*", layers: packLayers, note: "overlay layers are tighten-only" })),
-      http.get("/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "block", apply_mode: "enforce" }))
+      http.get("/api/v1/settings", () => HttpResponse.json(settingsBody("block")))
     );
     render(<PolicyHierarchy namespace="durab-ns" />);
     // the picker offers the namespace-wide view (NOT a dead-end empty "(no agent-class policies)")
@@ -260,5 +272,26 @@ describe("PolicyHierarchy — the Mode column must not claim Block it never read
     render(<PolicyHierarchy namespace="default" />);
     await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(LAYERS.length));
     screen.getAllByTestId("policy-hierarchy-mode").forEach((m) => expect(m).toHaveTextContent("Monitor"));
+  });
+});
+
+// /settings merges the cluster-wide default into `enforcement_mode`, but the engine relaxes policy blocks only
+// on the namespace's OWN Monitor (`_resolve_posture`). This column read the merged value directly, so a
+// namespace that merely inherits a cluster-wide audit read "Monitor" here while the Catalog, Compliance and the
+// Builder (all through lib/posture) said it enforces.
+describe("PolicyHierarchy — the Mode column agrees with lib/posture", () => {
+  it("an audit INHERITED from the cluster default is Block, not Monitor", async () => {
+    handlers(LAYERS, "audit", "cluster_default");
+    render(<PolicyHierarchy namespace="default" />);
+    await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(LAYERS.length));
+    await waitFor(() => screen.getAllByTestId("policy-hierarchy-mode").forEach((m) => expect(m).toHaveTextContent("Block")));
+    screen.getAllByTestId("policy-hierarchy-mode").forEach((m) => expect(m).not.toHaveTextContent("Monitor"));
+  });
+
+  it("the namespace's own audit is Monitor", async () => {
+    handlers(LAYERS, "audit", "namespace");
+    render(<PolicyHierarchy namespace="default" />);
+    await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(LAYERS.length));
+    await waitFor(() => screen.getAllByTestId("policy-hierarchy-mode").forEach((m) => expect(m).toHaveTextContent("Monitor")));
   });
 });

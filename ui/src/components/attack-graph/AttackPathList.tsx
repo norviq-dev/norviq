@@ -2,7 +2,7 @@
 // Copyright 2026 Norviq Contributors
 //
 // Attack Graph ranked path list: the PRIMARY nav. Rows come pre-sorted
-// worst-first from the server (exploitable → unsimulated → blocked, severity tiebreak) — we keep that
+// worst-first from the server (exploitable → would-block → unsimulated → blocked, severity tiebreak) — we keep that
 // order stable. Each row: severity chip + src→tgt + status chip + hops/blast/MITRE. Clicking a row
 // selects the path (drives the canvas + inspector).
 

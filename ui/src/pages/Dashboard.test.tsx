@@ -826,3 +826,122 @@ describe("Overview block feeds are Monitor-aware", () => {
     expect(screen.queryByTestId("top-blocked-posture-unknown")).toBeNull();
   });
 });
+
+// The window is history; the posture is now. The tiles chose ONE population by the namespace's current
+// posture, so after a Block <-> Monitor flip the window's other population vanished from the headline:
+// Block -> Monitor hid real blocks behind "Would-block 0", Monitor -> Block hid the would-blocks.
+describe("Overview block tiles keep both populations of the window", () => {
+  function scenario(mode: "block" | "audit", stats: Record<string, number>) {
+    server.use(
+      http.get("*/api/v1/settings", ({ request }) =>
+        HttpResponse.json({ namespace: new URL(request.url).searchParams.get("namespace") ?? "default", enforcement_mode: mode, enforcement_mode_source: "namespace", apply_mode: "enforce" })
+      ),
+      healthyCoverage({ namespace_mode: mode }),
+      http.get("*/api/v1/audit/stats", () => HttpResponse.json(stats)),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+  }
+
+  it("flipped Block -> Monitor: the 19 real blocks stay on the tile", async () => {
+    scenario("audit", { total: 31, blocked: 19, allowed: 12, block_rate_pct: 61.3, would_blocked: 0, would_block_rate_pct: 0 });
+    renderAt("/?ns=payments");
+    const kpi = await screen.findByTestId("kpi-blocked");
+    await waitFor(() => expect(kpi).toHaveTextContent(/Would-block \(24h\)/));
+    await waitFor(() => expect(kpi).toHaveTextContent("also 19 enforced blocks in this window"));
+    expect(screen.getByTestId("kpi-blockrate")).toHaveTextContent("also 61% enforced blocks");
+  });
+
+  it("flipped Monitor -> Block: the 8 would-blocks stay on the tile", async () => {
+    scenario("block", { total: 30, blocked: 0, allowed: 30, block_rate_pct: 0, would_blocked: 8, would_block_rate_pct: 26.7 });
+    renderAt("/?ns=analytics");
+    const kpi = await screen.findByTestId("kpi-blocked");
+    await waitFor(() => expect(kpi).toHaveTextContent(/^Blocked \(24h\)/));
+    await waitFor(() => expect(kpi).toHaveTextContent("also 8 would-blocks (logged, not blocked) in this window"));
+    expect(screen.getByTestId("kpi-blockrate")).toHaveTextContent("also 27% would-block (logged, not blocked)");
+  });
+
+  it("CONTROL: one population only adds no second line", async () => {
+    scenario("block", { total: 30, blocked: 5, allowed: 25, block_rate_pct: 16.7, would_blocked: 0, would_block_rate_pct: 0 });
+    renderAt("/?ns=payments");
+    const kpi = await screen.findByTestId("kpi-blocked");
+    await waitFor(() => expect(screen.getByTestId("kpi-blocked-value")).toHaveAttribute("data-value", "5"));
+    expect(kpi).not.toHaveTextContent(/also/);
+    expect(screen.getByTestId("kpi-blockrate")).not.toHaveTextContent(/also/);
+  });
+});
+
+// The trust donut used to count only the four bands. An agent whose freeze the API could not read (trust store
+// down: `controls: "unavailable"`, category "unknown") and one whose score is not known since a lifted control
+// ("unscored") fell out of it silently, so the chart's total did not match the agents behind it and an
+// unreadable freeze was simply absent. They are their own slices now, the same ones the Agent Monitor draws.
+describe("Overview trust donut", () => {
+  it("shows agents whose freeze could not be read, and unscored ones, instead of dropping them", async () => {
+    server.use(
+      ...healthyRestOfPage().slice(0, 4),
+      healthyCoverage(),
+      http.get("*/api/v1/agents", () =>
+        HttpResponse.json([
+          { spiffe_id: "spiffe://n/ns/default/sa/a", category: "high", controls: "live", frozen: false },
+          { spiffe_id: "spiffe://n/ns/default/sa/b", category: "unknown", controls: "unavailable", frozen: null },
+          { spiffe_id: "spiffe://n/ns/default/sa/c", category: "unknown", controls: "unavailable", frozen: null },
+          { spiffe_id: "spiffe://n/ns/default/sa/d", category: "unscored", controls: "live", frozen: false }
+        ])
+      )
+    );
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <Dashboard />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    const legend = await screen.findByRole("list", { name: /Trust Distribution legend/ });
+    const count = (name: RegExp) => within(legend).getByText(name).parentElement?.textContent;
+    await waitFor(() => expect(count(/^freeze unknown$/i)).toMatch(/2$/));
+    expect(count(/^unscored$/i)).toMatch(/1$/);
+    expect(count(/^high$/i)).toMatch(/1$/);
+    expect(count(/^frozen$/i)).toMatch(/0$/);
+  });
+});
+
+// When coverage cannot be read, the tile label falls back to the settings posture. It read `posture.mode`
+// directly, so a namespace that only INHERITS a cluster-wide audit was labelled "Would-block" over its real
+// enforced blocks. The fallback now goes through lib/posture, which knows that inheritance does not soften.
+describe("Overview tile label: the settings fallback agrees with lib/posture", () => {
+  // Signed in, so AppContext reads the scope's posture (it skips the read without a token).
+  beforeEach(() => sessionStorage.setItem("nrvq_token", "test-token"));
+  afterEach(() => sessionStorage.removeItem("nrvq_token"));
+  function scenario(source: "namespace" | "cluster_default") {
+    server.use(
+      http.get("*/api/v1/settings", ({ request }) =>
+        HttpResponse.json({
+          namespace: new URL(request.url).searchParams.get("namespace") ?? "default",
+          enforcement_mode: "audit",
+          enforcement_mode_source: source,
+          apply_mode: "enforce"
+        })
+      ),
+      http.get("*/api/v1/coverage-by-category", () => new HttpResponse("boom", { status: 500 })),
+      http.get("*/api/v1/audit/stats", () =>
+        HttpResponse.json({ total: 30, blocked: 7, allowed: 23, block_rate_pct: 23.3, would_blocked: 0, would_block_rate_pct: 0 })
+      ),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+  }
+
+  it("an inherited audit keeps the Blocked label while coverage is unreadable", async () => {
+    scenario("cluster_default");
+    renderAt("/?ns=payments");
+    const kpi = await screen.findByTestId("kpi-blocked");
+    await waitFor(() => expect(screen.getByTestId("kpi-blocked-value")).toHaveAttribute("data-value", "7"));
+    expect(kpi).toHaveTextContent(/^Blocked \(24h\)/);
+    expect(kpi).not.toHaveTextContent(/Would-block/);
+  });
+
+  it("CONTROL: the namespace's own audit is labelled Would-block", async () => {
+    scenario("namespace");
+    renderAt("/?ns=payments");
+    const kpi = await screen.findByTestId("kpi-blocked");
+    await waitFor(() => expect(kpi).toHaveTextContent(/Would-block \(24h\)/));
+  });
+});

@@ -165,10 +165,12 @@ def test_redteam_catalog() -> None:
     rows = response.json()
     assert isinstance(rows, list) and len(rows) == len(ATTACKS)
     by_id = {r["attack_id"]: r for r in rows}
-    # every row carries an ATLAS technique; an OWASP attack also carries its control
-    assert all(r["atlas_technique"].startswith("AML.T") for r in rows)
+    # Each row carries the techniques and controls the Compliance mapping lists its rule under.
+    assert all(r["atlas_technique"] is None or r["atlas_technique"].startswith("AML.T") for r in rows)
     assert by_id["PI-001"]["owasp_control"] == "LLM01:2025" and by_id["PI-001"]["owasp_control_name"]
-    assert by_id["SQL-001"]["owasp_control"] is None  # SQL injection has no OWASP LLM control
+    # Compliance maps deny_sql_injection to LLM05:2025 Improper Output Handling. The old assertion
+    # that SQL injection has no OWASP control encoded the category-name derivation, not the mapping.
+    assert by_id["SQL-001"]["owasp_control"] == "LLM05:2025"
 
 
 def test_redteam_suite_includes_efficacy_rollup() -> None:

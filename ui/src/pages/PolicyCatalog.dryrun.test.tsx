@@ -105,4 +105,30 @@ describe("PolicyCatalog dry-run failure", () => {
     expect(screen.getByText(/No decision flips — safe to apply\./i)).toBeInTheDocument();
     expect(screen.queryByTestId("dryrun-error")).not.toBeInTheDocument();
   });
+
+  it("shows the server's advisory and the calls it could not evaluate, which it used to drop", async () => {
+    seedLoadedPolicy();
+    const advisory = "Replayed records carry empty tool_params because audit_capture_masked_params is off (the default).";
+    server.use(
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({
+          valid: true,
+          total_records_checked: 30,
+          would_block: 0,
+          would_allow: 24,
+          newly_blocked: 0,
+          newly_allowed: 0,
+          cannot_evaluate: 6,
+          block_rate_pct: 0,
+          advisory,
+          recommendation: "No call the replay could evaluate would be newly blocked."
+        })
+      )
+    );
+
+    await loadEditorAndDryRun();
+
+    expect(await screen.findByTestId("dryrun-advisory")).toHaveTextContent(advisory);
+    expect(screen.getByText(/cannot evaluate 6 \(no argument values\)/)).toBeInTheDocument();
+  });
 });

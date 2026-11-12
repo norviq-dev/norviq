@@ -30,10 +30,12 @@ const chipStyle: React.CSSProperties = {
 };
 const sectionLabel: React.CSSProperties = { fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", color: "#a0a0a0", textTransform: "uppercase" };
 
-// Per-verb status presentation. Open statuses (undefended/dormant) are the finding; defended is
-// reassurance; latent is muted (the source could do it but nothing grants/observes it).
+// Per-verb status presentation. Open statuses (undefended/monitored/dormant) are the finding; defended
+// is reassurance; latent is muted (the source could do it but nothing grants/observes it). "monitored"
+// is amber like a would-block everywhere else: a rule matched, but the calls ran.
 const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
   undefended: { label: "UNDEFENDED", color: "#FF3B5C", bg: "rgba(255,59,92,0.12)" },
+  monitored: { label: "MONITOR ONLY", color: "#f5b544", bg: "rgba(245,181,68,0.12)" },
   dormant_grant: { label: "DORMANT GRANT", color: "#FFB020", bg: "rgba(255,176,32,0.12)" },
   defended: { label: "DEFENDED", color: "#00e5a0", bg: "rgba(0,229,160,0.10)" },
   latent: { label: "LATENT", color: "#8a93a6", bg: "rgba(138,147,166,0.10)" },
@@ -126,11 +128,14 @@ export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: 
     .filter((e): e is ViewEdge => e.type !== "belongs_to" && (e.s === node.id || e.t === node.id))
     .map((e) => {
       const other = byId.get(e.s === node.id ? e.t : e.s);
+      // A would-block ran (Monitor softens it to `audit`), so it is shown as its own count, never
+      // folded into `block`. Leaving it out printed "MIXED · 9 allow · 0 block" for an edge whose
+      // only non-allow decisions were would-blocks — a mix the counts beside it did not show.
       return {
         name: other?.name ?? "",
-        verdict: e.verdict,
-        dot: e.verdict === "blocked" ? DECISION_COLORS.blocked : "#a0a0a0",
-        detail: `${e.allow} allow · ${e.block} block`
+        verdict: e.verdict === "would_block" ? "would block" : e.verdict,
+        dot: e.verdict === "blocked" ? DECISION_COLORS.blocked : e.verdict === "would_block" ? DECISION_COLORS.mixed : "#a0a0a0",
+        detail: `${e.allow} allow · ${e.block} block` + (e.wouldBlock > 0 ? ` · ${e.wouldBlock} would-block (ran)` : "")
       };
     });
 
@@ -209,8 +214,10 @@ export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: 
                   </div>
                 </div>
                 {/* One-click defense — generates a dry-run policy draft for the class exercising
-                    the verb, landing in the Policies inbox (never auto-enforces). */}
-                {cap?.source_type && defendClass(worst) && (
+                    the verb, landing in the Policies inbox (never auto-enforces). Not offered for a
+                    monitored verb: those calls were already matched, and what is missing is
+                    enforcement, which a second rule in the same Monitor scope would not add. */}
+                {cap?.source_type && defendClass(worst) && worst.status !== "monitored" && (
                   <button
                     type="button"
                     data-testid="cap-defend"

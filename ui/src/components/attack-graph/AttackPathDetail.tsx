@@ -105,6 +105,7 @@ export function AttackPathDetail({
   const verdictStyle =
     whatIfIndex >= 0 ? { bg: "rgba(58,42,10,0.6)", color: "var(--escalate)", icon: "◑" }
     : status === "blocked" ? { bg: "rgba(13,42,28,0.6)", color: "#6ee7b7", icon: "✓" }
+    : status === "would_block" ? { bg: "rgba(58,42,10,0.6)", color: "#f5b544", icon: "⚠" }
     : status === "exploitable" ? { bg: "rgba(42,15,22,0.6)", color: "#ff8fa3", icon: "⚠" }
     : { bg: "rgba(38,38,38,0.6)", color: "#9aa4b2", icon: "○" };  /* navy→neutral grey */
   const verdict = whatIfIndex >= 0
@@ -285,6 +286,10 @@ export function AttackPathDetail({
                 ? "Monitor · " + (st.would_block ?? 0) + " would-block (logged, not enforced)" + (st.allow > 0 ? " · " + st.allow + " allowed" : "")
               : st.dec === "mixed" ? "Partial · " + st.deny + " denied / " + st.allow + " allowed"
               : "Allowed · " + st.allow + " calls";
+            // A tool→data hop has no audit rows of its own; its counts are the calls into the tool. The
+            // same counts sit on every data node that tool reaches, so they say nothing about THIS table.
+            // " via execute_sql" left that to be guessed, and read as per-table evidence.
+            const viaNote = st.via ? " — calls into " + st.via + ", counted per tool, not per table" : "";
             const togActive = whatIfIndex === i;
             return (
               <div key={i} style={{ display: "flex", gap: 11, alignItems: "flex-start" }}>
@@ -325,7 +330,10 @@ export function AttackPathDetail({
                       </span>
                     ) : null}
                   </div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: dot, marginTop: 4, lineHeight: 1.3 }}>{decision}</div>
+                  <div
+                    style={{ fontSize: 11, fontWeight: 600, color: dot, marginTop: 4, lineHeight: 1.3 }}
+                    title={st.via ? `Audit rows name the tool, never the data node. These are the calls into ${st.via} on this chain, and they appear on every data node ${st.via} reaches.` : undefined}
+                  >{decision}{viaNote}</div>
                   {st.dec !== "block" && (
                     <button
                       type="button" onClick={() => onToggleWhatIf(i)}

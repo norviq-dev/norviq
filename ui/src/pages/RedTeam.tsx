@@ -17,6 +17,7 @@ import {
   type RedteamLatest,
   type RedteamOutcome,
   type RedteamResult,
+  type RedteamRunResult,
   type RedteamRunSummary
 } from "../api/client";
 import { DecisionBadge, type Decision } from "../components/common/DecisionBadge";
@@ -164,6 +165,9 @@ const RedTeam = () => {
   // Scope the table to the SELECTED RUN's results (from results/latest), then filter + paginate so the
   // number of MOUNTED rows stays bounded (≤ PAGE_SIZE) no matter how large the run is.
   const allRows = latest?.results ?? [];
+  // Scored rows (the ones the breakdowns count) whose rule no OWASP control lists. Zero when the run's
+  // rows were pruned: then there is nothing to count, and nothing is claimed.
+  const owaspUnmapped = allRows.filter((r) => SCORED.has(outcomeOf(r)) && owaspOf(r).length === 0).length;
   const rows = useMemo(() => (failedOnly ? allRows.filter(gotThrough) : allRows), [allRows, failedOnly]);
   const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
@@ -335,12 +339,18 @@ const RedTeam = () => {
             testid, because `redteam-breakdown-row` alone cannot say WHICH taxonomy a row came from —
             already ambiguous with two, worse with three.
           */}
-          <Panel title="Framework breakdown" sub="Caught vs got-through per ATLAS technique, OWASP LLM control and MCP/tool vector" data-testid="redteam-by-technique" style={{ marginBottom: 16 }}>
+          <Panel title="Framework breakdown" sub="Caught vs got-through per ATLAS technique, OWASP LLM control and MCP/tool vector. An attack counts under every technique and control Compliance maps its rule to." data-testid="redteam-by-technique" style={{ marginBottom: 16 }}>
             <BreakdownTable rowTestId="redteam-breakdown-atlas" rows={(eff.by_technique ?? []).map((t) => ({ id: t.technique_id, name: t.technique_name, ...t }))} />
-            {(eff.by_owasp ?? []).length > 0 && (
+            {((eff.by_owasp ?? []).length > 0 || owaspUnmapped > 0) && (
               <div style={{ marginTop: 18 }}>
                 <div className="section-label" style={{ marginBottom: 8 }}>By OWASP LLM control</div>
                 <BreakdownTable rowTestId="redteam-breakdown-owasp" rows={(eff.by_owasp ?? []).map((o) => ({ id: o.control_id, name: o.control_name, ...o }))} />
+                {/* The ATLAS table has an "unmapped" row; this one leaves such attacks out, so it says so. */}
+                {owaspUnmapped > 0 && (
+                  <div className="panel-sub" data-testid="redteam-owasp-unmapped" style={{ marginTop: 6, fontSize: 12 }}>
+                    {owaspUnmapped} scored {owaspUnmapped === 1 ? "attack is" : "attacks are"} not mapped to an OWASP control and not counted in this table.
+                  </div>
+                )}
               </div>
             )}
             {(eff.by_vector ?? []).length > 0 && (
@@ -395,18 +405,19 @@ const RedTeam = () => {
                         {/* Real mapped chips (from the same mapping), one per framework, N-scalable. */}
                         <td style={tdStyle} data-testid="redteam-frameworks">
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                            {r.atlas_technique && (
-                              <span className="mono" data-testid="fw-chip-atlas" title={r.atlas_technique_name}
+                            {/* One chip per technique and control the attack's rule is mapped to. */}
+                            {atlasOf(r).map((t) => (
+                              <span key={`atlas-${t.id}`} className="mono" data-testid="fw-chip-atlas" title={t.name}
                                 style={{ fontSize: 11, padding: "1px 6px", borderRadius: 5, border: "1px solid var(--border)", color: "var(--text-secondary)" }}>
-                                {r.atlas_technique}
+                                {t.id}
                               </span>
-                            )}
-                            {r.owasp_control && (
-                              <span className="mono" data-testid="fw-chip-owasp"
+                            ))}
+                            {owaspOf(r).map((c) => (
+                              <span key={`owasp-${c.id}`} className="mono" data-testid="fw-chip-owasp" title={c.name}
                                 style={{ fontSize: 11, padding: "1px 6px", borderRadius: 5, border: "1px solid var(--border)", color: "var(--text-secondary)" }}>
-                                {r.owasp_control}
+                                {c.id}
                               </span>
-                            )}
+                            ))}
                             {/*
                               A chip, not a column: `graph-redteam-ux.spec.ts` asserts there is exactly
                               one "Frameworks" columnheader and that "ATLAS"/"OWASP" headers do not
@@ -420,7 +431,18 @@ const RedTeam = () => {
                                 {r.mcp_vector}
                               </span>
                             )}
-                            {!r.atlas_technique && !r.owasp_control && !r.mcp_vector && <span className="mono panel-sub">—</span>}
+                            {/*
+                              Said, not left blank. The supply-chain attacks (SC-001/002) map to no
+                              OWASP control: their rule, llm05_supply_chain, is listed under no 2025
+                              control because LLM03:2025 Supply Chain is out of scope in the shared
+                              mapping. A blank cell read as a rendering gap, not as a mapping fact.
+                            */}
+                            {atlasOf(r).length === 0 && (
+                              <span className="panel-sub" data-testid="fw-none-atlas" style={{ fontSize: 11 }}>not mapped to an ATLAS technique</span>
+                            )}
+                            {owaspOf(r).length === 0 && (
+                              <span className="panel-sub" data-testid="fw-none-owasp" style={{ fontSize: 11 }}>not mapped to an OWASP control</span>
+                            )}
                           </div>
                         </td>
                         <td style={tdStyle} className="mono">{r.expected}</td>
@@ -515,6 +537,9 @@ function outcomeOf(r: Pick<RedteamResult, "outcome" | "passed" | "applicable">):
   return r.applicable === false ? "not_enabled" : "got_through";
 }
 
+// The outcomes `compute_efficacy` counts (norviq/api/redteam_efficacy.py SCORED_OUTCOMES).
+const SCORED: ReadonlySet<RedteamOutcome> = new Set<RedteamOutcome>(["caught", "would_block", "got_through"]);
+
 function gotThrough(r: Pick<RedteamResult, "outcome" | "passed" | "applicable">): boolean {
   return outcomeOf(r) === "got_through";
 }
@@ -578,6 +603,24 @@ function Stat({ label, value, color, icon: Icon, testid }: { label: string; valu
   );
 }
 
+// The ATLAS bucket the API files a scored attack under when no technique lists its rule
+// (norviq/api/redteam_efficacy.py UNMAPPED_TECHNIQUE).
+const UNMAPPED_TECHNIQUE = "unmapped";
+
+type Chip = { id: string; name: string };
+
+// The techniques / controls a result row is credited to. Rows served by an API older than the shared
+// mapping carry only the single fields, so those are the fallback.
+function atlasOf(r: RedteamRunResult): Chip[] {
+  if (r.atlas_techniques) return r.atlas_techniques.map((t) => ({ id: t.technique_id, name: t.technique_name }));
+  return r.atlas_technique ? [{ id: r.atlas_technique, name: r.atlas_technique_name ?? r.atlas_technique }] : [];
+}
+
+function owaspOf(r: RedteamRunResult): Chip[] {
+  if (r.owasp_controls) return r.owasp_controls.map((c) => ({ id: c.control_id, name: c.control_name }));
+  return r.owasp_control ? [{ id: r.owasp_control, name: r.owasp_control_name ?? r.owasp_control }] : [];
+}
+
 function BreakdownTable({ rows, rowTestId }: { rows: Array<{ id: string; name: string; total: number; caught: number; would_block?: number; got_through: number; proven_blocking_pct: number }>; rowTestId?: string }) {
   if (rows.length === 0) return <div className="panel-sub">No block-expected attacks in this run.</div>;
   return (
@@ -605,7 +648,12 @@ function BreakdownTable({ rows, rowTestId }: { rows: Array<{ id: string; name: s
               apart. */}
           {rows.map((r) => (
             <tr key={r.id} data-testid="redteam-breakdown-row" data-taxonomy={rowTestId}>
-              <td style={tdStyle}><span className="mono">{r.id}</span> · {r.name}</td>
+              <td style={tdStyle}>
+                {/* The unmapped bucket is a condition, not a technique: it gets no id column of its own. */}
+                {r.id === UNMAPPED_TECHNIQUE
+                  ? <span className="panel-sub">{r.name}</span>
+                  : <><span className="mono">{r.id}</span> · {r.name}</>}
+              </td>
               <td style={tdStyle}>{r.caught}</td>
               <td style={{ ...tdStyle, color: (r.would_block ?? 0) > 0 ? WARN : undefined }}>{r.would_block ?? 0}</td>
               <td style={{ ...tdStyle, color: r.got_through > 0 ? DANGER : undefined }}>{r.got_through}</td>

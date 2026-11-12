@@ -12,8 +12,6 @@ import hashlib
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
-from pathlib import Path
 from typing import AsyncIterator, Literal
 
 import structlog
@@ -26,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, require_admin, require_target_cluster
 from norviq.api.db.models import AuditLogEntry, IntentDraft, MitreCoverageSnapshot
 from norviq.api.db.session import get_session
+from norviq.api.framework_mapping import FRAMEWORK_FILES, load_mapping
 from norviq.api.retention import draft_expiry, enforce_draft_cap
 from norviq.api.synthetic import is_synthetic_identity  # the ONE shared classifier (do not fork)
 from norviq.api.threat_intent import generate_remediation_rego, remediation_generatable_rules
@@ -36,7 +35,7 @@ router = APIRouter()
 _RANGE_HOURS = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}
 # Live, backend-computed frameworks → their technique→policy mapping file. Both are computed from the SAME real
 # loaded rego + audit machinery (no mock). ATLAS stays the default so the existing /mitre routes are unchanged.
-_FRAMEWORKS = {"atlas": "mitre_mapping.json", "owasp": "owasp_llm_mapping.json"}
+_FRAMEWORKS = FRAMEWORK_FILES
 _MAX_AFFECTED = 8  # cap affected-class chips per technique
 
 
@@ -50,17 +49,9 @@ def _valid_framework(framework: str) -> str:
 # mapping + audit activity
 # --------------------------------------------------------------------------------------------------
 
-@lru_cache(maxsize=len(_FRAMEWORKS))
-def _load_mapping(framework: str = "atlas") -> dict:
-    """Load a framework's technique→policies mapping from disk (cached). ATLAS names verified against
-    atlas.mitre.org; OWASP names are the official 2025 list. Both share the same coverage machinery."""
-    filename = _FRAMEWORKS.get(framework, "mitre_mapping.json")
-    for base in (Path(__file__).resolve().parents[3] / "policies", Path.cwd() / "policies"):
-        path = base / filename
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    log.warning("nrvq.api.mitre.mapping_missing", framework=framework, code="NRVQ-API-7070-ERR")
-    return {}
+# The technique->policies tables come from norviq/api/framework_mapping.py, which Red Team reads too,
+# so the two features cannot each keep their own copy. ATLAS names verified against atlas.mitre.org;
+# OWASP names are the official 2025 list.
 
 
 async def _activity_by_rule(
@@ -224,7 +215,7 @@ def _rule_is_present(rule_id: str, rego_blob: str) -> bool:
 
 async def _compute_coverage(request: Request, session: AsyncSession, namespace: str | None, range_token: str, framework: str = "atlas") -> dict:
     """Build the full coverage payload for a framework from its mapping + the loaded rego + audit. NO mock."""
-    mapping = _load_mapping(framework)
+    mapping = load_mapping(framework)
     rego_blob = _rego_blob(request, namespace)
     by_rule, synthetic_excluded, activity_degraded = await _activity_by_rule(session, namespace, range_token)
     by_rule_class = await _blocked_by_rule_class(session, namespace, range_token)
@@ -644,7 +635,7 @@ async def _generate_remediation_draft(
     (framework, control, class). Shared by the single-generate + batch endpoints. Returns a status dict
     (draft / escalate / no_affected_classes); never raises for the escalate/no-class cases so a batch item's
     outcome is reported rather than aborting the whole batch. Callers do the admin + target-cluster gating."""
-    mapping = _load_mapping(framework)
+    mapping = load_mapping(framework)
     info = mapping.get(technique_id)
     if not info:
         raise HTTPException(status_code=404, detail=f"Unknown technique {technique_id}")

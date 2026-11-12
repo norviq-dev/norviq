@@ -155,16 +155,30 @@ def test_evaluator_reports_a_violation_for_blocked_and_escalated_calls() -> None
 
 # ---- source-capability panel in Monitor mode ----------------------------------------------------
 
-def test_would_block_counts_as_guarded() -> None:
+def test_would_block_is_read_as_monitored_not_guarded() -> None:
     """In a Monitor-mode namespace a policy's blocks are softened to `audit` with a would-block marker,
-    so `block` stays 0 for a rule catching traffic daily. Reading only block+escalate made `defended`
-    unreachable there — the panel told operators to revoke a grant their policy was actively stopping,
-    or to author a rule that already existed."""
-    import inspect
+    so `block` stays 0 for a rule catching traffic daily. Reading only block+escalate told operators to
+    revoke a grant their policy was matching, or to author a rule that already existed.
 
-    from norviq.api.routers import graphs
+    This test used to grep the source for `hist.get("would_block", 0)`, which passed while the count was
+    added to GUARDED: a Monitor namespace where nothing was ever stopped showed every verb DEFENDED. The
+    calls ran, so it is neither defended, undefended nor dormant. It is its own status, `monitored`."""
+    from norviq.api.routers.graphs import _attach_source_capability
+    from norviq.api.schemas.graphs import AssetEdge, AssetNode
 
-    src = inspect.getsource(graphs)
-    assert 'hist.get("would_block", 0)' in src, (
-        "would_block is fetched but not counted as guarded again"
-    )
+    nodes = [
+        AssetNode(id="agent:a", type="agent", name="a", properties={"agent_class": "report-gen"}),
+        AssetNode(id="tool:delete_record", type="tool", name="delete_record", properties={}),
+        AssetNode(id="data:postgresql/users", type="data", name="postgresql/users", properties={}),
+    ]
+    edges = [
+        AssetEdge(source="agent:a", target="tool:delete_record", type="calls", weight=1.0,
+                  properties={"decision_history": {"allow": 0, "block": 0, "escalate": 0, "would_block": 412}}),
+        AssetEdge(source="tool:delete_record", target="data:postgresql/users", type="accesses", weight=1.0,
+                  properties={}),
+    ]
+    _attach_source_capability(nodes, edges)
+    delete = next(f for f in nodes[2].properties["capability"]["findings"] if f["verb"] == "delete")
+    assert delete["observed"] is True, "412 calls ran; the verb was exercised"
+    assert delete["defended"] is False, "nothing was enforced"
+    assert delete["status"] == "monitored"

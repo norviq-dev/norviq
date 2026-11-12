@@ -55,6 +55,7 @@ import { useApi, invalidateApiCache } from "../hooks/useApi";
 import { timeAgo } from "../lib/d3-helpers";
 import { fmtDateTime } from "../lib/format";
 import { useApp } from "../store/AppContext";
+import { policyVerdict, useEnforcementVerdict, useEnforcementVerdicts, type EnforcementVerdict, type PolicyVerdict } from "../lib/posture";
 
 type TargetType = "workload" | "class" | "namespace";
 
@@ -115,6 +116,9 @@ type DryRunResult = {
   no_replayable_traffic?: boolean;
   params_captured?: boolean;
   advisory?: string | null;
+  // Replayed calls a builder allowlist refused only on the tool's argument grant, from records kept
+  // without argument values. In none of the counts above, because the replay cannot judge them.
+  cannot_evaluate?: number;
   truncated?: boolean;
   scope?: { namespace?: string; agent_class?: string | null };
   recommendation?: string;
@@ -439,7 +443,7 @@ function PolicyTarget({
               {matches.length === 0 ? (
                 <span className="muted" style={{ fontSize: 12 }} data-testid="composer-no-deployments">
                   {agentClass
-                    ? `No deployments labeled norviq.io/agent-class=${agentClass} yet — that's fine. Author the policy now; it enforces the moment an agent identifies as this class. Label a Deployment with norviq.io/agent-class=${agentClass} to auto-discover it here.`
+                    ? `No deployments labeled norviq.io/agent-class=${agentClass} yet — that's fine. Author the policy now; it applies the moment an agent identifies as this class. Label a Deployment with norviq.io/agent-class=${agentClass} to auto-discover it here.`
                     : "Type an agent-class name above to target it — a running labeled deployment is not required to author a policy."}
                 </span>
               ) : (
@@ -714,7 +718,7 @@ spec:
             }}
           >
             This namespace is <strong>dry-run-only</strong> — policy applies are disabled (server-enforced). Dry-Run is
-            still available. An admin can re-enable enforcement in Settings → Apply Governance.
+            still available. An admin can re-enable applies with Change control → Live in Target Settings.
           </div>
         )}
 
@@ -998,7 +1002,7 @@ function IntentDraftsPanel({
                 {d.cls !== draftDisplayClass(d)
                   ? `would apply as a compliance overlay on agent-class ${draftDisplayClass(d)} — adds a block, never replaces its base policy`
                   : enforcingVersion !== undefined
-                  ? `would apply to agent-class ${d.cls} — currently v${enforcingVersion} enforcing`
+                  ? `would apply to agent-class ${d.cls} — currently v${enforcingVersion} loaded`
                   : `would apply to agent-class ${d.cls} — no live policy yet (new)`}
               </div>
 
@@ -1204,13 +1208,36 @@ decision = "block" {
 }
 `;
 
+/** What Create does with a loaded draft. It used to say "apply it as an enforcing policy" in every posture,
+ *  including a Monitor namespace and an audit-mode draft, where a match is only logged. */
+function draftCreateConsequence(v: PolicyVerdict, ns: string): string {
+  if (v === "enforcing") return `${ns} enforces, so once created a match acts on the call.`;
+  if (v === "monitor") return `${ns} is in Monitor mode, so once created its matches are logged as would-block and nothing is blocked.`;
+  if (v === "policy_audit") return "It is set to audit mode, so once created its matches are logged as would-block and nothing is blocked.";
+  return `The enforcement posture of ${ns || "the target namespace"} could not be read, so this does not say whether a match will be blocked.`;
+}
+
+/** The delete dialog's "is currently enforcing", made true for the namespace's posture and the policy's own
+ *  mode (an audit-mode policy is softened by the evaluator whatever its namespace does). */
+function deletePostureText(v: PolicyVerdict, ns: string | null | undefined): string {
+  if (v === "enforcing") return "currently enforcing";
+  if (v === "monitor") return `loaded, and ${ns} is in Monitor mode, so its matches are logged, not blocked`;
+  if (v === "policy_audit") return "loaded in audit mode, so its matches are logged, not blocked";
+  return "currently loaded";
+}
+
 export function PolicyCatalog() {
   const { namespace, posture } = useApp();
   // In Monitor mode the engine EVALUATES policies but does not block live traffic, so the
   // headline "ENFORCING" is a misrepresentation. Downgrade the badge to "MONITOR · would-block" so the
   // Catalog can't claim enforcement the namespace isn't doing. Only trust a definite monitor posture for
   // a concrete namespace (the "all" aggregate carries only the cluster default; per-ns overrides vary).
-  const catalogMonitor = posture.mode === "audit" && namespace !== "all";
+  //
+  // Read through lib/posture: /settings' merged `enforcement_mode` also says "audit" for a namespace that
+  // only inherits the cluster default, where the engine still blocks on policy. That read alone labelled
+  // such a namespace Monitor here.
+  const scopeVerdict = useEnforcementVerdict(namespace);
+  const catalogMonitor = scopeVerdict === "monitor";
   // A THIRD state, because "not audit" is not the same as "block". AppContext sets `posture.mode` to
   // null when the /settings read failed — reachable through the default HTTP rate limiter or any 5xx,
   // and DURABLE, since posture is not refetched until the namespace changes or postureVersion bumps.
@@ -1218,8 +1245,11 @@ export function PolicyCatalog() {
   // cluster's policy engine" indefinitely. Also require the posture to describe the namespace on
   // screen, the same guard Header.tsx applies: on a switch the previous scope's mode lingers until the
   // new read settles. "all" is exempt — it legitimately shows the cluster default.
-  const postureForScope = posture.namespace === namespace && !posture.loading;
-  const catalogPostureUnknown = namespace !== "all" && (posture.mode == null || !postureForScope);
+  void posture;
+  const catalogPostureUnknown = namespace !== "all" && scopeVerdict === "unknown";
+  // "all" spans namespaces with their own postures, so the section makes no single claim there; each card
+  // says what its own namespace does with a match.
+  const catalogAllScope = namespace === "all";
   const [searchParams, setSearchParams] = useSearchParams();
   const outlineTealButtonStyle = {
     background: "transparent",
@@ -1315,6 +1345,12 @@ export function PolicyCatalog() {
       staleTimeMs: Number.MAX_SAFE_INTEGER
     }
   );
+  // Per-card posture: the list can span namespaces (always under "all"), and a card's BLOCK pill or green
+  // "enforcing" dot is a claim about ITS namespace.
+  const cardVerdicts = useEnforcementVerdicts((policies.data ?? []).map((p) => p.namespace));
+  const deleteVerdict = useEnforcementVerdict(deleteTarget?.namespace ?? null);
+  // The draft-loaded banner says what Create will do, so it reads the TARGET namespace and the chosen mode.
+  const newPolicyNsVerdict = useEnforcementVerdict(newPolicy?.namespace ?? null);
   // Live workloads observed for this namespace. Empty is a valid response (renders empty) — never a fake list.
   const deployments = useApi<Deployment[]>(
     () => apiGet<Deployment[]>(`/api/v1/deployments?namespace=${encodeURIComponent(namespace)}`),
@@ -1557,7 +1593,7 @@ export function PolicyCatalog() {
         kind: "local",
         title: `Restored ${ns}/${ac} to v${target}`,
         ok: true,
-        outcome: `Version ${target} was re-applied as ${newVer ? `v${newVer}` : "a new version"} and loaded into this cluster's policy engine — enforcing "${editorPolicy?.mode ?? editorPolicy?.enforcement_mode ?? "block"}". Effective on the next tool call; the editor and Active-policies card now show the restored rego.`,
+        outcome: `Version ${target} was re-applied as ${newVer ? `v${newVer}` : "a new version"} and loaded into this cluster's policy engine in mode "${editorPolicy?.mode ?? editorPolicy?.enforcement_mode ?? "block"}". Evaluated on the next tool call; the editor and Active-policies card now show the restored rego.`,
         manifest: { namespace: ns, agent_class: ac, enforcement_mode: editorPolicy?.mode ?? editorPolicy?.enforcement_mode ?? "block" },
         // Don't just trust the 200 — poll for the restored version to actually be the one loaded.
         expectedVersion: newVer
@@ -1603,9 +1639,9 @@ export function PolicyCatalog() {
         title: `Deleted ${ns}/${displayClass}${ver ? ` · v${ver}` : ""}`,
         ok: true,
         outcome: overlay
-          ? `Compliance remediation overlay for "${displayClass}" reverted from namespace "${ns}". The class's own base policy is untouched and keeps enforcing exactly as before.`
-          : `Policy for "${ac}" removed from namespace "${ns}" across every layer (engine, cache, database, version history). "${ac}" now falls back to the namespace baseline / default (fail-closed if none). Durable across an api restart.`,
-        manifest: { namespace: ns, agent_class: ac, enforcement_mode: deleteTarget.mode ?? "block" }
+          ? `Compliance remediation overlay for "${displayClass}" reverted from namespace "${ns}". The class's own base policy is untouched and keeps running exactly as before.`
+          : `Policy for "${ac}" removed from namespace "${ns}" across every layer (engine, cache, database, version history). "${ac}" now falls back to the namespace baseline, or to the cluster's no-policy default where there is none (shipped as allow). Durable across an api restart.`,
+        manifest: { namespace: ns, agent_class: ac, enforcement_mode: deleteTarget.mode ?? deleteTarget.enforcement_mode ?? "block" }
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1616,7 +1652,7 @@ export function PolicyCatalog() {
         ok: false,
         outcome: msg,
         code: codeMatch ? codeMatch[0] : undefined,
-        manifest: { namespace: ns, agent_class: ac, enforcement_mode: deleteTarget.mode ?? "block" }
+        manifest: { namespace: ns, agent_class: ac, enforcement_mode: deleteTarget.mode ?? deleteTarget.enforcement_mode ?? "block" }
       });
     } finally {
       setDeleteTarget(null);
@@ -1648,9 +1684,9 @@ export function PolicyCatalog() {
           kind: "local",
           title: `Created ${createNs}/${ac}${ver ? ` · v${ver}` : ""}`,
           ok: true,
-          outcome: `Policy authored for agent class "${ac}" (no labeled deployment required) in namespace "${createNs}" and loaded into this cluster's policy engine — enforcing "${mode ?? "block"}". Effective on the next tool call for this class; it appears in the editor and the Active-policies card.`,
+          outcome: `Policy authored for agent class "${ac}" (no labeled deployment required) in namespace "${createNs}" and loaded into this cluster's policy engine in mode "${mode ?? "block"}". Evaluated on the next tool call for this class; it appears in the editor and the Active-policies card.`,
           manifest: { namespace: createNs, agent_class: ac, enforcement_mode: mode ?? "block" },
-          // Verify the version actually converged before badging this ENFORCING.
+          // Verify the version actually converged before badging it (the panel adds the namespace posture).
           expectedVersion: ver,
           expectedMode: mode ?? "block"
         });
@@ -1695,7 +1731,7 @@ export function PolicyCatalog() {
         kind: "local",
         title: `Applied ${ns}/${ac}${ver ? ` · v${ver}` : ""}`,
         ok: true,
-        outcome: `Loaded into this cluster's policy engine — enforcement "${res.enforcement_mode ?? mode}"${ver ? ` (version ${ver} now enforcing → the draft moved to enforcing)` : ""}. Effective immediately on the next tool call; the Active-policies card shows "applied just now".`,
+        outcome: `Loaded into this cluster's policy engine in mode "${res.enforcement_mode ?? mode}"${ver ? ` (version ${ver} is now the loaded version; the draft is retired)` : ""}. Evaluated on the next tool call; the Active-policies card shows "applied just now".`,
         manifest: { namespace: ns, agent_class: ac, enforcement_mode: res.enforcement_mode ?? mode ?? "block" },
         // Apply's 200 can lie — verify the version AND the persisted mode actually converged.
         expectedVersion: ver,
@@ -1832,10 +1868,10 @@ export function PolicyCatalog() {
           title: `Created ${editorTarget.namespace}/${displayClass}${res?.version ? ` · v${res.version}` : ""}`,
           ok: true,
           outcome: isRemediationOverlayClass(editorTarget.agent_class)
-            ? `Compliance remediation overlay authored for "${displayClass}" in namespace "${editorTarget.namespace}" and loaded into this cluster's policy engine — enforcing "${editorTarget.mode ?? "block"}". It ADDS a block on top of the class's existing policy (never replaces it); effective on the next tool call for this class.`
-            : `New policy authored for "${editorTarget.agent_class}" in namespace "${editorTarget.namespace}" and loaded into this cluster's policy engine — enforcing "${editorTarget.mode ?? "block"}". Effective on the next tool call for this class; it appears in the editor and the Active-policies card.`,
+            ? `Compliance remediation overlay authored for "${displayClass}" in namespace "${editorTarget.namespace}" and loaded into this cluster's policy engine in mode "${editorTarget.mode ?? "block"}". It ADDS a block on top of the class's existing policy (never replaces it); effective on the next tool call for this class.`
+            : `New policy authored for "${editorTarget.agent_class}" in namespace "${editorTarget.namespace}" and loaded into this cluster's policy engine in mode "${editorTarget.mode ?? "block"}". Evaluated on the next tool call for this class; it appears in the editor and the Active-policies card.`,
           manifest: { namespace: editorTarget.namespace, agent_class: editorTarget.agent_class, enforcement_mode: editorTarget.mode ?? "block" },
-          // Verify the created/mode-changed version actually converged before badging ENFORCING.
+          // Verify the created/mode-changed version actually converged before badging it.
           expectedVersion: res?.version,
           expectedMode: editorTarget.mode ?? "block"
         });
@@ -1848,7 +1884,7 @@ export function PolicyCatalog() {
           kind: "local",
           title: `Saved ${editorTarget.namespace}/${displayClass}${res?.version ? ` · v${res.version}` : ""}`,
           ok: true,
-          outcome: `Policy updated for "${editorTarget.agent_class}" in namespace "${editorTarget.namespace}" and loaded into this cluster's policy engine — enforcing "${editorTarget.mode ?? "block"}". Effective on the next tool call for this class.`,
+          outcome: `Policy updated for "${editorTarget.agent_class}" in namespace "${editorTarget.namespace}" and loaded into this cluster's policy engine in mode "${editorTarget.mode ?? "block"}". Evaluated on the next tool call for this class.`,
           manifest: { namespace: editorTarget.namespace, agent_class: editorTarget.agent_class, enforcement_mode: editorTarget.mode ?? "block" },
           expectedVersion: res?.version,
           expectedMode: editorTarget.mode ?? "block"
@@ -2027,8 +2063,14 @@ export function PolicyCatalog() {
                     background: "transparent"
                   }}
                 >
-                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: catalogMonitor ? "var(--escalate)" : catalogPostureUnknown ? "var(--text-muted)" : "var(--success, #30a46c)" }} />
-                  {catalogMonitor ? "Monitor · would-block" : catalogPostureUnknown ? "Loaded · posture unknown" : "Enforcing"}
+                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: catalogMonitor ? "var(--escalate)" : catalogPostureUnknown || catalogAllScope ? "var(--text-muted)" : "var(--success, #30a46c)" }} />
+                  {catalogMonitor
+                    ? "Monitor · would-block"
+                    : catalogAllScope
+                      ? "Loaded · posture per namespace"
+                      : catalogPostureUnknown
+                        ? "Loaded · posture unknown"
+                        : "Enforcing"}
                 </span>
               </div>
               <div className="muted" style={{ fontSize: 12.5 }}>
@@ -2036,7 +2078,9 @@ export function PolicyCatalog() {
                   ? `Loaded into the policy engine and EVALUATED, but ${namespace} is in Monitor mode — matches are logged as would-block, live traffic is not blocked. Distinct from the dry-run drafts above.`
                   : catalogPostureUnknown
                     ? `These policies are loaded into the engine, but ${namespace}'s enforcement posture could not be read — this is NOT a statement that they are blocking. Reload, or check Target Settings.`
-                    : "Loaded into this cluster's policy engine — grouped by workload, agent-class and namespace tier. Distinct from the dry-run drafts above."}
+                    : catalogAllScope
+                      ? "Loaded into this cluster's policy engine — grouped by workload, agent-class and namespace tier. Each namespace has its own posture, so each card says whether its namespace blocks or only logs. Distinct from the dry-run drafts above."
+                      : "Loaded into this cluster's policy engine — grouped by workload, agent-class and namespace tier. Distinct from the dry-run drafts above."}
               </div>
             </div>
             {TIERS.map((tier) => {
@@ -2089,19 +2133,47 @@ export function PolicyCatalog() {
                                     appears) — the point is that they must not look identical. */}
                                 {(() => {
                                   const live = (p.matches ?? 0) > 0;
+                                  // Green "enforcing" needs the namespace to enforce AND the policy to be saved
+                                  // in a blocking mode. In Monitor, or for a policy saved in audit mode (the
+                                  // evaluator's `_apply_policy_mode`), matches are logged and nothing is blocked.
+                                  const v: PolicyVerdict = policyVerdict(
+                                    cardVerdicts[p.namespace ?? ""] ?? "unknown",
+                                    p.mode ?? p.enforcement_mode,
+                                    p.agent_class ?? p.target
+                                  );
+                                  const state = !live
+                                    ? "unmatched"
+                                    : v === "enforcing"
+                                      ? "enforcing"
+                                      : v === "monitor"
+                                        ? "monitor"
+                                        : v === "policy_audit"
+                                          ? "audit"
+                                          : "matched";
+                                  const label = {
+                                    enforcing: "Loaded & enforcing",
+                                    monitor: "Loaded & evaluated — Monitor mode, not blocking",
+                                    audit: "Loaded & evaluated — audit-mode policy, not blocking",
+                                    matched: "Loaded & matching — namespace posture not confirmed",
+                                    unmatched: "Loaded — no matching workload"
+                                  }[state];
+                                  const title = {
+                                    enforcing: "Loaded in the policy engine & enforcing on matching workloads",
+                                    monitor: `Loaded in the policy engine & evaluated on matching workloads. ${p.namespace} is in Monitor mode, so matches are logged as would-block and nothing is blocked.`,
+                                    audit: "Loaded in the policy engine & evaluated on matching workloads. This policy is saved in audit mode, so the engine logs its matches as would-block and blocks nothing, whatever its namespace does.",
+                                    matched: `Loaded in the policy engine & matching live workloads. The enforcement posture of ${p.namespace ?? "this namespace"} could not be read, so this does not confirm that matches are blocked.`,
+                                    unmatched: "Loaded in the policy engine, but nothing currently matches it. It applies as soon as a workload of this class appears."
+                                  }[state];
+                                  const color = state === "enforcing" ? "var(--good, #2ecc71)" : state === "monitor" || state === "audit" ? "var(--escalate)" : state === "matched" ? "var(--text-muted)" : "var(--warning, #f5a623)";
                                   return (
                                     <span
-                                      data-testid={`policy-health-${live ? "enforcing" : "unmatched"}`}
-                                      aria-label={live ? "Loaded & enforcing" : "Loaded — no matching workload"}
-                                      title={
-                                        live
-                                          ? "Loaded in the policy engine & enforcing on matching workloads"
-                                          : "Loaded in the policy engine, but nothing currently matches it. It enforces as soon as a workload of this class appears."
-                                      }
+                                      data-testid={`policy-health-${state}`}
+                                      aria-label={label}
+                                      title={title}
                                       style={{
                                         width: 7, height: 7, borderRadius: "50%", flex: "none",
-                                        background: live ? "var(--good, #2ecc71)" : "var(--warning, #f5a623)",
-                                        boxShadow: live ? "0 0 0 2px var(--good-dim, #2ecc7126)" : "0 0 0 2px #f5a62326"
+                                        background: color,
+                                        boxShadow: state === "enforcing" ? "0 0 0 2px var(--good-dim, #2ecc7126)" : state === "unmatched" ? "0 0 0 2px #f5a62326" : "none"
                                       }}
                                     />
                                   );
@@ -2111,7 +2183,21 @@ export function PolicyCatalog() {
                                     row (unaffected) and the overlay row are both visible, but never confused. */}
                                 {overlayDisplayLabel(p.target ?? p.agent_class) || "—"}
                               </span>
-                              {(p.mode ?? p.enforcement_mode) && <DecisionBadge decision={MODE_DECISION[(p.mode ?? p.enforcement_mode)!]} />}
+                              {(p.mode ?? p.enforcement_mode) &&
+                                ((cardVerdicts[p.namespace ?? ""] === "monitor" && (p.mode ?? p.enforcement_mode) !== "audit") ? (
+                                  // The policy's own mode, and what Monitor turns it into. A bare red BLOCK
+                                  // pill under a "Monitor · would-block" header read as a block that happens.
+                                  <span
+                                    data-testid={`policy-mode-monitor-${p.namespace}-${p.target ?? p.agent_class}`}
+                                    className="pill hoverable"
+                                    title={`Policy mode ${(p.mode ?? p.enforcement_mode)}; ${p.namespace} is in Monitor mode, so a match is logged as a would-block.`}
+                                    style={{ background: "#FFB02015", color: "#FFB020", borderColor: "#FFB02030" }}
+                                  >
+                                    {(p.mode ?? p.enforcement_mode)} → would-block
+                                  </span>
+                                ) : (
+                                  <DecisionBadge decision={MODE_DECISION[(p.mode ?? p.enforcement_mode)!]} />
+                                ))}
                             </div>
                             <div className="policy-meta">
                               {/* Namespace FIRST and always. The same agent class legitimately holds a policy in
@@ -2174,7 +2260,11 @@ export function PolicyCatalog() {
                   {isRemediationOverlayClass(newPolicy.agent_class) && (
                     <>This ADDS a block on top of the class's existing policy — it never replaces it. </>
                   )}
-                  Review the Rego below, then click <strong>Create</strong> to apply it as an enforcing policy — or <strong>Dry-Run</strong> to preview first. Nothing enforces until you Create.
+                  Review the Rego below, then click <strong>Create</strong> to load it into the policy engine — or{" "}
+                  <strong>Dry-Run</strong> to preview first. Nothing changes until you Create.{" "}
+                  <span data-testid="draft-loaded-consequence">
+                    {draftCreateConsequence(policyVerdict(newPolicyNsVerdict, newPolicy.mode, newPolicy.agent_class), newPolicy.namespace)}
+                  </span>
                 </div>
                 <button type="button" onClick={() => setJustLoadedDraft(false)} aria-label="Dismiss" style={{ marginLeft: "auto", flex: "none", background: "transparent", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
               </div>
@@ -2602,8 +2692,18 @@ export function PolicyCatalog() {
                             {dryRunResult.scope?.agent_class ? ` for ${dryRunResult.scope.agent_class}` : ""}
                             {dryRunResult.truncated ? ` (capped at ${(dryRunResult.total_records_checked ?? 0).toLocaleString()})` : ""}
                             {" · "}would block {dryRunResult.would_block ?? 0}, allow {dryRunResult.would_allow ?? 0}
-                            {(dryRunResult.would_escalate ?? 0) > 0 ? `, escalate ${dryRunResult.would_escalate}` : ""}.
+                            {(dryRunResult.would_escalate ?? 0) > 0 ? `, escalate ${dryRunResult.would_escalate}` : ""}
+                            {(dryRunResult.cannot_evaluate ?? 0) > 0
+                              ? `, cannot evaluate ${dryRunResult.cannot_evaluate} (no argument values)`
+                              : ""}
+                            .
                           </div>
+                          {/* The server's caveat about what the replay could see. Typed here and never shown. */}
+                          {dryRunResult.advisory ? (
+                            <div data-testid="dryrun-advisory" role="status" style={{ marginTop: 6, color: "var(--escalate)", fontSize: 11.5, lineHeight: 1.5 }}>
+                              {dryRunResult.advisory}
+                            </div>
+                          ) : null}
                           <div style={{ marginTop: 6, fontWeight: 600 }}>{dryRunResult.recommendation ?? "n/a"}</div>
                         </>
                       );
@@ -2827,7 +2927,8 @@ export function PolicyCatalog() {
             </>
           }
         >
-          {/* Everything in /policies is loaded & enforcing, so deleting always changes the enforced state. */}
+          {/* Everything in /policies is loaded, so deleting always changes what the engine evaluates. Whether
+              that is "enforcing" depends on the namespace posture, so the sentence reads it. */}
           <div
               data-testid="delete-policy-warning"
               style={{
@@ -2839,18 +2940,18 @@ export function PolicyCatalog() {
               <TriangleAlert size={16} style={{ flex: "none", marginTop: 1, color: "#ff6b81" }} />
               {isRemediationOverlayClass(deleteTarget.agent_class) ? (
                 <span>
-                  This <strong>compliance remediation overlay</strong> is currently enforcing. Deleting it removes{" "}
+                  This <strong>compliance remediation overlay</strong> is {deletePostureText(deleteVerdict, deleteTarget.namespace)}. Deleting it removes{" "}
                   <span className="mono">{overlayDisplayLabel(deleteTarget.agent_class)}</span>'s added block —{" "}
-                  <strong>the class's own base policy is untouched</strong> and keeps enforcing exactly as before.
+                  <strong>the class's own base policy is untouched</strong> and keeps running exactly as before.
                   This cannot be undone and is durable across an api restart.
                 </span>
               ) : (
                 <span>
-                  This policy is <strong>currently enforcing</strong>. Deleting it removes{" "}
+                  This policy is <strong>{deletePostureText(policyVerdict(deleteVerdict, deleteTarget.mode ?? deleteTarget.enforcement_mode, deleteTarget.agent_class), deleteTarget.namespace)}</strong>. Deleting it removes{" "}
                   <span className="mono">{deleteTarget.agent_class ?? deleteTarget.target}</span> from every layer
-                  (engine, cache, database, version history) and flips the class back to the namespace baseline /
-                  default — <strong>fail-closed (block) if no baseline exists</strong>. This cannot be undone and is
-                  durable across an api restart.
+                  (engine, cache, database, version history) and flips the class back to the namespace baseline, or,
+                  where there is none, to the cluster&apos;s no-policy default (shipped as <strong>allow</strong>). This
+                  cannot be undone and is durable across an api restart.
                 </span>
               )}
           </div>

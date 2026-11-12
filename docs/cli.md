@@ -515,9 +515,18 @@ profile. It is refused with `409` while the agent is frozen or capped, because t
 deletes is the durable copy of that control: lift it first, then delete
 (`norviq/api/routers/agents.py::deregister_agent`).
 
-One cosmetic wart: `reset-trust` echoes the category the endpoint returns, and the endpoint builds
-that response with `category=""` for any non-zero score (`norviq/api/routers/agents.py::update_trust`).
-Expect `Trust reset: <id> -> 0.8 ()` — an empty parenthetical, not a missing category.
+`reset-trust` prints the control the endpoint put in force, which is what it answers with
+(`{"spiffe_id", "frozen", "trust_cap"}`, `norviq/api/routers/agents.py::update_trust`): `Agent frozen`,
+`Trust capped at 0.8` or `Freeze and cap lifted`. It does not print a score, because a cap is not the
+agent's trust. `agent get` and `agent list` show the trust the engine uses: `frozen` and `trust_cap` on
+every row come from the live controls, a frozen agent reads `0.0 (frozen)`, and a capped one reads
+`min(score, cap)` (`norviq/api/routers/agents.py::_overlay_controls`). Lifting a freeze drops the frozen
+display entry, so the agent reads its last computed score; if it called while frozen, that score was taken
+under the freeze, and it reads `None (unscored)` until its next call. Removing or raising a cap does the
+same for a score the old cap held down. When the API cannot read the store that holds the freeze and cap,
+it does not fall back to the registry's copy: `frozen` and `trust_cap` are null, `controls` is
+`unavailable`, and the agent reads `None (unknown)`. The engine fails closed while it cannot read that
+store, so such an agent may be blocked on every call (`NRVQ-API-7161`).
 
 ```bash
 # Contain a misbehaving agent immediately, then verify.

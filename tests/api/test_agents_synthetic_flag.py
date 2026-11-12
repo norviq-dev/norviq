@@ -69,6 +69,7 @@ class _CountingCache:
         self._trust = trust_json  # keyed by spiffe_id (no "trust:" prefix)
         self.scanned = 0
         self.mget_calls = 0
+        self.mget_keys: list[list[str]] = []
         self.get_trust_calls = 0
         self._redis = object()
 
@@ -85,6 +86,7 @@ class _CountingCache:
 
     async def mget(self, keys: list[str]) -> list[str | None]:
         self.mget_calls += 1
+        self.mget_keys.append(list(keys))
         out: list[str | None] = []
         for k in keys:
             if k.startswith("trust:"):
@@ -165,8 +167,11 @@ def test_list_agents_scan_is_namespace_scoped_and_batched(monkeypatch) -> None:
         assert {row["spiffe_id"] for row in resp.json()} == set(alpha_ids)
         # (a) scoped SCAN: only the 3 alpha keys ever reached the client — NOT all 23.
         assert cache.scanned == len(alpha_ids), f"scan was not ns-scoped: scanned={cache.scanned}"
-        # (b) batched reads: two MGETs (trust: + trustcalc:), zero per-agent GET_TRUST round-trips.
-        assert cache.mget_calls == 2, f"reads not batched: mget_calls={cache.mget_calls}"
+        # (b) batched reads: three MGETs (trust:, trustcalc:, and the admin freeze + cap of every listed agent,
+        # which the rows now take from the enforced controls rather than the snapshot), zero per-agent GETs.
+        assert cache.mget_calls == 3, f"reads not batched: mget_calls={cache.mget_calls}"
+        assert set(cache.mget_keys[2]) == {f"{p}:{sid}" for sid in alpha_ids
+                                           for p in ("agent_frozen", "agent_trust_override")}
         assert cache.get_trust_calls == 0, f"still doing per-agent GETs: {cache.get_trust_calls}"
     finally:
         client.close()

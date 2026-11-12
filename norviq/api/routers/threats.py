@@ -114,7 +114,9 @@ _MAX_DEPTH = 4
 _RESERVED_CLASSES = {"__baseline__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__"}
 _SENSITIVE = {"critical", "high"}
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-_STATUS_ORDER = {"exploitable": 0, "unsimulated": 1, "blocked": 2}
+# "would_block" (Monitor: a policy matched, the calls ran) ranks right after "exploitable": the traffic
+# is real and went through, but a policy already names it, so switching to Block closes it.
+_STATUS_ORDER = {"exploitable": 0, "would_block": 1, "unsimulated": 2, "blocked": 3}
 # RiskLevel.value -> rank; higher is more dangerous. Orders an agent's chokepoints so a destructive
 # tool outranks a read when the per-agent chokepoint budget truncates.
 _RISK_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -387,20 +389,46 @@ def _build_path(
 
     steps: list[ThreatStep] = []
     chokepoint = ""
-    any_allow_all = True
+    chokepoint_id = ""
+    # Every hop carried traffic that EXECUTED: an allow, or a Monitor would-block (the evaluator softens
+    # the block to `audit` and the call runs). A hop with neither has no evidence the chain was walked.
+    every_hop_ran = True
     blocked = False
-    would_blocked = False  # a Monitor-mode would-block covers a hop (logged, not enforced) — not a gap
+    # Some hop ran only because the namespace is in Monitor: a policy would have stopped every call on
+    # it, but nothing was enforced. These calls RAN. This used to set status "blocked", which put a path
+    # nobody blocked under the Blocked headline and took it out of Exploitable.
+    would_blocked = False
+    prev_counts: tuple[int, int, int] | None = None
+    # Set when the data hop's counts were borrowed from its tool (see `via` below). Those calls are the
+    # tool's, so the same counts land on EVERY data node the tool reaches: one table's traffic makes
+    # every table's path read exploitable. The verdict has to say the evidence is per tool.
+    data_hop_via: str | None = None
     for a, b in zip(node_ids, node_ids[1:]):
+        anode = nodes_by_id[a]
         bnode = nodes_by_id[b]
         hist = next((e["hist"] for e in out_edges.get(a, []) if e["target"] == b), {})
         allow = int(hist.get("allow") or 0)
         block = int(hist.get("block") or 0)
         wb = int(hist.get("would_block") or 0)
+        via: str | None = None
+        if (
+            anode["type"] == "tool" and bnode["type"] == "data" and prev_counts is not None
+            and allow == block == wb == 0
+        ):
+            # A tool -> data edge is structural. No audit row names a data node, so its own counts are
+            # always zero, and every two-hop chain read "No end-to-end traffic yet" however many calls
+            # ran. What crosses this hop is the call into the tool on THIS chain: the incoming hop's
+            # counts, for this origin only, not every agent that calls the tool.
+            allow, block, wb = prev_counts
+            via = anode["name"]
+            data_hop_via = via
+        prev_counts = (allow, block, wb)
         dec = "would_block" if (wb > 0 and block == 0) else _dec_from_counts(allow, block)
         if bnode["type"] == "tool":
             chokepoint = bnode["name"]
-        if allow == 0:
-            any_allow_all = False
+            chokepoint_id = b
+        if allow == 0 and wb == 0:
+            every_hop_ran = False
         if dec == "block" and allow == 0:
             blocked = True
         if wb > 0 and allow == 0:
@@ -472,10 +500,12 @@ def _build_path(
                 inferred_verb=inferred_verb,
                 inferred_count=inferred_count,
                 observed_calls=observed_calls,
+                via=via,
             )
         )
     if not chokepoint:
         chokepoint = tgt_node["name"]
+        chokepoint_id = node_ids[-1]
 
     reach_ids = _reachable(node_ids[0], out_edges)
     reach: list[ReachAsset] = []
@@ -527,14 +557,22 @@ def _build_path(
     if blocked:
         status, verdict = "blocked", f"Policy blocks the chokepoint '{chokepoint}' — path neutralized."
     elif would_blocked:
-        # A policy covers the chokepoint but the namespace is in Monitor mode — logged, not enforced. This
-        # is NOT an open path; rank it with blocked (covered) but tell the operator it isn't enforcing.
+        # A policy matches the chokepoint, but the namespace is in Monitor mode, so the evaluator logged
+        # `audit` and the call RAN. Its own status, never "blocked": nothing was stopped, and counting it
+        # under Blocked told an operator in Monitor that paths were neutralized when every call had gone
+        # through. It ranks right after exploitable (see `_STATUS_ORDER`).
         status, verdict = (
-            "blocked",
-            f"Monitor mode: '{chokepoint}' would be blocked (logged, not enforced) — switch to Block to enforce.",
+            "would_block",
+            f"Monitor mode: a policy would block '{chokepoint}', but this namespace logs instead of "
+            "enforcing, so these calls ran. Switch the namespace to Block to enforce.",
         )
-    elif any_allow_all and len(steps) > 0:
+    elif every_hop_ran and len(steps) > 0:
         status, verdict = "exploitable", f"Every hop has allowed traffic — '{chokepoint}' is reachable end-to-end."
+        if data_hop_via:
+            verdict += (
+                f" Calls are counted per tool, not per table: audit rows do not name the data node, so the "
+                f"calls into '{data_hop_via}' do not show that {tgt_node['name']} itself was touched."
+            )
     elif src_kind != "agent":
         # SAME status value, different sentence. The value is load-bearing in two places that must not
         # be disturbed: `_STATUS_ORDER[p.status]` is a DIRECT index in the dedupe (a new string raises
@@ -556,7 +594,10 @@ def _build_path(
         status, verdict = "unsimulated", "No end-to-end traffic yet — simulate to confirm reachability."
 
     return ThreatPath(
-        id=_short_id(ns, node_ids[0], node_ids[-1], str(len(node_ids))),
+        # The chokepoint is part of the id. Without it, sibling tools reaching the same data (execute_sql
+        # and delete_record -> postgresql/users) produced one id, the dedupe below kept whichever was
+        # least blocked, and the other kill-chain vanished from the list and from every coverage total.
+        id=_short_id(ns, node_ids[0], chokepoint_id, node_ids[-1], str(len(node_ids))),
         sev=sev,
         src=src_node["name"],
         tgt=tgt_node["name"],
@@ -718,11 +759,9 @@ async def _derive_paths(
                 # estate that has none.
                 if p.cls is None:
                     # By ID, not per chain. The dedupe below collapses chains that share
-                    # (ns, src, tgt, hops) into one path, and `synthetic_hidden` / `non_agent_paths`
+                    # (ns, src, chokepoint, tgt, hops) into one path, and `synthetic_hidden` / `non_agent_paths`
                     # are both computed AFTER it — so counting raw chains here put this number on a
-                    # different denominator from the ones it is meant to reconcile with. Measured: one
-                    # server serving two tools that both reach the same data reported 2 hidden where
-                    # the unfiltered view holds 1.
+                    # different denominator from the ones it is meant to reconcile with.
                     non_agent_hidden_ids.add(p.id)
                 continue
             # Mark whether an APPLIED policy governs this chokepoint (audit-derived status can lag a fresh
@@ -737,7 +776,8 @@ async def _derive_paths(
                 _path_governed_by(governing, p.cls, p.tool, choke_verb) if p.cls is not None else "n/a"
             )
             paths.append(p)
-    # Dedup by id (an agent can reach the same target via distinct-length chains — keep worst).
+    # Dedup by id: chains with the same origin, chokepoint, target and length (e.g. reached through
+    # different delegated agents) are one finding — keep the worst. Sibling chokepoints stay separate.
     by_id: dict[str, ThreatPath] = {}
     for p in paths:
         cur = by_id.get(p.id)
@@ -745,7 +785,7 @@ async def _derive_paths(
             by_id[p.id] = p
     ordered = sorted(
         by_id.values(),
-        key=lambda p: (_STATUS_ORDER.get(p.status, 1), _SEVERITY_ORDER.get(p.sev, 3), -p.blast),
+        key=lambda p: (_STATUS_ORDER.get(p.status, _STATUS_ORDER["unsimulated"]), _SEVERITY_ORDER.get(p.sev, 3), -p.blast),
     )
     # Cap AFTER ranking so the global truncation drops the LEAST severe paths — never hides a
     # worst-first (exploitable / critical) path behind arbitrary graph-iteration order. Per-agent
@@ -768,7 +808,7 @@ async def get_threat_paths(
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ):
-    """Enriched kill-chains for the console, worst-first (exploitable → unsimulated → blocked, severity
+    """Enriched kill-chains for the console, worst-first (exploitable → would_block → unsimulated → blocked, severity
     tiebreak). Namespace-scoped: ``ns=all`` unions the caller's namespaces; a scoped viewer only ever
     sees its own. status/dec/deny/allow come from REAL audit decision history (no side-effecting eval).
 

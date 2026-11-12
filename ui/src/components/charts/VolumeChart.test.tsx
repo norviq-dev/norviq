@@ -56,6 +56,33 @@ describe("VolumeChart", () => {
     }
   });
 
+  // /audit/volume returns escalate and audit (would-block) per bucket, and the chart drew allow and block
+  // only. A Monitor namespace logs every match as `audit`, so its would-blocks never appeared, and an
+  // escalated call appeared nowhere.
+  it("plots escalate and would-block whenever the API returns them", () => {
+    render(
+      <VolumeChart
+        data={[
+          { time: "2026-11-11 18:00", allow: 10, block: 0, escalate: 1, audit: 0 },
+          { time: "2026-11-11 19:00", allow: 22, block: 0, escalate: 0, audit: 8 }
+        ]}
+      />
+    );
+    const opt = lastOption();
+    const byName = Object.fromEntries(opt.series.map((s: { name: string; data: number[] }) => [s.name, s.data]));
+    expect(byName["Escalate"]).toEqual([1, 0]);
+    expect(byName["Would-block"]).toEqual([0, 8]);
+    expect(opt.legend.data).toEqual(["Allow", "Block", "Escalate", "Would-block"]);
+    // Every call in the window is on the chart: 41 calls, 41 plotted.
+    const plotted = opt.series.reduce((n: number, s: { data: number[] }) => n + s.data.reduce((a, b) => a + b, 0), 0);
+    expect(plotted).toBe(41);
+  });
+
+  it("adds no empty series for a caller whose data has only allow and block", () => {
+    render(<VolumeChart data={[{ time: "t", allow: 1, block: 2 }]} labels={["Allowed", "Blocked"]} />);
+    expect(lastOption().series.map((s: { name: string }) => s.name)).toEqual(["Allowed", "Blocked"]);
+  });
+
   it("renders an empty series without throwing", () => {
     expect(() => render(<VolumeChart data={[]} />)).not.toThrow();
   });

@@ -9,16 +9,17 @@
 // rendering that raw contradicted this panel's own "highest-priority-wins, top to bottom" subtitle.
 // Ordering by a number the server supplied is not the same as re-implementing resolution.
 //
-// The "Mode" column reflects the effective per-namespace enforcement posture (Block / Monitor)
-// from GET /settings, so the hierarchy agrees with the Namespace Governance card. Still cluster-aware in STRUCTURE
+// The "Mode" column reflects the namespace's enforcement posture (Block / Monitor) as lib/posture.ts reads it,
+// so the hierarchy agrees with the Catalog, Compliance and the Builder. Still cluster-aware in STRUCTURE
 // only (the cluster header is inert on the single-cluster GA surface).
 
 import { useEffect, useMemo, useState } from "react";
-import { apiGet, fetchEffectivePolicy, fetchSettings, type EffectiveLayer, type SupersededLayer } from "../api/client";
+import { apiGet, fetchEffectivePolicy, type EffectiveLayer, type SupersededLayer } from "../api/client";
 import { fleetEnabled } from "../api/fleet";
 import { Panel } from "./common/Panel";
 import { useApi } from "../hooks/useApi";
 import { useApp } from "../store/AppContext";
+import { useEnforcementVerdict } from "../lib/posture";
 
 // The full conceptual precedence template, highest-priority-wins top→bottom. Each in-force layer from the API is
 // classified into one of these slots so the UI can show which slots are IN FORCE vs an EMPTY slot (not configured).
@@ -103,12 +104,11 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
       .map((x) => x.l);
   }, [eff.data?.layers]);
 
-  // The effective per-ns enforcement posture (Block / Monitor). "audit" is displayed as "Monitor".
-  const posture = useApi(
-    () => fetchSettings(namespace),
-    [namespace],
-    { cacheKey: `hier-posture:${namespace}`, staleTimeMs: 15_000 }
-  );
+  // The namespace's enforcement posture (Block / Monitor), through lib/posture like every other surface.
+  // This used to read GET /settings' merged `enforcement_mode` itself, so a namespace that only INHERITS
+  // the cluster-wide audit default read "Monitor" here, while the engine still blocks on its policies and
+  // the Catalog, Compliance and the Builder all said it enforces.
+  const verdict = useEnforcementVerdict(namespace);
   // "Block" is a CLAIM about enforcement, so it may only be made from a posture that was actually
   // read. Before, `posture.data?.enforcement_mode === "audit" ? ... : "Block"` sent every other state
   // down the Block branch: a failed GET /settings, the first render before it resolves, and — worst —
@@ -117,14 +117,15 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
   // /settings is DB-backed while the layer rows come from the in-memory loader, so the posture can 5xx
   // on its own and leave the table fully painted and confidently wrong: a namespace in Monitor (only
   // logging would-blocks) reads "Block — matching policies are enforced".
-  // Same settingsKnown treatment as TargetSettings.tsx and AppContext.
-  const postureKnown = posture.data != null && !posture.error && !posture.stale;
-  const modeLabel = !postureKnown ? "Unknown" : posture.data?.enforcement_mode === "audit" ? "Monitor" : "Block";
-  const modeTitle = !postureKnown
-    ? "Enforcement posture could not be read for this namespace — this is not a claim that policies are enforced"
-    : posture.data?.enforcement_mode === "audit"
-      ? "Monitor — evaluate & log would-block, but allow (observe mode)"
-      : "Block — matching policies are enforced";
+  // posture.ts answers "unknown" for all of those. (The table is not rendered for the all-namespaces scope.)
+  const postureKnown = verdict !== "unknown";
+  const modeLabel = verdict === "monitor" ? "Monitor" : verdict === "enforcing" ? "Block" : "Unknown";
+  const modeTitle =
+    verdict === "monitor"
+      ? "Monitor — this namespace sets Monitor itself: matches are evaluated and logged as would-block, and the call is allowed"
+      : verdict === "enforcing"
+        ? "Block — a match from a block-mode policy acts on the call. A Monitor default inherited from the cluster relaxes only calls no policy decides."
+        : "Enforcement posture could not be read for this namespace — this is not a claim that policies are enforced";
 
   // A layer the API reports as SUPERSEDED: present, but replaced by another layer and deciding nothing.
   // Today that is the chart's namespace baseline once the namespace's saved baseline controls replace it.
@@ -153,7 +154,7 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
   return (
     <Panel
       title="Resolution hierarchy"
-      sub="The exact layer stack the evaluator resolves for this agent class — highest-priority-wins, top to bottom. Overlays only TIGHTEN (never weaken). Rendered from real enforcement (/policies/effective), never re-derived."
+      sub="The exact layer stack the evaluator resolves for this agent class — highest-priority-wins, top to bottom. Overlays only TIGHTEN (never weaken). Rendered from the evaluator's own resolution (/policies/effective), never re-derived."
       action={
         // Cluster dimension — inert on the single-cluster GA surface; structural so fleet drops in later.
         <span data-testid={`${testId}-cluster`} title="Cluster scope (single-cluster on this deployment)"
@@ -200,7 +201,7 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
                 <td style={cell}>{l.overlay
                   ? <span data-testid={`${testId}-overlay`} style={{ color: "var(--accent)" }}>overlay (tighten-only)</span>
                   : <span style={{ color: "var(--text-secondary)" }}>base</span>}</td>
-                {/* The effective per-ns posture (Block / Monitor), from GET /settings. */}
+                {/* The namespace posture (Block / Monitor), from lib/posture. */}
                 <td style={cell}><span data-testid={`${testId}-mode`} data-mode={modeLabel.toLowerCase()} title={modeTitle}
                   style={{ fontSize: 11, color: modeLabel === "Monitor" ? "var(--escalate)" : "var(--text-secondary)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px", opacity: postureKnown ? 1 : 0.65 }}>{modeLabel}</span></td>
                 <td style={cell}><span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--good, #2ecc71)" }}>

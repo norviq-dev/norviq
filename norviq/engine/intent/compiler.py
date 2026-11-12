@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 
 from norviq.engine.empty_literals import EMPTY_ARRAY
 from norviq.engine.intent.schema import (
@@ -153,6 +154,29 @@ def _scoped_tool_names(norm: dict) -> list[str]:
     return sorted(names)
 
 
+# `input.derived` facts that are computed from the call's argument VALUES. A recorded call that kept
+# argument names but no values reconstructs to an input where every one of these is empty, so a
+# predicate over one cannot be judged from that record: it is not a refusal the policy would make.
+_ARGUMENT_VALUE_FIELDS = frozenset(
+    {"data_classes", "sql_tables", "sql_statements", "sql_normalized", "param_values", "param_bytes"}
+)
+
+
+def reads_argument_values(field: str) -> bool:
+    """Whether a predicate on `field` depends on the values of the call's arguments, for EVERY tool.
+
+    `verb` is not in this set and is not name-only either: `classify_tool` reads the payload when the
+    tool's name does not resolve, or when a run qualifier governs the verb. Whether it does depends on
+    the tool, so it is decided per call — see `CompiledIntent.verb_labels` and
+    `norviq.engine.capability.verb_reads_payload`.
+    """
+    return field.startswith(("param_paths.", "destinations.")) or field in _ARGUMENT_VALUE_FIELDS
+
+
+# Fields whose value comes from `classify_tool`, which reads the payload for some tool names.
+_VERB_FIELDS = frozenset({"verb"})
+
+
 @dataclass(frozen=True)
 class CompiledIntent:
     """The generated module plus the labels the near-miss explainer reports."""
@@ -161,6 +185,12 @@ class CompiledIntent:
     rule_ids: tuple[str, ...]
     # rule id -> ordered predicate labels, for a caller that wants to explain outside Rego.
     labels: dict
+    # rule id -> the subset of `labels` whose truth depends on argument VALUES. The dry run uses it to
+    # tell "this call is refused" from "this record cannot answer the question".
+    value_labels: dict = dc_field(default_factory=dict)
+    # rule id -> the subset of `labels` over `derived.verb`. They read argument values for a tool whose
+    # verb `classify_tool` takes from the payload (`verb_reads_payload`), and only for such a tool.
+    verb_labels: dict = dc_field(default_factory=dict)
 
 
 def _lit(value) -> str:
@@ -298,6 +328,8 @@ def compile_intent(intent: dict) -> CompiledIntent:
     norm = normalize_intent(intent)
     lines: list[str] = []
     labels: dict[str, list[str]] = {}
+    value_labels: dict[str, tuple[str, ...]] = {}
+    verb_labels: dict[str, tuple[str, ...]] = {}
     rule_ids: list[str] = []
 
     # commentSafe the class even though schema.py now rejects control characters: the header is the one
@@ -331,12 +363,21 @@ def compile_intent(intent: dict) -> CompiledIntent:
             # wrong plane simply fails to match rather than needing a second policy.
             preds.append((f"direction == {plane}",
                           f'object.get(input, "direction", "call") == {_lit(plane)}'))
-            for field, spec in sorted(rule["predicates"].items()):
-                preds.extend(_predicate(field, spec))
+            by_value: list[str] = []
+            by_verb: list[str] = []
+            for fname, spec in sorted(rule["predicates"].items()):
+                compiled_preds = _predicate(fname, spec)
+                preds.extend(compiled_preds)
+                if reads_argument_values(fname):
+                    by_value.extend(label for label, _ in compiled_preds)
+                elif fname in _VERB_FIELDS:
+                    by_verb.extend(label for label, _ in compiled_preds)
             # Appended AFTER the field predicates so the near-miss explainer reports a genuine
             # scope failure before a version-skew one when both are false.
             preds.extend(_availability_predicates(rule["predicates"]))
             labels[rid] = [label for label, _ in preds]
+            value_labels[rid] = tuple(by_value)
+            verb_labels[rid] = tuple(by_verb)
             lines.append(f"_predicates[{_lit(rid)}] = p {{")
             lines.append("\tp := {")
             for label, expr in preds:
@@ -425,4 +466,5 @@ def compile_intent(intent: dict) -> CompiledIntent:
     lines.append("}")
     lines.append("")
 
-    return CompiledIntent(rego="\n".join(lines), rule_ids=tuple(rule_ids), labels=labels)
+    return CompiledIntent(rego="\n".join(lines), rule_ids=tuple(rule_ids), labels=labels,
+                          value_labels=value_labels, verb_labels=verb_labels)

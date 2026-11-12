@@ -42,6 +42,9 @@ export function isRedirectOnlyPath(pathname: string): boolean {
 export type Posture = {
   namespace: string;
   mode: RuntimeSettings["enforcement_mode"] | null; // null = not yet loaded / API unreachable (unknown, NOT "block")
+  // Whether `mode` is the namespace's own setting or inherited from the cluster default. Only the first
+  // relaxes policy blocks (see lib/posture.ts). null = unknown, or an API that predates the field.
+  modeSource: NonNullable<RuntimeSettings["enforcement_mode_source"]> | null;
   applyMode: NonNullable<RuntimeSettings["apply_mode"]> | null; // "dry_run_only" = policy edits frozen
   loading: boolean;
 };
@@ -267,7 +270,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Governance posture of the selected scope. "all" (no ns param) returns the cluster DEFAULT
   // posture. postureVersion lets mutating pages (Target Settings / Settings) force a refetch so the
   // global banner reflects a mode flip immediately.
-  const [posture, setPosture] = useState<Posture>({ namespace: "all", mode: null, applyMode: null, loading: false });
+  const [posture, setPosture] = useState<Posture>({ namespace: "all", mode: null, modeSource: null, applyMode: null, loading: false });
   const [postureVersion, setPostureVersion] = useState(0);
   // Share the settings fetch with the pages that also read it (PolicyPacks uses the same
   // `settings:${ns}` useApi key), so a namespace switch doesn't issue a duplicate GET. refreshPosture bumps
@@ -281,6 +284,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setPosture({
         namespace: selectedNamespace,
         mode: s.enforcement_mode ?? null,
+        modeSource: s.enforcement_mode_source ?? null,
         applyMode: s.apply_mode ?? "enforce",
         loading: false
       });
@@ -299,7 +303,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       })
       .catch(() => {
         // Unknown posture is surfaced as unknown (null) — never assumed to be "block".
-        if (!cancelled) setPosture({ namespace: selectedNamespace, mode: null, applyMode: null, loading: false });
+        if (!cancelled) setPosture({ namespace: selectedNamespace, mode: null, modeSource: null, applyMode: null, loading: false });
       });
     return () => {
       cancelled = true;

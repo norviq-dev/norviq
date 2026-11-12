@@ -131,7 +131,8 @@ async def list_agents(
     # agents evaluated within the trust TTL — a quiet-but-governed agent vanished from the Agents view until
     # the whole fleet went idle (cache fully empty). Merging keeps the list at the full governed fleet.
     registry_rows = await _agents_from_registry(namespace)
-    rows = _merge_roster(registry_rows, warm_rows)[:limit]
+    # The freeze and cap come from the controls the engine enforces, never from the snapshot (_overlay_controls).
+    rows = await _overlay_controls(cache, _merge_roster(registry_rows, warm_rows)[:limit])
     log.debug("nrvq.api.agents.listed", count=len(rows), code="NRVQ-API-7030")
     return rows
 
@@ -260,6 +261,10 @@ async def _agents_from_registry(namespace: str) -> list[dict]:
                 # Same synthetic flag on the cold-cache (registry) path so the list reconciles
                 # with the graph whether it is served hot (trust:*) or cold (agent_registry).
                 "synthetic": is_synthetic_identity(agent_class, entry.spiffe_id),
+                # The durable copy of the admin controls. _overlay_controls replaces both with the store's
+                # copy, or with null when the store cannot be read (the engine then blocks every call).
+                "frozen": bool(entry.frozen),
+                "trust_cap": entry.trust_cap,
             }
         )
     return rows
@@ -302,7 +307,126 @@ async def _agent_from_registry(spiffe_id: str) -> dict | None:
         "signals": {},
         "dominant_signal": "",
         "recommendation": "",
+        "frozen": bool(entry.frozen),
+        "trust_cap": entry.trust_cap,
     }
+
+
+# The admin freeze and trust cap, as the engine enforces them. The trust calculator reads
+# agent_frozen:<id> and agent_trust_override:<id> fresh on every call (RedisCache.get_agent_flags). The
+# trust:<id> row and the registry's trust_score/trust_category are only the last snapshot an evaluation, or an
+# admin write, left behind. Every agent read used to take its freeze from that snapshot, so a freeze vanished
+# from the console once the admin's 30 s display row expired (the registry snapshot predates the freeze), and
+# a lifted freeze came back as "frozen" from a snapshot taken while it was in force.
+_UNSCORED = "unscored"
+# Whether a row's freeze and cap were read from the store the engine enforces ("live") or could not be read
+# ("unavailable"). The engine fails CLOSED when it cannot read them (RedisCache.get_agent_flags answers
+# frozen), so during a store outage every call it makes for the agent is blocked whatever the registry's
+# durable copy says. That copy used to be shown instead, and read "not frozen" for an agent the engine was
+# blocking. A row whose controls are unavailable now says it does not know: frozen and trust_cap null,
+# score null, category "unknown".
+CONTROLS_LIVE = "live"
+CONTROLS_UNAVAILABLE = "unavailable"
+_UNKNOWN = "unknown"
+
+
+async def _live_controls(cache, spiffe_ids: list[str]) -> dict[str, tuple[bool, float | None]] | None:
+    """{spiffe_id: (frozen, cap)} from the store the engine enforces, in one batched read. None when the store
+    cannot answer; the caller then reports the controls as unavailable."""
+    if not spiffe_ids:
+        return {}
+    from norviq.engine.cache import RedisCache
+
+    keys = [f"agent_frozen:{sid}" for sid in spiffe_ids] + [f"agent_trust_override:{sid}" for sid in spiffe_ids]
+    try:
+        client = cache._client()
+        mget = getattr(client, "mget", None)
+        values = list(await mget(keys)) if mget is not None else [await client.get(key) for key in keys]
+    except Exception as exc:  # noqa: BLE001 - reported; the rows say the controls are unavailable
+        log.warning("nrvq.api.agents.controls_read_failed", count=len(spiffe_ids), error=str(exc),
+                    code="NRVQ-API-7161")
+        return None
+    n = len(spiffe_ids)
+    return {sid: (bool(values[i]), RedisCache._parse_override(values[n + i])) for i, sid in enumerate(spiffe_ids)}
+
+
+async def _namespace_tiers(cache, namespace: str | None) -> tuple[float | None, float | None]:
+    """The trust tiers the engine uses for ``namespace`` (its per-namespace trust_threshold, else the defaults)."""
+    from norviq.engine.trust.calculator import TrustCalculator
+
+    raw = None
+    if namespace:
+        try:
+            raw = await cache.get_ns_settings(namespace)
+        except Exception:  # noqa: BLE001 - the engine also falls back to the global tiers
+            raw = None
+    threshold = raw.get("trust_threshold") if raw else None
+    return TrustCalculator._tiers(float(threshold) if threshold is not None else None)
+
+
+async def _overlay_controls(cache, rows: list[dict]) -> list[dict]:
+    """Every agent row with ``frozen`` and ``trust_cap`` set from the enforced controls, and its score and
+    category made consistent with them:
+
+    * the store cannot be read: ``controls`` is ``unavailable``, and ``frozen``, ``trust_cap`` and ``score`` are
+      ``None`` with category ``unknown``. Not the registry's copy: the engine blocks every call while it cannot
+      read the store, so a "not frozen" from that copy would contradict what is enforced.
+    * frozen: score 0.0, category ``frozen``, whatever the snapshot says.
+    * not frozen, but the snapshot says ``frozen`` (taken while a since-lifted freeze was in force) or
+      ``unscored`` (held at a cap since removed or raised, see _persist_trust_control): the score is not known
+      until the agent's next call, so it is ``None`` with category ``unscored``.
+    * capped below the snapshot: the score the engine will use, ``min(snapshot, cap)``, in the band the engine
+      would put it (the calculator's own tiers and recommendation).
+    """
+    from norviq.engine.trust.calculator import TrustCalculator
+
+    live = await _live_controls(cache, [row["spiffe_id"] for row in rows])
+    if live is None:
+        return [{**row, "controls": CONTROLS_UNAVAILABLE, "frozen": None, "trust_cap": None, "score": None,
+                 "category": _UNKNOWN, "recommendation": "", "dominant_signal": ""} for row in rows]
+    tiers: dict[str | None, tuple[float | None, float | None]] = {}
+    out: list[dict] = []
+    for row in rows:
+        sid = row["spiffe_id"]
+        frozen, cap = live[sid]
+        row = {**row, "controls": CONTROLS_LIVE, "frozen": frozen, "trust_cap": cap}
+        score = row.get("score")
+        if frozen:
+            row.update(score=0.0, category="frozen", recommendation="freeze")
+        elif (row.get("category") or "").lower() in ("frozen", _UNSCORED):
+            row.update(score=None, category=_UNSCORED, recommendation="")
+        elif cap is not None and score is not None and score > cap:
+            ns = row.get("namespace") or _namespace_from_spiffe(sid)
+            if ns not in tiers:
+                tiers[ns] = await _namespace_tiers(cache, ns)
+            high, low = tiers[ns]
+            category = TrustCalculator._categorize(None, cap, high_thr=high, low_thr=low)  # type: ignore[arg-type]
+            row.update(score=cap, category=category,
+                       recommendation=TrustCalculator._recommend(None, cap, category))  # type: ignore[arg-type]
+            if category != "high":
+                row["dominant_signal"] = "manual_override"  # what the calculator names a cap that bit
+        out.append(row)
+    return out
+
+
+async def served_agent_rows(request: Request, registry_rows: list[dict]) -> list[dict]:
+    """``registry_rows`` (shaped as _agents_from_registry builds them) as ``GET /agents`` serves them: the warm
+    ``trust:*`` snapshot over the registry's (_merge_roster), then the freeze and cap from the store the engine
+    enforces (_overlay_controls). For a caller that selects its own slice of the registry, such as the console
+    search, so it cannot show a different freeze or score for an agent than the Agent Monitor does.
+
+    A snapshot read that fails leaves the registry's snapshot in place (logged); the controls overlay reports
+    its own failure in the rows."""
+    if not registry_rows:
+        return []
+    cache = request.app.state.cache
+    ids = [row["spiffe_id"] for row in registry_rows]
+    try:
+        warm = await _hydrate_agent_rows(request, cache, ids, {})
+    except Exception as exc:  # noqa: BLE001 - reported; the registry snapshot is served
+        log.warning("nrvq.api.agents.snapshot_read_failed", count=len(ids), error=str(exc), code="NRVQ-API-7162")
+        warm = []
+    return await _overlay_controls(cache, _merge_roster(registry_rows, warm))
 
 
 def _mark_truncated(response: Response, truncated: bool, spiffe_id: str, view: str) -> None:
@@ -451,17 +575,18 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
     scope_ns = read_namespace(user, None)  # None => admin/all; own ns for a tenant; 403 for a no-scope viewer
     if scope_ns and _namespace_from_spiffe(spiffe_id) != scope_ns:
         raise HTTPException(status_code=404, detail="Agent not found")
-    trust = await request.app.state.cache.get_trust(spiffe_id)
+    cache = request.app.state.cache
+    trust = await cache.get_trust(spiffe_id)
     if trust is None:
         # Cold-cache parity with list_agents (which falls back to the persistent registry when the
         # trust:* cache is cold): the hot entry has a TTL, so without this a listed agent's detail view
         # 404s once its entry lapses. Scope was already enforced above, so this fallback stays tenant-safe.
         fallback = await _agent_from_registry(spiffe_id)
         if fallback is not None:
-            return fallback
+            return (await _overlay_controls(cache, [fallback]))[0]
         raise HTTPException(status_code=404, detail="Agent not found")
     details = await _trust_details(request, spiffe_id, trust.factors)
-    return {
+    row = {
         "spiffe_id": spiffe_id,
         "score": trust.score,
         "category": trust.category.lower(),
@@ -470,6 +595,7 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
         "dominant_signal": details["dominant_signal"],
         "recommendation": details["recommendation"],
     }
+    return (await _overlay_controls(cache, [row]))[0]
 
 
 # The agent ids the product accepts — one rule, norviq/engine/identity.py::is_controllable_spiffe_id, shared
@@ -940,7 +1066,11 @@ async def update_trust(
     cache = request.app.state.cache
     frozen = body.score == 0
     cap = body.score if (0 < body.score < 1.0) else None
-    display = TrustScore(score=body.score, category="frozen" if frozen else "")
+    # Only a freeze writes a displayed score: it IS the score the engine uses (0, frozen). A cap or a lift used
+    # to write body.score as the agent's current trust, so a cap of 0.8 on an agent scoring 0.455 read "high 0.80"
+    # for 30 s and a lift read "high 1.00": numbers the engine never used. Reads take the cap from the enforced
+    # controls instead and show min(score, cap) (_overlay_controls).
+    display = TrustScore(score=0.0, category="frozen") if frozen else None
     try:
         async with _agent_lock(db, spiffe_id) as conn:
             try:
@@ -981,7 +1111,8 @@ async def update_trust(
         raise HTTPException(status_code=503, detail=detail) from None if contended else exc
     log.info("nrvq.api.agent.trust_updated", spiffe_id=spiffe_id, score=body.score, frozen=frozen, cap=cap,
              actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7031")
-    return {"spiffe_id": spiffe_id, "score": display.score, "category": display.category.lower()}
+    # The control state now in force, not a score: the agent's trust is what its reads say.
+    return {"spiffe_id": spiffe_id, "frozen": frozen, "trust_cap": cap}
 
 
 async def _tighten(conn, cache, spiffe_id, frozen, cap, display, score, user) -> None:
@@ -1106,16 +1237,41 @@ async def _still_connected(conn) -> bool:
         return False
 
 
+# A trust snapshot within this of the cap it was taken under is the cap's doing, not a computed score: the
+# calculator stores round(min(computed, cap), 4), and a cap is stored with more digits than that.
+_CAP_HELD_EPSILON = 1e-4
+
+
+def _cap_held_snapshot(table, cap: float | None):
+    """SQL: the row's trust snapshot was held down by its current cap, and ``cap`` (the new one; None for none)
+    no longer holds it there. Such a snapshot is not a score the engine will use again: the calculator stored
+    min(computed, old cap), and the computed part is not known until the agent's next call."""
+    from sqlalchemy import and_, true
+
+    loosened = true() if cap is None else table.c.trust_cap < cap
+    return and_(table.c.trust_cap.isnot(None), loosened,
+                table.c.trust_score >= table.c.trust_cap - _CAP_HELD_EPSILON)
+
+
 async def _persist_trust_control(conn, spiffe_id: str, frozen: bool, cap: float | None, score: float) -> None:
     """Write the freeze/cap to agent_registry (uncommitted), the durable copy warm_agent_overrides
     re-seeds Redis from.
 
     A freeze or cap UPSERTS: the previous plain UPDATE matched no row for an identity that had never called
     in (or had been deregistered), so the control lived only in Redis while the route said 200. A clear only
-    UPDATEs — with no row there is nothing durable to clear, and inserting one would list a phantom agent."""
+    UPDATEs — with no row there is nothing durable to clear, and inserting one would list a phantom agent.
+
+    A cap removed or raised (a freeze clears it too) also marks a snapshot the old cap held down as
+    ``Unscored`` (_cap_held_snapshot). It used to stay: after Remove Cap every read showed the capped score,
+    with no cap beside it, until the agent's next call. The store's copy of the snapshot is dropped by the
+    same rule (RedisCache._FENCED_CONTROL_LUA)."""
+    from sqlalchemy import case
     from sqlalchemy.dialects.postgresql import insert
 
     from norviq.api.db.models import AgentRegistryEntry
+
+    table = AgentRegistryEntry.__table__
+    category = case((_cap_held_snapshot(table, cap), "Unscored"), else_=table.c.trust_category)
 
     if frozen or cap is not None:
         now = datetime.now(timezone.utc)
@@ -1139,12 +1295,16 @@ async def _persist_trust_control(conn, spiffe_id: str, frozen: bool, cap: float 
         )
         # Only the two control columns on conflict: the row's identity, score and counters belong to the
         # evaluator's write-through and are not the admin's to overwrite.
-        stmt = stmt.on_conflict_do_update(index_elements=["spiffe_id"], set_={"frozen": frozen, "trust_cap": cap})
+        stmt = stmt.on_conflict_do_update(index_elements=["spiffe_id"],
+                                          set_={"frozen": frozen, "trust_cap": cap, "trust_category": category})
         await conn.execute(stmt)
     else:
+        from sqlalchemy import update
+
+        # In an UPDATE every right-hand side reads the row as it was, so `category` sees the cap being removed.
         await conn.execute(
-            text("UPDATE agent_registry SET frozen = false, trust_cap = NULL WHERE spiffe_id = :s"),
-            {"s": spiffe_id},
+            update(table).where(table.c.spiffe_id == spiffe_id)
+            .values(frozen=False, trust_cap=None, trust_category=category)
         )
 
 

@@ -114,7 +114,24 @@ export type ProposeResponse = {
   /** tool name -> the argument paths that tool's calls carried. A MISSING entry is not an empty one. */
   observed_params?: Record<string, unknown>;
   observed_params_truncated?: boolean | string[];
+  /** How many of `sampled` the rules were built from: the calls the engine ALLOWED. */
+  proposed_from?: number;
+  /** Tools whose every recorded call was blocked or would-blocked. Left out of the proposal. */
+  excluded_tools?: Array<ObservedDecisions & { tool_name: string }>;
+  /** Every tool with at least one refused call, keyed by tool name. */
+  observed_decisions?: Record<string, ObservedDecisions>;
 };
+
+/** What the engine did with one tool's recorded calls. `blocked` includes escalations. */
+export type ObservedDecisions = { calls: number; allowed: number; blocked: number; would_block: number };
+
+/** "3 blocked, 2 would-blocked", skipping a zero half. */
+export function refusalPhrase(d: ObservedDecisions): string {
+  const parts: string[] = [];
+  if (d.blocked) parts.push(`${d.blocked} blocked`);
+  if (d.would_block) parts.push(`${d.would_block} would-blocked`);
+  return parts.join(", ");
+}
 
 const DETAIL_RANK: Record<ParamsDetail, number> = { none: 0, keys: 1, masked: 2 };
 
@@ -368,12 +385,30 @@ export type BlockedCall = BlockedCallDetail & { [key: string]: unknown };
 export type DryRunResponse = {
   total: number;
   would_allow: number;
+  /** Calls the intent refuses. Excludes `cannot_evaluate`. */
   would_block: number;
+  /** Calls recorded without argument values that every remaining rule refused only on an argument
+   *  predicate, or on a verb predicate for a tool whose verb comes from its arguments. The replay cannot
+   *  say what the policy would do with them. */
+  cannot_evaluate?: number;
   coverage: Record<string, number>;
+  /** rule id -> how many `cannot_evaluate` calls that rule might have allowed, had values been kept. */
+  unevaluated?: Record<string, number>;
   unused_rules: string[];
   blocked: BlockedCall[];
+  unevaluable?: BlockedCall[];
   params_available?: boolean;
+  replayed_without_values?: number;
+  /** The API's caveats about what the replay could see. */
+  params_notes?: string[];
 };
+
+/** "send_email × 6, get_order × 1" for a list of calls, most frequent first. */
+function toolTally(calls: BlockedCall[]): Array<{ tool: string; n: number }> {
+  const counts = new Map<string, number>();
+  for (const c of calls) counts.set(c.tool_name, (counts.get(c.tool_name) ?? 0) + 1);
+  return [...counts.entries()].map(([tool, n]) => ({ tool, n })).sort((a, b) => b.n - a.n || a.tool.localeCompare(b.tool));
+}
 
 /**
  * Group identical refusals.
@@ -507,6 +542,45 @@ function ArgLookalikeNote({ lookalikes, testId }: { lookalikes: Lookalike[]; tes
         spelling does not cover this one. Scoping the name you can read would leave the name the traffic
         actually carried unconstrained.
       </span>
+    </div>
+  );
+}
+
+/**
+ * A rule grants a tool the engine ALSO refused on some recorded calls. The proposal keeps it (it was
+ * allowed at least once) but the grant is an outright allow, so the operator is told how often the
+ * engine said no before it is saved.
+ */
+function RuleRefusals({ rule, decisions }: { rule: IntentRule; decisions?: Record<string, ObservedDecisions> }) {
+  if (!decisions) return null;
+  const hits = toolsOfRule(rule)
+    .map((t) => ({ tool: t, d: decisions[t] }))
+    .filter((x): x is { tool: string; d: ObservedDecisions } => Boolean(x.d) && x.d.calls > x.d.allowed);
+  if (hits.length === 0) return null;
+  return (
+    <div
+      data-testid={`rule-${rule.id}-refusals`}
+      style={{
+        padding: "7px 10px",
+        borderRadius: 8,
+        border: `1px solid ${ESCALATE_BORDER}`,
+        background: ESCALATE_WASH,
+        fontSize: 12,
+        lineHeight: 1.5,
+        color: "var(--text-secondary)"
+      }}
+    >
+      <strong style={{ color: "var(--escalate)" }}>Also refused in traffic.</strong>{" "}
+      {hits.map(({ tool, d }, i) => (
+        <span key={tool}>
+          {i > 0 && "; "}
+          <ArgName name={tool} />: {d.calls - d.allowed} of {d.calls} recorded call{d.calls === 1 ? "" : "s"} refused (
+          {refusalPhrase(d)})
+        </span>
+      ))}
+      . The rule was built from the allowed calls but grants the tool outright, so it allows the refused
+      calls too unless another layer, such as the namespace baseline, still refuses them. Narrow the rule,
+      or remove the tool, if those refusals were right.
     </div>
   );
 }
@@ -868,6 +942,13 @@ export function Intents() {
     return tools.size;
   }, [rules]);
   const grouped = useMemo(() => (report ? groupBlocked(report.blocked) : []), [report]);
+  const cannotEvaluate = report?.cannot_evaluate ?? 0;
+  const unevaluableTally = useMemo(() => toolTally(report?.unevaluable ?? []), [report]);
+  // Shown whenever the replay ran on calls without their argument values, not only when one of them
+  // was set aside: the same blind spot can make an argument rule look satisfied when it is not.
+  const replayCaveats = report && ((report.replayed_without_values ?? 0) > 0 || cannotEvaluate > 0)
+    ? report.params_notes ?? []
+    : [];
 
   // How much this proposal could see of the arguments its traffic carried, and what those arguments
   // were called. Both derived defensively: an unreadable or self-contradicting response reads as
@@ -1220,7 +1301,47 @@ export function Intents() {
             {report && (
               <StatTile label="Would block" value={report.would_block} color={report.would_block ? "var(--block)" : undefined} />
             )}
+            {report && cannotEvaluate > 0 && (
+              <StatTile
+                label="Cannot evaluate"
+                value={cannotEvaluate}
+                color="var(--escalate)"
+                sub="no argument values recorded"
+              />
+            )}
           </div>
+
+          {/* THE REPLAY'S OWN LIMIT, stated beside the numbers it qualifies. The API has always sent
+              these caveats; the console dropped them, so a rule refused only because the audit log
+              kept no argument values read as "would block" and "matched nothing". */}
+          {replayCaveats.length > 0 && (
+            <div
+              data-testid="dryrun-caveat"
+              role="status"
+              style={{
+                fontSize: 12.5,
+                lineHeight: 1.6,
+                padding: "9px 11px",
+                borderRadius: 10,
+                border: `1px solid ${ESCALATE_BORDER}`,
+                background: ESCALATE_WASH,
+                color: "var(--text-secondary)"
+              }}
+            >
+              <strong style={{ color: "var(--escalate)" }}>
+                {cannotEvaluate > 0
+                  ? `${cannotEvaluate} call${cannotEvaluate === 1 ? "" : "s"} could not be evaluated: no argument values were recorded.`
+                  : "This replay ran on calls without their argument values."}
+              </strong>{" "}
+              {cannotEvaluate > 0 &&
+                "They are not counted under Would block. Each was refused only on a rule's argument conditions, or on a verb its arguments decide, which the replay cannot check without values."}
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                {replayCaveats.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <Panel
             title="Proposed intent"
@@ -1330,6 +1451,42 @@ export function Intents() {
                 on all {rules.length}.
               </div>
             )}
+            {/* Tools the engine refused on every recorded call. The proposal is an allow list built
+                from ALLOWED calls only, so these are left out rather than granted; saying so is what
+                stops the gap from reading as an oversight to be "fixed" by adding them back. */}
+            {(proposal.excluded_tools?.length ?? 0) > 0 && (
+              <div
+                data-testid="excluded-tools"
+                role="status"
+                style={{
+                  fontSize: 12.5,
+                  lineHeight: 1.6,
+                  marginBottom: 10,
+                  padding: "9px 11px",
+                  borderRadius: 10,
+                  border: `1px solid ${ESCALATE_BORDER}`,
+                  background: ESCALATE_WASH,
+                  color: "var(--text-secondary)"
+                }}
+              >
+                <strong style={{ color: "var(--escalate)" }}>
+                  Left out: {proposal.excluded_tools!.length} tool{proposal.excluded_tools!.length === 1 ? "" : "s"} that
+                  were refused on every recorded call.
+                </strong>{" "}
+                These rules are built only from calls that were allowed
+                {typeof proposal.proposed_from === "number" ? ` (${proposal.proposed_from} of ${proposal.sampled})` : ""}.
+                They stay denied under this allowlist: granting a tool something already refuses would loosen
+                this class's policy.
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {proposal.excluded_tools!.map((t) => (
+                    <li key={t.tool_name} data-testid={`excluded-tool-${t.tool_name}`}>
+                      <ArgName name={t.tool_name} />: all {t.calls} recorded call{t.calls === 1 ? "" : "s"} refused (
+                      {refusalPhrase(t)})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {rules.map((rule) => (
                 <div key={rule.id} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1339,6 +1496,17 @@ export function Intents() {
                     unused={Boolean(report?.unused_rules?.includes(rule.id))}
                     hoisted={hoisted.map((t) => t.raw)}
                   />
+                  {(report?.unevaluated?.[rule.id] ?? 0) > 0 && (
+                    <div
+                      data-testid={`rule-${rule.id}-unevaluated`}
+                      style={{ fontSize: 12, lineHeight: 1.5, color: "var(--text-muted)", paddingLeft: 2 }}
+                    >
+                      {report!.unevaluated![rule.id]} more call{report!.unevaluated![rule.id] === 1 ? "" : "s"} to this
+                      rule's tools could not be evaluated: no argument values were recorded, so the replay cannot tell
+                      whether they meet its argument conditions.
+                    </div>
+                  )}
+                  <RuleRefusals rule={rule} decisions={proposal.observed_decisions} />
                   {/* The rule as WRITTEN is above; this is the traffic it will meet. Directly beneath
                       it, because the comparison is the point and a band elsewhere on the page is a
                       comparison the operator has to do from memory. */}
@@ -1352,16 +1520,27 @@ export function Intents() {
 
       {report && (
         <Panel
-          title={report.would_block ? "What this would have refused" : "Nothing legitimate would break"}
+          title={
+            report.would_block
+              ? "What this would have refused"
+              : cannotEvaluate > 0
+                ? "Nothing measured would break"
+                : "Nothing legitimate would break"
+          }
           sub={
             report.would_block
               ? "The closest rule and the clause that failed — tighten the rule, or accept the denial."
-              : "Every recorded call is covered by a rule. That is the point at which this is safe to draft."
+              : cannotEvaluate > 0
+                ? "Every call the replay could evaluate is covered by a rule. The rest need argument values to judge."
+                : "Every recorded call is covered by a rule. That is the point at which this is safe to draft."
           }
         >
           {report.would_block === 0 ? (
             <div style={{ display: "flex", gap: 10, alignItems: "center" }} data-testid="no-blocks">
-              <CheckCircle2 size={16} /> {report.total} recorded calls replayed, none refused.
+              <CheckCircle2 size={16} />{" "}
+              {cannotEvaluate > 0
+                ? `${report.total - cannotEvaluate} of ${report.total} recorded calls evaluated, none refused.`
+                : `${report.total} recorded calls replayed, none refused.`}
             </div>
           ) : (
             <div data-testid="near-misses">
@@ -1373,6 +1552,18 @@ export function Intents() {
               ))}
             </div>
           )}
+          {unevaluableTally.length > 0 && (
+            <div data-testid="unevaluable-calls" style={{ marginTop: 12, fontSize: 12.5, color: "var(--text-secondary)" }}>
+              <strong>Cannot evaluate (no argument values):</strong>{" "}
+              {unevaluableTally.map(({ tool, n }, i) => (
+                <span key={tool}>
+                  {i > 0 && ", "}
+                  <ArgName name={tool} /> × {n}
+                </span>
+              ))}
+              . Turn on masked parameter capture to judge these calls.
+            </div>
+          )}
         </Panel>
       )}
 
@@ -1382,7 +1573,7 @@ export function Intents() {
             <FileText size={16} style={{ flex: "none", marginTop: 2 }} />
             <div>
               Draft <code>{savedDraft}</code> saved and <strong>not enforcing</strong>. Review and apply it
-              from Policy Catalog — that is the only place enforcement begins.
+              from Policy Catalog — that is the only place a draft becomes a live policy.
             </div>
           </div>
         </Panel>

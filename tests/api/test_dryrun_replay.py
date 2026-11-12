@@ -4,12 +4,17 @@
 leads with the DECISION FLIPS (currently-allowed calls it would newly block) — not the old 'global
 historical block rate' which reported what the LIVE policy already did, independent of the candidate."""
 
+import json
+import shutil
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from norviq.api.routers.policies import PolicyCreate, _opa_input_from_record, _replay_recent
+from norviq.engine.evaluator import OPAEvaluator
+from norviq.engine.intent.dryrun import opa_subprocess_evaluator
 
 
 def _rec(tool_name, decision, agent_class="report-gen", ns="analytics", framework="", payload=None):
@@ -240,3 +245,140 @@ class TestRecommendationCannotClearAnUnmeasuredReplay:
         assert out["eval_errors"] == 10
         assert "safe to deploy" not in out["recommendation"]
         assert "evaluator failed" in out["recommendation"]
+
+
+_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "builder_composition" / "allowlist_refined_grants_class.json"
+needs_opa = pytest.mark.skipif(shutil.which("opa") is None, reason="needs the opa binary")
+
+
+def _allowlist_rego() -> str:
+    """A real Visual Builder allowlist (pinned to builderCompile.ts by builderCompositionFixtures.test.ts):
+    read-only refinement on; grants get_order (id ~ ^[0-9]+$), update_order (status in open/closed),
+    list_orders (limit <= 100 AND call_depth <= 2), query_run and lookup_widget (id required AND
+    verb == read)."""
+    return json.loads(_FIXTURE.read_text(encoding="utf-8"))["rego"]
+
+
+class _OpaReplay:
+    """The candidate evaluated by the real opa, over the input document the engine itself builds."""
+
+    def __init__(self):
+        self._engine = OPAEvaluator.__new__(OPAEvaluator)  # only the pure input builders are used
+        self.keys: list[str] = []
+
+    def _build_input(self, event, trust):
+        return self._engine._build_input(event, trust)
+
+    async def _evaluate_opa(self, key, ns, cls, opa_input, rego):
+        self.keys.append(key)
+        return opa_subprocess_evaluator(rego, opa_input)
+
+
+def _support(tool, payload):
+    return _rec(tool, "allow", agent_class="support-agent", ns="default", payload=payload)
+
+
+@pytest.mark.asyncio
+class TestArgumentRefusalsWithoutValues:
+    """A record kept without argument values replays with no arguments, so an argument constraint
+    refuses it whatever the real call carried. Such a refusal is `cannot_evaluate`, not newly blocked.
+
+    The rule id the builder gives it, `intent_constraint_violation`, is not enough to say so. The builder
+    emits it whether or not a refinement failed too, a grant may carry a fact that reads no argument, and
+    hand-written rego can emit the same id for anything. Each of those used to be set aside; each is a
+    block whatever the arguments were."""
+
+    @needs_opa
+    async def test_only_a_refusal_down_to_argument_values_is_set_aside(self):
+        rows = [
+            _support("get_order", {"param_keys": ["id"]}),                    # grant reads values only
+            _support("get_order", {"masked_params": {"id": "abc"}}),          # value kept: really refused
+            _support("get_order", {"masked_params": {"id": "42"}}),           # value kept: allowed
+            _support("update_order", {"param_keys": ["status"]}),             # read-only refinement fails too
+            _support("list_orders", {"param_keys": ["limit"], "call_depth": 3}),  # call_depth fact fails too
+            _support("query_run", {"param_keys": ["id"]}),                    # verb comes from the payload
+            _support("lookup_widget", {"param_keys": ["id"]}),                # verb fixed by the name
+            _support("delete_kb", {"param_keys": ["id"]}),                    # not allowlisted
+        ]
+        body = PolicyCreate(namespace="default", agent_class="support-agent", rego_source=_allowlist_rego())
+        out = await _replay_recent(_OpaReplay(), _FakeSession(rows), body, datetime.now(timezone.utc))
+        assert out["eval_errors"] == 0
+        assert out["total_records_checked"] == 8
+        assert sorted(s["tool_name"] for s in out["cannot_evaluate_samples"]) == ["get_order", "query_run"]
+        assert out["cannot_evaluate"] == 2
+        assert (out["would_allow"], out["would_block"], out["newly_blocked"]) == (1, 5, 5)
+        flips = {s["tool_name"]: s["rule_id"] for s in out["newly_blocked_samples"]}
+        assert flips == {
+            "get_order": "intent_constraint_violation",
+            "update_order": "intent_constraint_violation",
+            "list_orders": "intent_constraint_violation",
+            "lookup_widget": "intent_constraint_violation",
+            "delete_kb": "intent_default_deny",
+        }
+
+    @needs_opa
+    async def test_a_refinement_that_also_refuses_keeps_the_call_a_block(self):
+        """THE case: update_order is not a read, so the read-only refinement refuses it whatever its
+        arguments. Its grant fails as well on an empty replay, and the builder then labels it
+        `intent_constraint_violation`."""
+        ev = _OpaReplay()
+        body = PolicyCreate(namespace="default", agent_class="support-agent", rego_source=_allowlist_rego())
+        out = await _replay_recent(ev, _FakeSession([_support("update_order", {"param_keys": ["status"]})]),
+                                   body, datetime.now(timezone.utc))
+        assert out["newly_blocked_samples"] == [
+            {"tool_name": "update_order", "was": "allow", "now": "block", "rule_id": "intent_constraint_violation"}]
+        assert out["cannot_evaluate"] == 0
+        # The verdict came from the probe with every grant assumed met, not from the rule id.
+        assert any(k.endswith(":grants-met") for k in ev.keys)
+
+    @needs_opa
+    async def test_a_verb_fact_on_a_tool_whose_name_fixes_the_verb_stays_a_block(self):
+        """Pinned on purpose. lookup_widget's grant failed on a value-less replay; it holds `id required`
+        (an argument) and `verb == read` (fixed by the name). The replay cannot say which line failed, so
+        the call is counted as a block. Here it was the argument, so this over-reports by one; the
+        opposite choice would hide every refusal a name-fixed fact makes."""
+        body = PolicyCreate(namespace="default", agent_class="support-agent", rego_source=_allowlist_rego())
+        out = await _replay_recent(_OpaReplay(), _FakeSession([_support("lookup_widget", {"param_keys": ["id"]})]),
+                                   body, datetime.now(timezone.utc))
+        assert (out["cannot_evaluate"], out["would_block"]) == (0, 1)
+
+    async def test_the_rule_id_from_rego_that_is_not_a_builder_allowlist_proves_nothing(self):
+        """Hand-written rego can emit `intent_constraint_violation` for any reason. No graph describes it,
+        so its refusal of a value-less record is counted as a block."""
+
+        class _Ev(_FakeEvaluator):
+            async def _evaluate_opa(self, key, ns, cls, opa_input, rego):
+                self.calls += 1
+                return {"decision": "block", "rule_id": "intent_constraint_violation", "reason": ""}
+
+        body = PolicyCreate(namespace="analytics", agent_class="report-gen", rego_source="package x")
+        rows = [_rec("send_email", "allow", payload={"param_keys": ["to"]})]
+        out = await _replay_recent(_Ev(lambda _t: "block"), _FakeSession(rows), body, datetime.now(timezone.utc))
+        assert (out["cannot_evaluate"], out["would_block"], out["newly_blocked"]) == (0, 1, 1)
+
+    @needs_opa
+    async def test_the_recommendation_does_not_call_unjudged_calls_safe(self):
+        from types import SimpleNamespace as NS
+
+        from norviq.api.routers.policies import dry_run_policy
+
+        rows = [_support("get_order", {"param_keys": ["id"]}) for _ in range(6)]
+        request = NS(app=NS(state=NS(evaluator=_OpaReplay())))
+        body = PolicyCreate(namespace="default", agent_class="support-agent", rego_source=_allowlist_rego())
+        out = await dry_run_policy(body, request, session=_FakeSession(rows), user={"role": "admin", "sub": "t"},
+                                   _target=None)
+        assert out["newly_blocked"] == 0
+        assert out["cannot_evaluate"] == 6
+        assert "safe to deploy" not in out["recommendation"]
+        assert "6 further calls could not be evaluated" in out["recommendation"]
+
+
+def test_the_advisory_names_what_is_set_aside_and_what_is_not(monkeypatch):
+    """The advisory used to say any call refused only on an argument constraint was set aside. Only a
+    builder allowlist's per-tool grant is; every other value rule is counted as it replays."""
+    from norviq.api.routers import policies
+
+    monkeypatch.setattr(policies.settings, "audit_capture_masked_params", False)
+    text = policies._dryrun_advisory(5, 0)
+    assert "Visual Builder allowlist refused only on its per-tool argument grant" in text
+    assert "Any other refusal is counted as it replays" in text

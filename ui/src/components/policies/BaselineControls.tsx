@@ -36,6 +36,7 @@ import {
 import { Panel } from "../common/Panel";
 import { invalidateApiCache, useApi } from "../../hooks/useApi";
 import { useMutationScope } from "../../hooks/useMutationScope";
+import { useEnforcementVerdict } from "../../lib/posture";
 
 /** Wire value -> what an operator actually calls it. "deny" is shown as Enforce; "audit" is avoided
  *  entirely here because it already means a DECISION elsewhere in the console (and the Audit Log). */
@@ -168,10 +169,19 @@ const ENFORCED_AS_COPY: Record<string, string> = {
   audit: "recorded, call proceeds",
 };
 
-/** What THIS control's current effect actually does. Only `deny` varies by control. */
-function consequenceOf(control: { enforced_as?: string }, effect: BaselineEffect): string {
+/** In a Monitor namespace the engine turns a control's block or escalate into a logged would-block and
+ *  lets the call through, so "call is blocked" on an Enforce row was false there. */
+const MONITOR_ENFORCED_AS_COPY: Record<string, string> = {
+  block: "would be blocked · logged (Monitor)",
+  escalate: "would be held · logged (Monitor)",
+  audit: "recorded, call proceeds",
+};
+
+/** What THIS control's current effect actually does in this namespace. Only `deny` varies by control. */
+function consequenceOf(control: { enforced_as?: string }, effect: BaselineEffect, monitor = false): string {
   if (effect !== "deny") return CONSEQUENCE[effect];
-  return ENFORCED_AS_COPY[control.enforced_as ?? "block"] ?? CONSEQUENCE.deny;
+  const copy = monitor ? MONITOR_ENFORCED_AS_COPY : ENFORCED_AS_COPY;
+  return copy[control.enforced_as ?? "block"] ?? CONSEQUENCE.deny;
 }
 
 /** What promoting THIS control would have done to the flagged calls — not "blocked" for all of them.
@@ -200,6 +210,11 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
     staleTimeMs: 30_000,
   });
   const { canMutate, blockedReason } = useMutationScope();
+  // The rows say what Enforce does. In a Monitor namespace that is "logged as a would-block", whatever the
+  // row is set to; only the intro used to say so, while the strip, the rows and the save message all
+  // claimed enforcement.
+  const verdict = useEnforcementVerdict(namespace);
+  const monitor = verdict === "monitor";
 
   // Pending edits, keyed by control id. Empty === "showing exactly what the server reports", which is
   // what makes the dirty check below honest rather than a guess.
@@ -292,9 +307,12 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
       }
       setPending({});
       await controls.refetch();
+      const n = result.enforcing.length;
       setMsg(
-        result.enforcing.length
-          ? `Saved — ${result.enforcing.length} control${result.enforcing.length === 1 ? "" : "s"} now enforcing`
+        n && monitor
+          ? `Saved — ${n} control${n === 1 ? "" : "s"} at Enforce, but ${namespace} is in Monitor: matches are logged as would-block and nothing is blocked live`
+          : n
+          ? `Saved — ${n} control${n === 1 ? "" : "s"} now enforcing`
           : "Saved — nothing is enforcing; all traffic proceeds and non-compliance is recorded",
       );
     } catch (e) {
@@ -350,7 +368,16 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
       {!controls.loading && !controls.error && rows.length > 0 && (
         <>
           <div data-testid="baseline-counts" style={{ display: "flex", gap: 14, fontSize: 12, marginBottom: 10, flexWrap: "wrap" }}>
-            <span style={{ color: "var(--block, #ff5c7c)" }}>{counts.deny} enforcing</span>
+            {monitor ? (
+              <span data-testid="baseline-counts-monitor" style={{ color: "var(--escalate)" }}>
+                {counts.deny} at Enforce · would-block only (Monitor)
+              </span>
+            ) : verdict === "enforcing" ? (
+              <span style={{ color: "var(--block, #ff5c7c)" }}>{counts.deny} enforcing</span>
+            ) : (
+              // Posture not read: say what the rows are set to, not what the engine does with them.
+              <span style={{ color: "var(--text-secondary)" }}>{counts.deny} at Enforce</span>
+            )}
             <span style={{ color: "var(--text-secondary)" }}>{counts.monitor} monitoring</span>
             <span style={{ color: "var(--text-muted)" }}>{counts.off} off</span>
             {scanned !== null && (
@@ -455,7 +482,7 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, justifySelf: "end" }}>
                     <div style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "right", whiteSpace: "nowrap" }}>
-                      {consequenceOf(c, current)}
+                      {consequenceOf(c, current, monitor)}
                     </div>
                     <div className="tabs-kit" style={{ display: "flex", flex: "none" }}>
                       {(["off", "monitor", "deny"] as const).map((eff) => (
@@ -464,7 +491,7 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
                           data-testid={`baseline-${c.id}-${eff}`}
                           className={`tab-kit${current === eff ? " active" : ""}`}
                           disabled={!isAdmin || saving || !canMutate}
-                          title={blockedReason ?? consequenceOf(c, eff)}
+                          title={blockedReason ?? consequenceOf(c, eff, monitor)}
                           onClick={() => setPending((p) => ({ ...p, [c.id]: eff }))}
                         >
                           {LABELS[eff]}

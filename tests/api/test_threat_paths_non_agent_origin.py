@@ -281,18 +281,54 @@ class TestTheDefectsAnAdversarialPassFound:
              T2._governing_policies, T2._mcp_registry) = orig
 
     async def test_non_agent_hidden_counts_PATHS_not_raw_chains(self):
-        """One server serving two tools that both reach the same data is ONE path after dedupe, and
-        the count that reports it hidden must say one. Counting chains put this number on a different
-        denominator from `non_agent_paths`, which the schema comment ties it to."""
+        """The hidden count must sit on the same denominator as the unfiltered view's non-agent paths,
+        which the schema comment ties it to.
+
+        The fixture has to make the two numbers DIFFER, or the test cannot tell them apart. Two
+        chains that share (origin, chokepoint, target, length) are one path id:
+
+            mcp:reporting-kb -> tool:read_file -> tool:render -> data:pg/customers
+            mcp:reporting-kb -> tool:query_db  -> tool:render -> data:pg/customers
+
+        The chokepoint is the last tool before the data (`render`), so both chains collapse to one
+        path in the dedupe. Counting chains gives 2 hidden; counting ids gives 1.
+        """
+        nodes, edges = _graph()
+        nodes["tool:query_db"] = _node("tool:query_db", "tool", "query_db", risk_level="medium")
+        nodes["tool:render"] = _node("tool:render", "tool", "render", risk_level="medium")
+        # Drop the direct read_file -> data hop so every chain is four nodes long and ends in `render`.
+        edges["tool:read_file"] = [{"target": "tool:render", "type": "calls", "hist": {}}]
+        edges["mcp:reporting-kb"].append({"target": "tool:query_db", "type": "serves", "hist": {}})
+        edges["tool:query_db"] = [{"target": "tool:render", "type": "calls", "hist": {}}]
+        edges["tool:render"] = [{"target": "data:pg/customers", "type": "accesses", "hist": {}}]
+
+        # The premise: two raw chains from the server, one path id between them.
+        chains = list(T._walk_paths("mcp:reporting-kb", edges, nodes))
+        assert len(chains) == 2, chains
+        assert len({T._build_path(c, nodes, edges).id for c in chains}) == 1
+
+        all_paths, _seen, hidden_unfiltered = await self._derive(nodes, edges)
+        _filtered, _s2, hidden = await self._derive(nodes, edges, cls="support-agent")
+        non_agent = [p for p in all_paths if p.cls is None]
+        assert hidden_unfiltered == 0
+        assert len(non_agent) == 1
+        assert hidden == 1, f"hidden counted {hidden} raw chains, not the 1 path the unfiltered view holds"
+
+    async def test_sibling_chokepoints_from_one_server_are_separate_hidden_paths(self):
+        """One server serving two tools that both reach the same data is TWO paths: the chokepoint is
+        part of the path id, so sibling tools are separate kill-chains. This used to be one, because
+        the id left the chokepoint out and the dedupe collapsed them."""
         nodes, edges = _graph()
         nodes["tool:query_db"] = _node("tool:query_db", "tool", "query_db", risk_level="medium")
         edges["mcp:reporting-kb"].append({"target": "tool:query_db", "type": "serves", "hist": {}})
         edges["tool:query_db"] = [{"target": "data:pg/customers", "type": "accesses", "hist": {}}]
 
-        _all, _seen, hidden_unfiltered = await self._derive(nodes, edges)
+        all_paths, _seen, hidden_unfiltered = await self._derive(nodes, edges)
         _filtered, _s2, hidden = await self._derive(nodes, edges, cls="support-agent")
+        non_agent = [p for p in all_paths if p.cls is None]
         assert hidden_unfiltered == 0
-        assert hidden == 1, "two chains collapsing to one path must be reported as one hidden path"
+        assert len(non_agent) == 2
+        assert hidden == len(non_agent), "hidden must count the same paths the unfiltered view holds"
 
     async def test_a_flood_of_fabricated_origins_cannot_evict_agent_findings(self):
         """`input.mcp.server` is PEP-reported and unvalidated, so an agent that can reach /evaluate

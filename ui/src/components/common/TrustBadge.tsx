@@ -14,14 +14,19 @@ export function trustCategory(score: number): TrustCategory {
   return "frozen";
 }
 
+// Neither a band nor a freeze: "unscored" (a lifted freeze, before the agent's next call) or a category the
+// console does not know. Shown as itself, in a neutral colour. It used to fall back to "frozen", so an agent
+// whose freeze had just been lifted was labelled frozen.
+const OTHER_COLOR = "#8a8f98";
+
 export function TrustBadge({ category, pulse = false }: { category: string; pulse?: boolean }) {
-  const key = (category?.toLowerCase() as TrustCategory) in TRUST_COLOR
-    ? (category.toLowerCase() as TrustCategory)
-    : "frozen";
-  const color = TRUST_COLOR[key];
+  const lower = (category ?? "").toLowerCase();
+  const known = lower in TRUST_COLOR;
+  const label = known ? lower : lower || "unknown";
+  const color = known ? TRUST_COLOR[lower as TrustCategory] : OTHER_COLOR;
   return (
     <span className={`pill${pulse ? " pulse-low" : ""}`} style={{ color, borderColor: `${color}40` }}>
-      {key}
+      {label}
     </span>
   );
 }

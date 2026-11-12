@@ -190,9 +190,11 @@ ones the sheet actually renders (`MODE_LABEL`, `ui/src/components/policies/Build
 | Tighten-only rules | `package norviq.custom.<token>` | adds blocks on top of what is already allowed; a call no rule matches keeps its current outcome and falls through to a scoped `builder_default_<scope-token>` allow |
 | Allowlist (deny by default) | `package norviq.intent.<token>` | default-deny for the scope: only the listed tools, and only while the enabled refinements and every per-tool argument constraint hold |
 
-`norviq.custom.` is the same package namespace a hand-written policy uses, and that is the point — to
-the loader, to OPA, and to `GET /api/v1/policies/effective`, a builder-authored tighten-only policy is
-indistinguishable from one typed into the editor. `norviq.intent.` is separate only so the server's
+`norviq.custom.` is the same package namespace a hand-written policy uses — to the loader and to OPA, a
+builder-authored tighten-only policy is indistinguishable from one typed into the editor. The one place
+the engine tells them apart is precedence: a tighten-only module is collected as an overlay, so it can
+only make a decision stricter (see "Policy tiers & precedence" below), and `GET
+/api/v1/policies/effective` lists it as an overlay. `norviq.intent.` is separate only so the server's
 own intent classification can recognize an allowlist.
 
 What the builder buys is that the dangerous shapes are *unrepresentable* rather than discouraged: it
@@ -233,6 +235,21 @@ a base policy saved in `audit` mode can only tighten:
    This is where a namespace-scoped policy written through the API or the console lands
    (`resolve_policy_key`, `norviq/api/routers/policies.py`), and where an `NrvqPolicy` that targets a
    namespace *without* `clusterPriority` lands.
+
+**A tighten-only base policy is collected as an overlay** (from 0.2.8). The Visual Builder's
+"Tighten-only rules" mode (default `allow`) and the New Policy composer emit a module whose `allow` means
+"no rule of mine fired", not "permit this call". Resolved by priority, that allow beat a lower-priority
+namespace-tier `block`, so a policy labelled tighten-only loosened the namespace. The server's
+capability and compliance-remediation drafts (default `allow`, blocks only) had the opposite problem:
+applied at the baseline's priority, their blocks lost to any namespace-tier policy at a higher priority.
+The engine now recognises such a module (`norviq/engine/composition.py`: an attached builder graph in
+rules mode with an `allow` default, or a `norviq.composer.` or `norviq.remediation.` package with an
+`allow` default) at any base tier and combines it like the floors below: its blocks apply whatever the
+priority, its allow never undoes another layer's block, and an `audit`-mode trial still only records. A
+builder policy whose Rego was hand-edited (detached) is no longer described by its graph, so it keeps
+priority semantics like any hand-written policy. An allowlist (the builder's allowlist mode, or a
+generated intent draft) and a rules-mode policy with a `block` default decide for their scope and keep
+priority semantics; the allowlist generators no longer call their output tighten-only.
 
 **Floors** — from 0.2.6, tighten-only whatever their priority: each can make the base result stricter,
 never looser. A floor's `block` applies even when a class policy at a higher priority allows; a floor's

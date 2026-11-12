@@ -17,6 +17,7 @@ from norviq.engine.capability.source_registry import (
     verb_display,
     verb_fragments,
     verb_of_tool,
+    verb_reads_payload,
     verb_risk,
     worst_open_verb,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "verb_display",
     "verb_fragments",
     "verb_of_tool",
+    "verb_reads_payload",
     "verb_risk",
     "worst_open_verb",
 ]

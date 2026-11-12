@@ -66,4 +66,22 @@ describe("AttackPathDetail (inspector)", () => {
     );
     expect(screen.getByRole("button", { name: /draft blocking policy/i })).toBeInTheDocument();
   });
+
+  // The data hop has no audit rows: its counts are the calls into the tool, and they land on every
+  // table that tool reaches. " via issue_refund" read as evidence about this table.
+  it("says a borrowed data-hop count is per tool, not per table", () => {
+    renderDetail({
+      path: {
+        ...path,
+        steps: [
+          { from: "billing-runner", to: "issue_refund", verb: "calls", dec: "allow", kind: "tool", deny: 0, allow: 12 },
+          { from: "issue_refund", to: "postgresql/ledger", verb: "reaches", dec: "allow", kind: "data", deny: 0, allow: 12, via: "issue_refund" }
+        ]
+      }
+    });
+    const note = screen.getByText(/calls into issue_refund, counted per tool, not per table/);
+    expect(note).toHaveAttribute("title", expect.stringMatching(/never the data node/));
+    // The tool hop's own counts carry no such note.
+    expect(screen.getAllByText(/counted per tool/)).toHaveLength(1);
+  });
 });

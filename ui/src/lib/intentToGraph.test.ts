@@ -77,6 +77,37 @@ describe("intent -> builder graph", () => {
     expect(decide(res.rego, "delete_kb", { id: "1" })).toBe("block");
   });
 
+  it("seeds the tighten-only default, so switching the handed-off graph to rules mode does not deny by default", () => {
+    // Allowlist mode compiles its own deny and never reads `defaults`; rules mode is their only reader.
+    // The converter used to seed `block` there, so an operator who switched to "Tighten-only rules"
+    // and added one rule compiled `default decision = "block"`: every unmatched call blocked.
+    const { graph } = intentToBuilderGraph({
+      class: "report-gen",
+      call: [{ id: "select-only", match: { tool_name: "execute_sql" }, require: { "param_paths.query": { matches: "(?i)^\\s*select\\b" } } }]
+    });
+    expect(graph.defaults.decision).toBe("allow");
+    const asRules = compileGraph(
+      {
+        ...graph,
+        mode: "rules",
+        rules: [
+          {
+            id: "r1",
+            decision: "block",
+            ruleId: "no_sql_for_low_trust",
+            reason: "no SQL from a low-trust agent",
+            conditions: [[{ type: "toolIn", tools: ["execute_sql"] }, { type: "trustBelow", threshold: 0.5 }]]
+          }
+        ],
+        allowlist: undefined
+      },
+      "analytics"
+    );
+    expect(asRules.errors).toEqual([]);
+    expect(asRules.rego).toMatch(/^default decision = "allow"$/m);
+    expect(asRules.rego).not.toMatch(/^default decision = "block"$/m);
+  });
+
   it("REPORTS a nested path instead of retargeting it at a different argument", () => {
     // Taking the last segment would produce a grant on `ids`, which is a different parameter. That is
     // the silent-wrong case this whole function is shaped to avoid.

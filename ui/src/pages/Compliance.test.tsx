@@ -434,3 +434,59 @@ describe("one framework failing is already a degraded reading", () => {
     );
   });
 });
+
+describe("the cross-reference note says what the `also` field can back", () => {
+  // LLM07:2025 cross-references AML.T0056 and neither has a rule, yet the note read "Same enforcing
+  // rule also satisfies MITRE ATLAS · AML.T0056" — a rule that does not exist.
+  function owaspRuleless() {
+    return {
+      ...owaspPayload(),
+      techniques: [
+        {
+          technique_id: "LLM07:2025",
+          name: "System Prompt Leakage",
+          description: "The system prompt is extracted via crafted inputs.",
+          scope: "enforceable",
+          status: "gap",
+          priority: "high",
+          also: "MITRE ATLAS · AML.T0056",
+          policies: [],
+          covered_policies: [],
+          covered: false,
+          observed: 0,
+          blocked: 0,
+          affected_classes: []
+        }
+      ]
+    };
+  }
+
+  function useFrameworks() {
+    server.use(
+      http.get("/api/v1/compliance/:framework/coverage", ({ params }) =>
+        HttpResponse.json(params.framework === "owasp" ? owaspRuleless() : atlasPayload())
+      ),
+      http.get("/api/v1/compliance/:framework/trend", ({ params }) =>
+        HttpResponse.json({ namespace: "default", range: "30d", framework: params.framework, points: [] })
+      )
+    );
+  }
+
+  it("a control with no rule does not claim a shared enforcing rule", async () => {
+    useFrameworks();
+    renderPage();
+    fireEvent.click((await screen.findAllByText("Open coverage detail →"))[1]);
+    const note = await screen.findByTestId("technique-also");
+    expect(note).toHaveTextContent("Same risk as MITRE ATLAS · AML.T0056");
+    expect(note).toHaveTextContent("no rule maps either");
+    expect(note).not.toHaveTextContent(/enforcing rule also satisfies/i);
+  });
+
+  it("a control with a rule still names the rule it shares", async () => {
+    useFrameworks();
+    renderPage();
+    fireEvent.click((await screen.findAllByText("Open coverage detail →"))[0]);
+    const note = await screen.findByTestId("technique-also");
+    expect(note).toHaveTextContent("Same rule also satisfies OWASP LLM · LLM01:2025");
+  });
+});

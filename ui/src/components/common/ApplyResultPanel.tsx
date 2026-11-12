@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { fetchFleetRollout, type FleetRollout } from "../../api/fleet";
 import { verifyPolicyApplied } from "../../api/client";
+import { useEnforcementVerdict } from "../../lib/posture";
 import { KitButton } from "./KitButton";
 
 export type ApplyManifest = {
@@ -97,6 +98,11 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
   const cls = result?.manifest.agent_class;
   const expectedVersion = result?.expectedVersion;
   const expectedMode = result?.expectedMode;
+  // "Loaded" is what the poll proves. "Enforcing" also needs the namespace to enforce: in Monitor the
+  // engine turns every block of this policy into a would-block, so a converged version there does not
+  // block anything. The badge used to read ENFORCING vN off the version poll alone, in any namespace.
+  const verdict = useEnforcementVerdict(result?.kind === "local" && result.ok ? result.manifest.namespace : null);
+  const policyMode = (expectedMode ?? result?.manifest.enforcement_mode ?? "").toLowerCase();
 
   useEffect(() => {
     if (!localVerifying || !ns || !cls || !expectedVersion) {
@@ -165,8 +171,31 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
     : localVerifying && localVerify === "stalled"
     ? { label: "STALLED", color: "var(--warning, #f5a623)" }
     : localVerifying && localVerify === "matched"
-    ? { label: `ENFORCING v${expectedVersion}`, color: "var(--success, #30a46c)" }
+    ? policyMode === "audit"
+      ? { label: `LOADED · AUDIT v${expectedVersion}`, color: "var(--warning, #f5a623)" }
+      : verdict === "monitor"
+      ? { label: `LOADED · MONITOR v${expectedVersion}`, color: "var(--warning, #f5a623)" }
+      : verdict === "enforcing"
+      ? { label: `ENFORCING v${expectedVersion}`, color: "var(--success, #30a46c)" }
+      : { label: `LOADED v${expectedVersion}`, color: "var(--text-secondary)" }
     : { label: "APPLIED", color: "var(--success, #30a46c)" };
+  // One line under the outcome saying what a match will DO here, for every successful local write.
+  const postureNote: { text: string; color: string } | null =
+    result.kind !== "local" || !result.ok
+      ? null
+      : policyMode === "audit"
+      ? { text: `This policy is in audit mode: a match is logged, the call proceeds.`, color: "var(--warning, #f5a623)" }
+      : verdict === "monitor"
+      ? {
+          text: `Namespace ${m.namespace} is in Monitor mode: matches are logged as would-block, not enforced.`,
+          color: "var(--warning, #f5a623)"
+        }
+      : verdict === "enforcing"
+      ? { text: `Namespace ${m.namespace} enforces: a match acts on the call.`, color: "var(--text-secondary)" }
+      : {
+          text: `The enforcement posture of namespace ${m.namespace} could not be read, so this does not confirm that matches are blocked.`,
+          color: "var(--text-secondary)"
+        };
 
   return (
     <div
@@ -220,6 +249,11 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
           {result.outcome}
           {result.code && <span className="mono" style={{ color: "var(--text-muted)", marginLeft: 8 }}>{result.code}</span>}
         </div>
+        {postureNote && (
+          <div data-testid="apply-posture-note" data-verdict={verdict} style={{ fontSize: 12.5, color: postureNote.color }}>
+            {postureNote.text}
+          </div>
+        )}
 
         {/* the declarative manifest actually applied */}
         <div>
@@ -267,12 +301,14 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
                 <tbody>
                   {rows.map((r) => {
-                    const enforcing = r.state === "applied" && r.applied_version === r.bundle_version;
+                    // "applied @vN", not "enforcing @vN": the spoke loaded the bundle, and whether its matches block
+                    // depends on that cluster's namespace posture, which this hub does not read.
+                    const loaded = r.state === "applied" && r.applied_version === r.bundle_version;
                     return (
                       <tr key={r.cluster_id}>
                         <td className="mono" style={{ padding: "4px 8px", color: "var(--text-primary)" }}>{r.cluster_id}</td>
                         <td style={{ padding: "4px 8px", color: STATE_COLOR[r.state] ?? "var(--text-secondary)" }}>
-                          {enforcing ? `enforcing @v${r.applied_version}` : `${r.state} (desired v${r.bundle_version}, applied v${r.applied_version})`}
+                          {loaded ? `applied @v${r.applied_version}` : `${r.state} (desired v${r.bundle_version}, applied v${r.applied_version})`}
                         </td>
                         <td className="mono" style={{ padding: "4px 8px", color: "var(--text-muted)", textAlign: "right" }}>
                           {r.updated_at ? new Date(r.updated_at).toLocaleTimeString() : ""}
@@ -300,7 +336,7 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
             )}
             {localVerify === "matched" && (
               <div style={{ fontSize: 12.5, color: "var(--success, #30a46c)" }}>
-                Enforcing v{expectedVersion} — confirmed via a live read (DB-authoritative; cross-replica sync ~1s).
+                Loaded v{expectedVersion} — confirmed via a live read (DB-authoritative; cross-replica sync ~1s).
               </div>
             )}
             {localVerify === "stalled" && (

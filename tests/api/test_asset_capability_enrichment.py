@@ -55,6 +55,44 @@ def test_guarded_read_is_defended():
     assert read["status"] == "defended"
 
 
+def test_monitor_would_block_is_monitored_not_defended():
+    """Monitor softens a block to `audit` and the call runs. Counting it as guarded showed DEFENDED for a
+    verb nothing had ever stopped — the Asset Graph twin of the Attack Graph's Blocked-tile defect."""
+    nodes, edges = _graph({"allow": 0, "block": 0, "escalate": 0, "would_block": 12})
+    _attach_source_capability(nodes, edges)
+    read = _read(_es_cap(nodes))
+    assert read["defended"] is False
+    assert read["observed"] is True, "would-blocked calls ran; the read was exercised, not dormant"
+    assert read["status"] == "monitored"
+    assert read["monitored"] is True
+
+
+def test_monitor_alongside_an_enforced_block_is_defended():
+    nodes, edges = _graph({"allow": 4, "block": 2, "escalate": 0, "would_block": 3})
+    _attach_source_capability(nodes, edges)
+    assert _read(_es_cap(nodes))["status"] == "defended"
+
+
+def test_monitored_write_is_the_worst_open_verb():
+    """`worst` drives the inspector's headline. A verb whose calls all ran is open, not reassurance."""
+    nodes = [
+        AssetNode(id="agent:rg", type="agent", name="report-gen",
+                  properties={"namespace": "analytics", "agent_class": "report-gen"}),
+        AssetNode(id="tool:index_document", type="tool", name="index_document", properties={}),
+        AssetNode(id="data:elasticsearch/knowledge_base", type="data", name="elasticsearch/knowledge_base",
+                  properties={}),
+    ]
+    edges = [
+        AssetEdge(source="agent:rg", target="tool:index_document", type="calls", weight=1.0,
+                  properties={"decision_history": {"allow": 0, "block": 0, "escalate": 0, "would_block": 7}}),
+        AssetEdge(source="tool:index_document", target="data:elasticsearch/knowledge_base", type="accesses",
+                  weight=1.0, properties={}),
+    ]
+    _attach_source_capability(nodes, edges)
+    worst = _es_cap(nodes)["worst"]
+    assert worst is not None and worst["verb"] == "write" and worst["status"] == "monitored"
+
+
 def test_silent_tool_grant_is_dormant():
     # the tool reaches ES but never produced traffic → dormant grant (least-privilege gap).
     nodes, edges = _graph({"allow": 0, "block": 0, "escalate": 0})

@@ -5,7 +5,9 @@
 // snapshot + audit decision history (see norviq/api/routers/threats.py). No mock.
 
 export type Severity = "critical" | "high" | "medium" | "low";
-export type PathStatus = "exploitable" | "blocked" | "unsimulated";
+// "would_block": a hop ran only because the namespace is in Monitor. A policy matched every call on it,
+// the calls executed, and nothing was blocked. It is never counted as "blocked".
+export type PathStatus = "exploitable" | "would_block" | "blocked" | "unsimulated";
 // "would_block": the hop has Monitor-mode would-block history — a policy covers it but the namespace
 // logs instead of enforcing. Distinct from "block" (enforced) and from "allow" (nothing would stop it).
 export type StepDecision = "allow" | "mixed" | "block" | "would_block";
@@ -40,6 +42,9 @@ export interface ThreatStep {
   inferred_verb?: "read" | "write" | "delete" | "send" | null;
   inferred_count?: number;
   observed_calls?: number;
+  /** Set on a tool→data hop: the tool whose calls these counts are. That edge has no audit rows of its
+   *  own, so it carries the counts of the call into the tool on the same chain. */
+  via?: string | null;
 }
 
 export interface ThreatPath {

@@ -19,6 +19,7 @@ vi.hoisted(() => {
 });
 
 import { Header } from "./Header";
+import { AgentMonitor } from "../../pages/AgentMonitor";
 import { AppProvider } from "../../store/AppContext";
 import { clearApiCache } from "../../hooks/useApi";
 
@@ -320,7 +321,11 @@ describe("Posture chip: unknown is not drawn like enforcing", () => {
     );
     renderAt("/audit?ns=payments");
 
-    expect(await screen.findByTestId("posture-chip-frozen")).toBeInTheDocument();
+    const frozen = await screen.findByTestId("posture-chip-frozen");
+    // Frozen locks policy EDITS. Whether the live policy enforces is the enforcement mode, which in Monitor
+    // it does not, so the chip no longer says "live policy still enforces".
+    expect(frozen.getAttribute("title")).toMatch(/the live policy keeps running unchanged/);
+    expect(frozen.getAttribute("title")).not.toMatch(/still enforces/);
     expect(screen.queryByTestId("posture-chip-unknown")).not.toBeInTheDocument();
     expect(screen.queryByTestId("posture-chip-monitor")).not.toBeInTheDocument();
   });
@@ -407,6 +412,47 @@ describe("⌘K palette states what it knows", () => {
     expect(await screen.findByText(/decision unknown/)).toBeInTheDocument();
     expect(screen.getByText(/trust unknown/)).toBeInTheDocument();
     expect(screen.queryByText(/trust 0\.00/)).not.toBeInTheDocument();
+  });
+
+  it("a frozen agent reads 'frozen' and a capped one says so, not a pre-freeze or uncapped score", async () => {
+    server.use(
+      http.get("*/api/v1/search", () =>
+        HttpResponse.json({
+          tools: [],
+          agents: [
+            { spiffe_id: "spiffe://x/ns/payments/sa/inv", agent_class: "invoice-agent", trust_score: 0, frozen: true, trust_cap: null },
+            { spiffe_id: "spiffe://x/ns/payments/sa/led", agent_class: "ledger-agent", trust_score: 0.5, frozen: false, trust_cap: 0.5 }
+          ],
+          policies: []
+        })
+      )
+    );
+    renderAt("/audit");
+    typeQuery("agent");
+
+    expect(await screen.findByText(/invoice-agent — frozen/)).toBeInTheDocument();
+    expect(screen.getByText(/ledger-agent — trust 0\.50 · capped/)).toBeInTheDocument();
+    expect(screen.queryByText(/invoice-agent — trust/)).not.toBeInTheDocument();
+  });
+
+  it("an agent whose freeze could not be read says so, not 'trust unknown' as if it were merely unscored", async () => {
+    // The API could not read the trust store; the engine then blocks the agent's calls (fails closed).
+    server.use(
+      http.get("*/api/v1/search", () =>
+        HttpResponse.json({
+          tools: [],
+          agents: [
+            { spiffe_id: "spiffe://x/ns/payments/sa/inv", agent_class: "invoice-agent", trust_score: null,
+              category: "unknown", frozen: null, trust_cap: null, controls: "unavailable" }
+          ],
+          policies: []
+        })
+      )
+    );
+    renderAt("/audit");
+    typeQuery("agent");
+
+    expect(await screen.findByText(/invoice-agent — freeze state unknown/)).toBeInTheDocument();
   });
 });
 
@@ -828,6 +874,50 @@ describe("Posture chip: Monitor is the engine's posture, not the settings readin
   });
 });
 
+// With `enforcement_mode_source` the chip has lib/posture's answer without asking coverage. It used to wait
+// for the coverage read, and when that failed it kept "Monitor mode" for a namespace that only inherits the
+// cluster default, while every page reading lib/posture said the namespace enforces.
+describe("Posture chip: the settings source answers the same way lib/posture does", () => {
+  const base = (source: "namespace" | "cluster_default") => [
+    http.get("*/api/v1/cluster-info", () =>
+      HttpResponse.json({ cluster_id: "local-1", cluster_name: "local", namespaces: ["default", "payments"] })
+    ),
+    http.get("http://hub.test/api/v1/fleet/clusters", () => HttpResponse.json([])),
+    http.get("*/api/v1/settings", ({ request }) =>
+      HttpResponse.json({
+        namespace: new URL(request.url).searchParams.get("namespace") ?? "default",
+        enforcement_mode: "audit",
+        enforcement_mode_source: source,
+        apply_mode: "enforce"
+      })
+    ),
+    http.get("*/api/v1/audit/stats", () => HttpResponse.json({ total: 900, blocked: 34, allowed: 866 })),
+    http.get("*/api/v1/agents", () => HttpResponse.json([])),
+    // The engine-field read fails: the source alone must settle the chip.
+    http.get("*/api/v1/coverage-by-category", () => new HttpResponse("boom", { status: 500 }))
+  ];
+
+  it("an inherited audit reads 'Monitor: cluster default' even when coverage cannot be read", async () => {
+    signIn();
+    server.use(...base("cluster_default"));
+    renderAt("/audit?ns=payments");
+    const chip = await screen.findByTestId("posture-chip-monitor");
+    await waitFor(() => expect(chip).toHaveAttribute("data-engine-mode", "block"));
+    expect(chip).toHaveTextContent(/Monitor: cluster default/i);
+    expect(chip.getAttribute("title")).toMatch(/still ENFORCES its policy blocks/i);
+  });
+
+  it("the namespace's own audit reads 'Monitor mode' with the full consequence", async () => {
+    signIn();
+    server.use(...base("namespace"));
+    renderAt("/audit?ns=payments");
+    const chip = await screen.findByTestId("posture-chip-monitor");
+    await waitFor(() => expect(chip).toHaveAttribute("data-engine-mode", "audit"));
+    expect(chip).toHaveTextContent(/^Monitor mode$/);
+    expect(chip.getAttribute("title")).toMatch(/live traffic is NOT blocked/i);
+  });
+});
+
 // ---------------------------------------------------------------------------------------------------
 // The bell's low-trust alert and the /agents page it deep-links to must count ONE population.
 // The predicate was a literal `score < 0.4` over every row, which disagreed with that page in both
@@ -910,5 +1000,65 @@ describe("Bell low-trust count agrees with the Agents page it opens", () => {
 
     expect(await screen.findByTestId("inbox-error")).toHaveTextContent(/carried no trust category/i);
     expect(screen.queryByText(/All systems healthy/i)).not.toBeInTheDocument();
+  });
+
+  it("an agent whose freeze could not be read makes the check PARTIAL, not an all-clear", async () => {
+    signIn();
+    server.use(
+      ...base([
+        { spiffe_id: sid("billing"), agent_class: "billing", score: null, category: "unknown", frozen: null,
+          trust_cap: null, controls: "unavailable", synthetic: false }
+      ])
+    );
+    renderAt("/audit?ns=payments");
+    openInbox();
+
+    expect(await screen.findByTestId("inbox-error")).toHaveTextContent(/freeze state is unknown/i);
+    expect(screen.queryByText(/All systems healthy/i)).not.toBeInTheDocument();
+  });
+
+  it("a freeze in the Agent Monitor drops the bell's remembered counts", async () => {
+    signIn();
+    let frozen = false;
+    const agent = () => ({
+      spiffe_id: sid("billing"), namespace: "payments", agent_class: "billing", synthetic: false,
+      score: frozen ? 0 : 0.3, category: frozen ? "frozen" : "low", frozen, trust_cap: null, controls: "live",
+      violation_count: 0, signals: {}, dominant_signal: "", recommendation: ""
+    });
+    server.use(
+      // Ahead of base(): msw takes the first handler that matches, and base() answers /agents with [].
+      http.get("*/api/v1/agents", () => HttpResponse.json([agent()])),
+      ...base([]),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([])),
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => {
+        frozen = true;
+        return HttpResponse.json({ spiffe_id: sid("billing"), frozen: true, trust_cap: null });
+      })
+    );
+    render(
+      <MemoryRouter initialEntries={["/agents?ns=payments"]}>
+        <AppProvider>
+          <Header isTablet={false} onMenuToggle={() => {}} tabletMenuOpen={false} />
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    openInbox();
+    expect(await screen.findByText(/1 agent is at low trust/i)).toBeInTheDocument();
+    expect(screen.getByTestId("bell-badge")).toHaveTextContent("1");
+    // With a count on the badge the button's accessible name is the badge's ("1 alerts"), so by title.
+    const bell = () => fireEvent.click(screen.getByTitle("Inbox"));
+    bell(); // close it
+
+    fireEvent.click(await screen.findByText(sid("billing")));
+    fireEvent.click(await screen.findByText("Freeze Agent"));
+    fireEvent.click(await screen.findByTestId("agent-trust-confirm-submit"));
+    await screen.findByText("Unfreeze Agent");
+    // The low-trust count it remembered is gone, and the next check reads the freeze.
+    await waitFor(() => expect(screen.queryByTestId("bell-badge")).not.toBeInTheDocument());
+    bell();
+    expect(await screen.findByTestId("inbox-frozen")).toHaveTextContent(/1 agent is trust-frozen/i);
+    expect(screen.queryByText(/at low trust/i)).not.toBeInTheDocument();
   });
 });
