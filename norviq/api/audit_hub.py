@@ -9,7 +9,7 @@ import uuid
 
 import structlog
 
-from norviq.api.synthetic import is_synthetic_identity  # the ONE shared synthetic/probe classifier (do not fork)
+from norviq.api.synthetic import is_non_real_traffic  # the ONE shared synthetic/probe classifier (do not fork)
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 
@@ -95,7 +95,7 @@ class AuditHub:
         self.publish_local(record)
 
 
-def audit_record(event: ToolCallEvent, decision: PolicyDecision) -> dict:
+def audit_record(event: ToolCallEvent, decision: PolicyDecision, claimed_framework: str = "") -> dict:
     """Shape an event+decision into the record the UI audit feed consumes.
 
     `framework` and `non_real` exist because the Audit Log's live tail has to apply the SAME
@@ -125,8 +125,9 @@ def audit_record(event: ToolCallEvent, decision: PolicyDecision) -> dict:
         # Decision source (sidecar / sdk / redteam / ...) — Source column + the red-team half of the filter.
         "framework": event.framework or "",
         # Server-side verdict of the SAME predicate audit_row_is_non_real applies to fetched rows:
-        # red-team framework OR a synthetic/probe agent class.
-        "non_real": (event.framework or "") == "redteam" or is_synthetic_identity(
-            identity.agent_class, identity.spiffe_id
-        ),
+        # a fabricated call (red-team, Simulate, probe) OR a synthetic/probe identity.
+        "non_real": is_non_real_traffic(event.framework, identity.agent_class, identity.spiffe_id),
+        # A synthetic tag the caller sent but was not allowed to use (auth.bind_framework): the row is
+        # real traffic, and this says what the caller claimed. None on every other row, as on fetched ones.
+        "claimed_framework": claimed_framework or None,
     }

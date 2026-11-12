@@ -334,6 +334,59 @@ describe("AuditLog red-team evidence deep-link", () => {
     expect(screen.queryByText("send_email")).toBeNull();
   });
 
+  it("opens a Simulate link with Real traffic only off, as it does for red-team", async () => {
+    // The server drops every synthetic source, `attack-graph` included. Only "redteam" turned the
+    // filter off, so a link to Simulate's rows asked for them and hid them in the same query.
+    const queries: URLSearchParams[] = [];
+    serveLedger((q) => queries.push(q));
+    renderAt("/audit?framework=attack-graph");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    const pageQuery = queries.find((q) => q.get("limit") === "50")!;
+    expect(pageQuery.get("framework")).toBe("attack-graph");
+    expect(pageQuery.get("exclude_synthetic")).toBeNull();
+  });
+
+  it("marks a row the server classes as synthetic, and only that row", async () => {
+    // With Real traffic only off, a Simulate or Policy Tester row looked exactly like a real call.
+    serveLedger();
+    renderAt("/audit?rule=mcp_tool_poisoning");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Real traffic only/i }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.getAllByText("fetch_url").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("send_email").length).toBeGreaterThan(0);
+    expect(screen.getAllByTestId("audit-synthetic-marker")).toHaveLength(1);
+    expect(screen.getByTestId("audit-synthetic-marker").closest("tr")).toHaveTextContent("send_email");
+  });
+
+  it("says when a caller's synthetic tag was not honoured, and does not mark the row synthetic", async () => {
+    // Only operator credentials may tag traffic synthetic. A workload that sends the tag is counted as
+    // real traffic, and the server keeps what it claimed in `claimed_framework`.
+    server.use(
+      http.get("/api/v1/audit/records", () =>
+        HttpResponse.json([
+          { ...PRODUCTION_ROW, id: "claimed-1", tool_name: "issue_refund", framework: "", claimed_framework: "redteam" }
+        ])
+      )
+    );
+    renderAt("/audit");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    const marker = screen.getByTestId("audit-claimed-framework");
+    expect(marker).toHaveTextContent(/claimed redteam, counted as real/);
+    expect(marker.closest("tr")).toHaveTextContent("issue_refund");
+    expect(screen.queryByTestId("audit-synthetic-marker")).toBeNull();
+  });
+
   it("names the rule filter in the empty state instead of stopping at a full stop", async () => {
     server.use(http.get("/api/v1/audit/records", () => HttpResponse.json([])));
     renderAt("/audit?rule=mcp_tool_poisoning&framework=redteam");

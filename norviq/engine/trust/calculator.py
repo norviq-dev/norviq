@@ -82,8 +82,12 @@ class TrustCalculator:
         input_data: TrustInput,
         trust_threshold: float | None = None,
         prefetched_flags: tuple[bool, float | None] | None = None,
+        persist: bool = True,
     ) -> TrustResult:
         """Calculate trust score and persist short-lived breakdown.
+
+        `persist=False` computes without writing `trustcalc:{spiffe}`: the evaluator passes it for a call
+        the product fabricated, which must not replace the agent's last real breakdown.
 
         `trust_threshold` (per-ns override, else None) moves the high/low tier boundaries.
         A durable admin trust CAP (`agent_trust_override:{spiffe}`) is applied tighten-only —
@@ -140,9 +144,10 @@ class TrustCalculator:
             dominant_signal=dominant,
             recommendation=self._recommend(score, category),
         )
-        task = asyncio.create_task(self._persist(input_data.spiffe_id, result))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        if persist:
+            task = asyncio.create_task(self._persist(input_data.spiffe_id, result))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
         log.info("nrvq.engine.trust.completed", spiffe_id=input_data.spiffe_id, score=score, code="NRVQ-ENG-2041")
         return result
 

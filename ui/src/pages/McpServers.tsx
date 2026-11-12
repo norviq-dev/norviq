@@ -472,8 +472,8 @@ export function McpServers() {
           message: action === "approve" ? `Approved ${row.tool_name}` : `Revoked ${row.tool_name}`,
           detail:
             action === "approve"
-              ? "The served definition is now the approved one; the tool is visible to the model again."
-              : "The tool is withheld from the model and calls to it are refused until it is re-approved."
+              ? "The served definition is now the approved one. After each proxy's next pin refresh (30 s by default) calls to it are no longer refused as unapproved, and the agent sees it again the next time it lists tools."
+              : "After each proxy's next pin refresh (30 s by default) calls to it are refused, including from an agent that already listed it, and it is withheld from the next tools/list until it is re-approved."
         });
         setSelectedPin(null);
         refresh();
@@ -540,7 +540,7 @@ export function McpServers() {
         message: `Withheld ${done} of ${victims.length} ${server} tools`,
         detail:
           done === victims.length
-            ? "Every tool this server serves is now refused until an operator re-approves it individually."
+            ? "After each proxy's next pin refresh (30 s by default) every tool this server serves is refused, including for an agent that already listed it, until an operator re-approves it individually."
             : "Some revocations failed — re-run, or revoke the remaining tools individually."
       });
       refresh();
@@ -578,12 +578,12 @@ export function McpServers() {
                 : `${server.server_id} returned to unreviewed`,
           detail:
             res.status === "blocked"
-              ? "Its tools are withheld at discovery — the definitions never reach the model. Running proxies pick this up on their next registry refresh."
+              ? "Its tools are withheld at discovery and calls to them are refused, including from an agent that already listed them. Running proxies apply this on their next registry refresh (30 s by default)."
               : res.status === "registered"
                 ? res.writable
                   ? "Reads and writes are both permitted through this server."
                   : "Registered read-only: write-verb tools on this server are refused."
-                : "No decision stands for this server. It is reachable, and controls that ask about registration will treat it as unreviewed."
+                : "No decision stands for this server. It is reachable, and controls that ask about registration will treat it as unreviewed. Running proxies stop refusing calls to it on their next registry refresh (30 s by default)."
         });
         setRegistering(null);
         setBlocking(null);
@@ -1324,18 +1324,22 @@ export function McpServers() {
           data-testid="mcp-block"
           consequence={
             <>
-              Enforced at <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>discovery</strong>, not at
+              Enforced at <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>discovery</strong> and at
               call time — its tools are withheld from <span className="mono">tools/list</span> so the descriptions never
-              reach the model.{" "}
+              reach the model, and calls to them are refused, including from an agent that listed them before the
+              block. Every other request to it is refused too, and so is every request it sends the agent (sampling,
+              elicitation, roots); only the connection&apos;s handshake, ping and cancellation still pass.{" "}
               <strong style={{ color: "var(--escalate)", fontWeight: 600 }}>
                 The agent loses these {blocking.tools} tool{blocking.tools === 1 ? "" : "s"} outright.
               </strong>{" "}
-              A running proxy picks the block up on its next registry refresh rather than instantly.
+              Not instantly: a running proxy applies the block on its next registry refresh (30 s by default), and
+              calls made before then still run.
             </>
           }
         >
-          For a poisoned description the description IS the payload, so refusing calls afterwards is
-          too late. Blocking is reversible — the row stays, and Unblock returns it to unreviewed.
+          For a poisoned description the description IS the payload, so refusing calls alone would be
+          too late; that is why the listing is withheld as well. Blocking is reversible — the row stays,
+          and Unblock returns it to unreviewed.
         </DestructiveConfirm>
       )}
 
@@ -1360,7 +1364,9 @@ export function McpServers() {
               <strong style={{ color: "var(--escalate)", fontWeight: 600 }}>
                 the drifted definition would be auto-approved on sight.
               </strong>{" "}
-              Forgetting a server to clear an alarm is one step from adopting the change that raised it.
+              Forgetting a server to clear an alarm is one step from adopting the change that raised it. Under{" "}
+              <span className="mono" style={{ color: "var(--text-primary)" }}>strict</span>, calls to its tools are
+              refused until you approve them again, from a running proxy&apos;s next pin refresh.
             </>
           }
         >

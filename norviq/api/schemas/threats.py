@@ -77,6 +77,9 @@ class ThreatPath(BaseModel):
     # so an unreviewed MCP server reaching a sensitive target capped at 0.60 ("high") and could never be
     # "critical". A number nobody measured must not be the reason a path looks safe.
     cls: str | None = None
+    # The SPIFFE id of the agent the chain starts at. None for a non-agent origin, or when the graph does
+    # not carry one. Simulate evaluates as this identity instead of inventing `sa/<class>`.
+    spiffe_id: str | None = None
     mitre: str
     hops: int
     trust: float | None = None

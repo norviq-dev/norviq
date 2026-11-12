@@ -68,7 +68,12 @@ class _HealthySession:
         self._calls += 1
         if self._calls == 1:
             return _Result(mapping_rows=self._policy_rows)
-        return _Result(tuple_rows=self._efficacy_rows)
+        # The efficacy query also selects agent_id (the SVID half of the synthetic classifier), last.
+        # Seeds give (agent_class, decision, rule_id, framework, count); the SVID is the class's own.
+        return _Result(tuple_rows=[
+            (*row, f"spiffe://norviq/ns/team-a/sa/{row[0]}") if len(row) == 5 else row
+            for row in self._efficacy_rows
+        ])
 
     async def close(self) -> None:
         return None

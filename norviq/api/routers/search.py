@@ -32,6 +32,7 @@ from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AgentRegistryEntry, AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.agents import served_agent_rows
+from norviq.api.synthetic import audit_row_is_non_real, registry_row_is_synthetic  # the ONE shared classifier
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -46,12 +47,17 @@ _RESERVED_NAMESPACES = ("__cluster__",)
 
 
 async def _search_tools(session: AsyncSession, q: str, namespace: str | None) -> list[dict]:
-    """Recent audited tool calls whose tool_name contains `q` (24h window, namespace-scoped)."""
+    """Recent audited tool calls whose tool_name contains `q` (24h window, namespace-scoped).
+
+    Real traffic only, by the shared filter the Overview and the Audit Log's default view use. A
+    red-team run or a Simulate fills the window with fabricated calls, and the five newest hits were
+    theirs rather than what the agents actually did."""
     since = datetime.now(timezone.utc) - timedelta(hours=_AUDIT_WINDOW_HOURS)
     stmt = (
         select(AuditLogEntry.tool_name, AuditLogEntry.decision, AuditLogEntry.timestamp_utc)
         .where(AuditLogEntry.timestamp_utc >= since)
         .where(AuditLogEntry.tool_name.icontains(q, autoescape=True))
+        .where(~audit_row_is_non_real(AuditLogEntry))
     )
     if namespace:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)  # isolation: the COLUMN, not the match
@@ -70,14 +76,17 @@ async def _search_agents(request: Request, session: AsyncSession, q: str, namesp
     The trust, freeze and cap shown are the ones `GET /agents` serves (`served_agent_rows`): the warm snapshot,
     then the controls read from the store the engine enforces. This used to apply the registry's durable copy
     of the freeze and cap instead, so a search could disagree with the Agent Monitor, and during a store outage
-    it read "not frozen" for an agent the engine was blocking."""
+    it read "not frozen" for an agent the engine was blocking.
+
+    Test identities (Policy Tester sessions, e2e and probe classes) are left out, as the Agents roster
+    hides them by default. Filtered in SQL, before the limit, so they cannot take the five places."""
     stmt = select(
         AgentRegistryEntry.spiffe_id, AgentRegistryEntry.namespace, AgentRegistryEntry.agent_class,
         AgentRegistryEntry.trust_score, AgentRegistryEntry.trust_category, AgentRegistryEntry.last_seen,
     ).where(
         AgentRegistryEntry.spiffe_id.icontains(q, autoescape=True)
         | AgentRegistryEntry.agent_class.icontains(q, autoescape=True)
-    )
+    ).where(~registry_row_is_synthetic(AgentRegistryEntry))
     if namespace:
         stmt = stmt.where(AgentRegistryEntry.namespace == namespace)  # isolation: the COLUMN
     stmt = stmt.order_by(AgentRegistryEntry.last_seen.desc()).limit(_LIMIT)

@@ -62,6 +62,9 @@ export interface ThreatPath {
    *  0.8 for an origin with no score, which renders GREEN and fed the severity formula, so an
    *  unreviewed MCP server reaching a crown jewel could never be "critical". */
   cls: string | null;
+  /** The SPIFFE id of the agent the chain starts at; null for a non-agent origin. Simulate evaluates
+   *  as this identity instead of inventing `sa/<class>`. */
+  spiffe_id?: string | null;
   mitre: string;
   hops: number;
   trust: number | null;

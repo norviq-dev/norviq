@@ -20,7 +20,7 @@ from norviq.api.replay_values import (  # same "no argument values" test as /int
     builder_grant_waits_on_values,
 )
 from norviq.api.routers.settings_router import assert_apply_allowed  # shared dry-run-only gate
-from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # exclude probe/test traffic from dry-run replay
+from norviq.api.synthetic import audit_row_is_non_real, is_non_real_row  # exclude probe/test traffic from dry-run replay
 from norviq.api.threat_intent import (  # accumulate remediation controls in the single overlay
     generate_remediation_overlay_rego, parse_remediation_controls, union_remediation_controls)
 from norviq.config import settings
@@ -1342,7 +1342,7 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
         .where(AuditLogEntry.timestamp_utc >= since, AuditLogEntry.namespace == ns)
         # real traffic only: red-team is synthetic efficacy, and policy-tester/e2e/probe identities are
         # test harnesses — neither is live traffic the policy must not break. `audit_row_is_non_real` is
-        # the SQL twin of `is_synthetic_identity`, so the exclusion happens BEFORE the cap: a class-less
+        # the SQL twin of `is_non_real_traffic`, so the exclusion happens BEFORE the cap: a class-less
         # replay whose most recent 500 namespace rows are all Policy-Tester sessions would otherwise fill
         # the cap with rows the loop then skips and report that it replayed the namespace.
         .where(~audit_row_is_non_real(AuditLogEntry))
@@ -1370,7 +1370,7 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
         # Belt-and-braces behind the SQL predicate above: the same shared classifier, applied to the
         # object, so a stubbed/legacy session that did not run the predicate still cannot leak a
         # policy-tester / e2e / probe record into the "would this break REAL traffic" answer.
-        if is_synthetic_identity(rec.agent_class, getattr(rec, "agent_id", None)):
+        if is_non_real_row(rec):
             synthetic_skipped += 1
             continue
         try:

@@ -308,17 +308,21 @@ def test_the_console_cannot_manufacture_its_own_all_clear() -> None:
     The fake session ignores WHERE (it answers `scalar` with a canned number), so the exclusion is
     asserted on the COMPILED statement — the same way the sibling routers' real-traffic filters are.
     A behavioural assertion here would pass with no predicate at all."""
-    from norviq.api.synthetic import SYNTHETIC_CLASS_PREFIXES
+    import re
+
+    from norviq.api import synthetic
 
     client, session = _client([], recorded=412)
     assert client.get("/api/v1/system-health").json()["status"] == "ok"
     sql = session.scalar_statements[0]
-    assert "framework" in sql, "the liveness count does not exclude red-team rows"
-    assert "lower(coalesce(audit_log.agent_class" in sql.lower(), \
+    where = sql.split("WHERE", 1)[1]
+    assert "audit_log.framework" in where, "the liveness count does not exclude red-team rows"
+    assert "audit_log.agent_class" in where and "audit_log.agent_id" in where, \
         "the liveness count does not exclude synthetic/probe identities"
-    # the Policy Tester's own class prefix is one of the exclusions, by name.
-    assert "policy-tester-" in SYNTHETIC_CLASS_PREFIXES
-    assert sql.count("audit_log.agent_class") >= len(SYNTHETIC_CLASS_PREFIXES)
+    # The Policy Tester's own identity is one of the exclusions. The twin used to name each class prefix
+    # in its own LIKE (this counted them); it is one regex per column now, so check the regex instead.
+    assert re.search(synthetic._SVID_PATTERN, "spiffe://norviq/ns/payments/sa/policy-tester-k3x9")
+    assert re.search(synthetic._CLASS_PATTERN, "policy-tester-k3x9")
 
 
 def test_the_liveness_filter_is_the_shared_classifier_not_a_second_copy() -> None:

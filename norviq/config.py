@@ -256,12 +256,13 @@ class NorviqSettings(BaseSettings):
     mcp_pin_mode: str = "tofu"
     mcp_pin_store: str = "memory"            # memory | file
     mcp_pin_path: str = ""                   # file store location when mcp_pin_store=file
-    # How often a control-plane-backed proxy re-reads its pins. `load()` was awaited ONCE at startup
-    # and never again, so POST /mcp/pins/revoke changed the DB row and the console while the running
-    # proxy kept its startup copy: the revoked tool stayed listed to the model and stayed callable
-    # until the pod restarted — which is precisely what an operator reaches for revoke to stop.
-    # 30s bounds that window without putting the control plane on any request path (the refresh is a
-    # background task; get()/all() stay pure in-memory). 0 disables it.
+    # How often a running MCP proxy re-reads operator decisions: its pins (control-plane pin store
+    # only) and the server registry (every pin store). An Approve, Revoke, Block or Unblock reaches a
+    # running proxy within one interval and then applies to both the next tools/list and every
+    # tools/call, including calls from a client that listed before the change. Until the refresh
+    # lands the proxy acts on the previous decision. The refresh is a background task, so the control
+    # plane is on no request path. 0 disables it, and then a decision reaches a running proxy only
+    # when it restarts.
     mcp_pin_refresh_s: int = 30
     # Scanner severity at/above which a tool definition is REMOVED from the tools/list the model sees
     # (the payload never reaches the context), vs merely having its description replaced by a stub.

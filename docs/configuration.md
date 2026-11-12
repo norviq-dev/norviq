@@ -19,7 +19,7 @@ Three ready-made overlays ship alongside the defaults:
 - `helm/norviq/values-light.yaml` — smallest viable single-node footprint (one replica of everything,
   PDBs/HPAs/HA/SPIFFE off). Enforcement behaviour is unchanged; only replicas and resources shrink.
 
-Apply an overlay with `helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.7 -n norviq -f values-prod.yaml`
+Apply an overlay with `helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.8 -n norviq -f values-prod.yaml`
 (or `--set` individual keys, which always wins over a `-f` file for the same key).
 
 ## Install-blocking guards (read this first)
@@ -51,7 +51,7 @@ With `enabled: false` the chart **refuses to render** unless you give it an addr
 silently emitted the bundled service name and the API dialled a Service that did not exist.
 
 ```
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.7 -n norviq --create-namespace \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.8 -n norviq --create-namespace \
   --set postgresql.enabled=false --set postgresql.host=mydb.postgres.database.azure.com \
   --set redis.enabled=false      --set redis.host=mycache.redis.cache.windows.net \
   --set postgresql.password=... --set redis.password=...
@@ -66,7 +66,7 @@ credential ever passes through values or the chart's own Secret:
 kubectl -n norviq create secret generic my-pg \
   --from-literal=url='postgresql://user:PW@mydb.example.com:5432/norviq'
 
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.7 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.8 -n norviq \
   --set postgresql.enabled=false --set postgresql.existingSecret=my-pg \
   --set redis.enabled=false      --set redis.existingSecret=my-redis
 ```
@@ -178,7 +178,7 @@ two StatefulSets sit in an admission-rejection loop with nothing pointing at the
 Use datastores you manage — the same thing `values-prod.yaml` already does:
 
 ```bash
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.7 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.8 -n norviq \
   --set openshift.enabled=true \
   --set postgresql.enabled=false --set postgresql.host=<host> \
   --set redis.enabled=false      --set redis.host=<host>
@@ -422,7 +422,8 @@ Read-only. Everything is off by default — a single-cluster install renders **z
 resources and behaves exactly as a standalone install.
 
 **Spoke side** (`fleet.enabled: false`): runs an in-process relay that pushes agent/audit rollups
-to the hub. Key fields: `fleet.clusterId`/`clusterName`/`region`, `fleet.apiUrl` (hub base URL),
+to the hub. The rollups carry real agents and real traffic only: test identities and red-team,
+Simulate and probe calls are left out, as on the spoke's own Overview (`norviq/fleet_relay.py`). Key fields: `fleet.clusterId`/`clusterName`/`region`, `fleet.apiUrl` (hub base URL),
 `fleet.relayIntervalSeconds` (`60`), `fleet.pullIntervalSeconds` (`60`, how often the spoke
 pulls/verifies/applies the signed policy bundle), `fleet.staleAfterSeconds` (`180`, hub-side
 heartbeat-staleness threshold), `fleet.residency` (`false`, keep raw audit in-cluster —

@@ -371,6 +371,16 @@ describe("⌘K palette states what it knows", () => {
     expect(screen.queryByTestId("search-error")).not.toBeInTheDocument();
   });
 
+  it("an empty result says what was searched: real traffic and agents, not test traffic", async () => {
+    server.use(http.get("*/api/v1/search", () => HttpResponse.json({ tools: [], agents: [], policies: [] })));
+    renderAt("/audit");
+    typeQuery("report");
+
+    const empty = await screen.findByTestId("search-empty");
+    expect(empty).toHaveTextContent(/No results for 'report'/);
+    expect(empty).toHaveTextContent(/Searches real traffic and agents/);
+  });
+
   it("an expired session in the palette is named, not reported as 'No results'", async () => {
     server.use(http.get("*/api/v1/search", () => new HttpResponse("", { status: 401 })));
     renderAt("/audit");

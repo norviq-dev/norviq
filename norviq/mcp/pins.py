@@ -117,7 +117,8 @@ class ToolPin:
 
 
 class PinStore(Protocol):
-    """Backend contract. Reads are on the DISCOVERY path only; the call path never touches a store."""
+    """Backend contract. Discovery reads and writes it; the call path only reads it, in memory
+    (`PinRegistry.current_status`), so every backend's `get` must stay a pure in-memory lookup."""
 
     def get(self, pin: str) -> ToolPin | None: ...
     def put(self, record: ToolPin) -> None: ...
@@ -206,8 +207,11 @@ class PinVerdict:
 
 
 class PinRegistry:
-    """Checks definitions against pins. Called at DISCOVERY only; the call path reads the cached
-    status off the catalog entry, so a `tools/call` never reaches this class."""
+    """Checks definitions against pins.
+
+    `check` runs at DISCOVERY and is the only method that writes. A `tools/call` asks
+    `current_status`, a read-only in-memory lookup, so an Approve or Revoke that the store's refresh
+    has loaded applies to calls as well as to the next listing."""
 
     def __init__(self, store: PinStore | None = None, mode: str = "tofu") -> None:
         self._store = store or MemoryPinStore()
@@ -228,19 +232,9 @@ class PinRegistry:
         existing = self._store.get(pid)
 
         if existing is None:
-            approved = self._mode == "tofu"
-            record = ToolPin(
-                pin=pid, server_id=server_id, tool_name=name, digest=digest,
-                first_seen_at=time.time(), approved=approved, scan_severity=scan_severity,
-                canonical=canonical, last_digest=digest,
-            )
-            self._store.put(record)
-            status = PIN_FIRST_SEEN if approved else PIN_QUARANTINED
-            log.info(
-                "nrvq.mcp.pin.first_seen", server=server_id, tool=name, digest=digest[:16],
-                mode=self._mode, status=status, code="NRVQ-MCP-5041",
-            )
-            return PinVerdict(status=status, record=record)
+            record = self._first_sight(server_id, name, digest, canonical, scan_severity)
+            return PinVerdict(status=PIN_FIRST_SEEN if record.approved else PIN_QUARANTINED,
+                              record=record)
 
         if existing.digest == digest:
             status = PIN_OK if existing.approved else PIN_QUARANTINED
@@ -259,6 +253,52 @@ class PinRegistry:
             drift_count=existing.drift_count, code="NRVQ-MCP-5042",
         )
         return PinVerdict(status=PIN_DRIFT, record=existing, previous_canonical=existing.canonical)
+
+    def _first_sight(self, server_id: str, name: str, digest: str, canonical: str,
+                     scan_severity: str) -> ToolPin:
+        """Create the pin for a definition the store holds none for: approved under `tofu`, held
+        for approval under `strict`."""
+        approved = self._mode == "tofu"
+        record = ToolPin(
+            pin=pin_id(server_id, name), server_id=server_id, tool_name=name, digest=digest,
+            first_seen_at=time.time(), approved=approved, scan_severity=scan_severity,
+            canonical=canonical, last_digest=digest,
+        )
+        self._store.put(record)
+        log.info(
+            "nrvq.mcp.pin.first_seen", server=server_id, tool=name, digest=digest[:16],
+            mode=self._mode, status=PIN_FIRST_SEEN if approved else PIN_QUARANTINED,
+            code="NRVQ-MCP-5041",
+        )
+        return record
+
+    def repin(self, server_id: str, tool_name: str, digest: str, canonical: str,
+              scan_severity: str = "none") -> str:
+        """Pin a listed definition whose pin is gone, exactly as first sight at discovery would.
+
+        The call path's answer to Forget (`DELETE /api/v1/mcp/servers/...`), which deletes every pin
+        for a server while clients still hold its tool names. Before this, the call path read "no pin"
+        as "nothing to say" and kept the verdict it cached at listing time, so under `strict` a
+        forgotten tool stayed callable until the client listed again. Now the pin mode decides, as it
+        does at first sight: `strict` holds the tool until an operator approves it, `tofu` approves
+        it. The pin is written (and so reported), so the console shows the tool for that approval.
+        """
+        record = self._first_sight(server_id, tool_name, digest, canonical, scan_severity)
+        return PIN_FIRST_SEEN if record.approved else PIN_QUARANTINED
+
+    def current_status(self, server_id: str, tool_name: str, digest: str) -> str | None:
+        """The verdict for a definition already checked at discovery, from the store as it is NOW.
+
+        Read-only: no first-sight pin is created and no drift is counted, because the definition was
+        not served again; only the approval may have changed. None when the store holds no pin for
+        the tool: it was forgotten after it was listed, and the caller re-pins it (`repin`).
+        """
+        record = self._store.get(pin_id(server_id, tool_name))
+        if record is None:
+            return None
+        if record.digest == digest:
+            return PIN_OK if record.approved else PIN_QUARANTINED
+        return PIN_DRIFT
 
     def approve(self, server_id: str, tool_name: str, digest: str) -> bool:
         """Adopt a specific digest as approved (the operator action that clears a drift/quarantine).
@@ -373,12 +413,12 @@ class ControlPlanePinStore:
     Instead:
 
       * `load()` — awaited at proxy startup and then re-run on a timer by `start_refresh()` — pulls
-        this server's pins into memory. The refresh is why a REVOKE reaches a running proxy: without
-        it the process kept its startup copy for its whole lifetime, so an operator who withdrew
-        approval saw the console update while the tool stayed listed to the model and stayed callable
-        until the pod restarted.
-      * `get()` / `all()` — pure in-memory, so the discovery path never blocks on the network and the
-        call path (which only ever reads a cached catalog entry) is untouched.
+        this server's pins into memory. The refresh is how a REVOKE or an APPROVE reaches a running
+        proxy: the next `tools/list` reads it through `check`, and every `tools/call` reads it through
+        `PinRegistry.current_status`, so a client that listed before the change does not keep the old
+        verdict.
+      * `get()` / `all()` — pure in-memory, so neither the discovery path nor the call path ever
+        blocks on the network.
       * `put()` — updates memory and enqueues an upsert; a background task flushes it. Discovery must
         not wait on a write for a decision that has already been made locally from the loaded state.
 
@@ -402,6 +442,11 @@ class ControlPlanePinStore:
         self._pending: list[ToolPin] = []
         self._degraded = False
         self._refresh_task: "asyncio.Task | None" = None
+        # When the control plane was last known to hold each pin, as a step of `_seq`: set when a load
+        # returns the pin or a report of it succeeds. A load drops a held pin only if the control plane
+        # held it before that load began (see `load`).
+        self._seq = 0
+        self._held_upstream: dict[str, int] = {}
 
     # -- PinStore protocol (sync, in-memory) --------------------------------------------------
     def get(self, pin: str) -> ToolPin | None:
@@ -459,6 +504,8 @@ class ControlPlanePinStore:
 
         from norviq.sdk.client.engine import ClientFault, client_fault, request_problem
 
+        self._seq += 1
+        started = self._seq
         try:
             problem = request_problem(self._token, self._api_url)
             if problem is not None:
@@ -471,6 +518,10 @@ class ControlPlanePinStore:
                 )
                 resp.raise_for_status()
                 rows = resp.json()
+                if not isinstance(rows, list):
+                    # A failed load, not an empty one: a load drops held pins the control plane no
+                    # longer has (below), so an error body read as "no pins" would drop them all.
+                    raise ValueError("the pin list is not a JSON array")
         except Exception as exc:
             self._degraded = True
             # Same degrade either way; a fault of this client's own is named as one.
@@ -488,7 +539,20 @@ class ControlPlanePinStore:
             )
             return
 
-        for row in rows if isinstance(rows, list) else []:
+        # A held pin the control plane HAD and no longer has was forgotten, and is dropped. Loads used
+        # to merge, so Forget never reached a running proxy: it went on acting on the forgotten pins,
+        # approvals included, until it restarted.
+        #
+        # A held pin the control plane has NEVER had is kept. It was pinned here while the control
+        # plane was down (flush sends nothing then) or its report failed, so its absence says nothing.
+        # Dropping it would let the next listing take a changed definition as a new first sight, which
+        # under tofu approves it with no drift seen. "Had" means a load returned it, or a report of it
+        # succeeded, before this load began; a report that lands while this GET is in flight may not be
+        # in `rows` yet, and the next load decides.
+        loaded: dict[str, ToolPin] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
             name = row.get("tool_name", "")
             record = ToolPin(
                 pin=pin_id(self._server_id, name),
@@ -502,7 +566,20 @@ class ControlPlanePinStore:
                 drift_count=int(row.get("drift_count", 0)),
                 last_digest=row.get("last_digest", ""),
             )
-            self._pins[record.pin] = record
+            loaded[record.pin] = record
+        pins: dict[str, ToolPin] = {}
+        for pid, held in self._pins.items():
+            if pid in loaded:
+                continue
+            had_at = self._held_upstream.get(pid)
+            if had_at is not None and had_at < started:
+                self._held_upstream.pop(pid, None)                    # forgotten
+                continue
+            pins[pid] = held
+        for pid in loaded:
+            self._held_upstream[pid] = max(self._held_upstream.get(pid, 0), started)
+        pins.update(loaded)
+        self._pins = pins
         # RECOVERY. `_degraded` was a one-way latch: set on any load failure and never cleared, while
         # `flush` returns early whenever it is set. So a single transient control-plane blip silenced
         # this server's pin reporting PERMANENTLY — the console kept showing health "ok" and a stale
@@ -555,3 +632,11 @@ class ControlPlanePinStore:
             # already made from the loaded state and the call path is unaffected.
             log.warning("nrvq.mcp.pins.report_failed", server=self._server_id,
                         error=redact_credentials(str(exc), self._token), code="NRVQ-MCP-5048")
+            return
+        # The control plane now holds a row for every tool reported (observe creates one), so a later
+        # load that does not return it means it was forgotten.
+        self._seq += 1
+        for tool in payload["tools"]:
+            name = tool.get("tool_name", "") if isinstance(tool, dict) else ""
+            if name:
+                self._held_upstream[pin_id(self._server_id, name)] = self._seq

@@ -147,7 +147,10 @@ def attack_request(attack: AttackDefinition, target_agent: str, target_namespace
     so the attack those three exist to make was never made from the CLI. A plain dict rather than a
     ToolCallEvent, so this module stays importable without the SDK models.
 
-    Each class gets its own SVID so it picks up its own trust history.
+    The SVID is `sa/<target_agent>`, which is not the workload's own unless its service account is named
+    after the class. So it identifies nothing: the `framework` tag below is what marks the call as
+    fabricated, and the engine writes no per-identity state (registry, trust, history, profile, graph)
+    for it (norviq/api/synthetic.py::is_synthetic_framework).
     """
     depth = attack.tool_params.get("depth")
     return {
@@ -159,10 +162,11 @@ def attack_request(attack: AttackDefinition, target_agent: str, target_namespace
             "agent_class": target_agent,
         },
         # EXPLICIT, not inherited. `framework == "redteam"` is what excludes these fabricated attacks
-        # from real-traffic counts (`audit_row_is_non_real`); untagged, synthetic attack volume would
-        # inflate the operator's live metrics. EvaluateRequest used to default it to "redteam", which also
-        # silently tagged REAL operator traffic posted over raw HTTP; that default is gone, so the suite
-        # declares itself.
+        # from real-traffic counts (`audit_row_is_non_real`) and from every per-identity write in the
+        # engine. Untagged, synthetic attack volume would inflate the operator's live metrics and the
+        # made-up SVID above would be registered as an agent. EvaluateRequest used to default it to
+        # "redteam", which also silently tagged REAL operator traffic posted over raw HTTP; that default
+        # is gone, so the suite declares itself.
         "framework": "redteam",
         "session_id": f"redteam-{attack.id}",
         # A chained-call `depth` param threaded into the event's call_depth, so chain-depth rules can

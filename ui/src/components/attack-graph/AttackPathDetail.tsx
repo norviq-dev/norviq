@@ -14,7 +14,10 @@ import type { PathStatus, ThreatPath } from "./types";
 
 // `monitor` = the path IS covered by a policy but the namespace is in Monitor mode (evaluated, not
 // enforced) — a would-block, NOT a policy gap. Rendered distinctly from a real enforced block or a gap.
-export type SimResult = { blocked: boolean; label: string; monitor?: boolean } | null;
+// `argGated` = allowed with empty arguments on a path real traffic was stopped (or would-blocked) on.
+// Simulate sends no arguments, so it cannot tell whether that rule covers the path — inconclusive,
+// not "covered" and not a gap. Neutral, never the red of a gap.
+export type SimResult = { blocked: boolean; label: string; monitor?: boolean; argGated?: boolean } | null;
 
 interface Props {
   path: ThreatPath;
@@ -87,8 +90,8 @@ export function AttackPathDetail({
   const sev = SEVERITY_COLORS[path.sev];
   const naturalBlock = path.steps.some((st) => st.dec === "block");
   // AGENT-ONLY AFFORDANCES. Both the intent draft and Simulate are scoped by agent class: the draft
-  // creates a policy for `cls`, and Simulate mints `spiffe://…/sa/{cls}` to run each hop through
-  // /evaluate. A path that does not start at an agent has no class, so neither is a thing that could
+  // creates a policy for `cls`, and Simulate runs each hop through /evaluate as the path's workload
+  // identity (or a `sa/{cls}` stand-in when the graph has none), with that class. A path that does not start at an agent has no class, so neither is a thing that could
   // be done — offering them would either 422 server-side or, worse, quietly create a policy scoped to
   // the empty string. Hidden with a stated reason rather than left to fail.
   const isAgentOrigin = (path.src_kind ?? "agent") === "agent" && Boolean(path.cls);
@@ -256,10 +259,14 @@ export function AttackPathDetail({
           {simulating ? "Simulating…" : "Simulate (preview)"}
         </button>
         {simResult && (() => {
-          // Three visual states: enforced block (green), Monitor would-block (amber — covered but not
-          // enforcing), genuine gap (red). Monitor is NEVER shown as a red "gap".
+          // Four visual states: enforced block (green), Monitor would-block (amber — matched but not
+          // enforcing), inconclusive (neutral — real traffic was stopped or would-blocked but the
+          // empty-argument call was allowed, so Simulate cannot tell whether that rule covers the path),
+          // and an empty-argument allow (red). Neither Monitor nor inconclusive is shown as a red "gap".
           const tone = simResult.monitor
             ? { bg: "rgba(42,32,10,0.5)", fg: "var(--escalate)", bd: "#4a3a10" }
+            : simResult.argGated
+            ? { bg: "rgba(38,38,38,0.6)", fg: "#b8c2d6", bd: "#3a3a3a" }
             : simResult.blocked
             ? { bg: "rgba(13,42,28,0.5)", fg: "#6ee7b7", bd: "#1f4635" }
             : { bg: "rgba(42,15,22,0.5)", fg: "#ff8fa3", bd: "#3a1420" };

@@ -296,11 +296,17 @@ export function AttackGraph() {
     if (!selected || simulating) return;
     setSimulating(true);
     try {
+      // The path's own workload identity when the graph knows it. `sa/<class>` is a stand-in that no
+      // real workload uses: it evaluated as an identity with no trust history, and minted a second
+      // agent node beside the real one. The stand-in is kept only for a path with no known identity,
+      // and the result says so.
+      const realId = selected.spiffe_id || null;
       const agent_identity = {
-        spiffe_id: `spiffe://norviq/ns/${selected.ns}/sa/${selected.cls}`,
+        spiffe_id: realId ?? `spiffe://norviq/ns/${selected.ns}/sa/${selected.cls}`,
         namespace: selected.ns,
         agent_class: selected.cls
       };
+      const idNote = realId ? "" : ` Evaluated as a stand-in identity (sa/${selected.cls}): the graph has no workload identity for this path.`;
       const tools = selected.steps.filter((st) => st.kind === "tool").map((st) => st.to);
       const probes = tools.length ? tools : [selected.tool || selected.tgt];
       let enforced = false; // a real block by an authored policy (Enforce mode)
@@ -320,19 +326,41 @@ export function AttackGraph() {
         if (res.decision === "block") { enforced = true; break; }
         if (res.decision === "audit") { wouldBlock = true; } // keep scanning for a hard block on a later hop
       }
-      // An enforced block is "blocked". A Monitor would-block is "would_block": a policy matched, and the
-      // call would run. It was folded into "blocked", which moved the path onto the Blocked tile. A
-      // fail-closed default or a fully-allowed path is NOT covered.
-      setSim((s) => ({ ...s, [selected.id]: enforced ? "blocked" : wouldBlock ? "would_block" : "exploitable" }));
+      // Simulate sends EMPTY arguments, so a rule that checks argument values cannot fire. When real
+      // traffic on this path was stopped (or logged as a would-block, in Monitor) and the empty-argument
+      // call is allowed, the preview cannot say whether the rule behind those real decisions covers
+      // this path, and it must not overturn the status real traffic established. That is all it knows:
+      // "the rule depends on arguments, so this is not a gap" was an inference stated as fact. A hop
+      // with `via` repeats the counts of the call into its tool, so it is skipped here or every
+      // decision would be counted twice. A would-block RAN, so it is never counted as a stop.
+      const realHops = selected.steps.filter((st) => !st.via);
+      const realStops = realHops.reduce((n, st) => n + (st.deny || 0), 0);
+      const realWouldBlocks = realHops.reduce((n, st) => n + (st.would_block || 0), 0);
+      const argGated = !enforced && !wouldBlock && !failClosed && realStops + realWouldBlocks > 0;
+      const times = (n: number) => `${n} time${n === 1 ? "" : "s"}`;
+      const realSeen = realStops > 0
+        ? `real calls on this path were stopped ${times(realStops)}` +
+          (realWouldBlocks > 0 ? ` and logged as would-block (Monitor, they ran) ${times(realWouldBlocks)}` : "")
+        : `real calls on this path were logged as would-block ${times(realWouldBlocks)} (Monitor, they ran)`;
+      setSim((s) => {
+        const next = { ...s };
+        if (enforced) next[selected.id] = "blocked";
+        else if (wouldBlock) next[selected.id] = "would_block";
+        else if (argGated || failClosed) delete next[selected.id];
+        else next[selected.id] = "exploitable";
+        return next;
+      });
       setSimResult((s) => ({
         ...s,
         [selected.id]: enforced
-          ? { blocked: true, label: "Blocked by an authored policy" }
+          ? { blocked: true, label: "Blocked by an authored policy." + idNote }
           : wouldBlock
-          ? { blocked: true, monitor: true, label: "A policy would block this, but the namespace is in Monitor mode, so the call would run (evaluated, not enforced)." }
+          ? { blocked: true, monitor: true, label: "A policy would block this, but the namespace is in Monitor mode, so the call would run (evaluated, not enforced)." + idNote }
           : failClosed
-          ? { blocked: false, label: "Blocked only by the fail-closed default — no policy is loaded for this namespace. Author a policy to control it intentionally." }
-          : { blocked: false, label: "Simulation found a policy gap — no policy covers this path" }
+          ? { blocked: false, label: "Blocked only by the fail-closed default — no policy is loaded for this namespace. Author a policy to control it intentionally." + idNote }
+          : argGated
+          ? { blocked: false, argGated: true, label: `Allowed with empty arguments, but ${realSeen}. Simulate sent no arguments, so it cannot tell whether that rule covers this path.` + idNote }
+          : { blocked: false, label: "Allowed with empty arguments: no tool-level rule stops this path. Rules that check argument values were not exercised." + idNote }
       }));
     } catch (e: unknown) {
       setSimResult((s) => ({ ...s, [selected.id]: { blocked: false, label: e instanceof Error ? e.message : "Simulation failed" } }));

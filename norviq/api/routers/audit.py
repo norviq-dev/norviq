@@ -23,7 +23,7 @@ from norviq.api.auth import get_current_user, read_namespace, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.system_health import infra_rule_for  # ONE resolver for 'is this an engine fault'
-from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # the ONE shared synthetic/probe classifier (do not fork)
+from norviq.api.synthetic import audit_row_is_non_real, is_non_real_row, is_non_real_traffic  # the ONE shared synthetic/probe classifier (do not fork)
 from norviq.config import settings
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES  # softened-would-block rule_id prefixes (do not fork)
 
@@ -90,6 +90,10 @@ def _to_dict(row: AuditLogEntry) -> dict:
         "latency_ms": row.latency_ms,
         # Decision source (sidecar / sidecar-http / sdk / redteam / ...) for the UI Source column + filter.
         "framework": getattr(row, "framework", ""),
+        # The server's verdict on whether this row is real traffic, by the same classifier
+        # `exclude_synthetic` uses. Only the live tail carried it, so with "Real traffic only" off a
+        # fetched Simulate or Policy Tester row looked exactly like a real call.
+        "non_real": is_non_real_row(row),
         "timestamp": row.timestamp_utc.isoformat(),
         # MCP provenance, when the decision came over the Model Context Protocol. Lifted out of the
         # JSONB payload so the console can show WHICH integration a decision belongs to without
@@ -97,7 +101,17 @@ def _to_dict(row: AuditLogEntry) -> dict:
         # servers is "which one did this come from?". Absent (None) for every non-MCP row, so the
         # response shape is unchanged for existing consumers.
         "mcp": _mcp_context(row),
+        # The synthetic tag the caller sent and was not allowed to use (auth.bind_framework), from the
+        # audit payload. Such a row is real traffic (`framework` is not synthetic); this says what the
+        # caller claimed. None on every other row.
+        "claimed_framework": _claimed_framework(row),
     }
+
+
+def _claimed_framework(row: AuditLogEntry) -> str | None:
+    payload = getattr(row, "payload", None)
+    value = payload.get("claimed_framework") if isinstance(payload, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 def _mcp_context(row: AuditLogEntry) -> dict | None:
@@ -193,10 +207,10 @@ async def audit_stats(
     since = _since_for_range(range)
     # RECONCILE (real-traffic-only): the Overview KPIs/top-tools must count the SAME population the governance
     # surfaces do (Compliance/MITRE `_activity_by_rule`, RedTeam `compute_efficacy`) — REAL traffic only. So we
-    # exclude red-team framework events (efficacy tooling, not live enforcement) and synthetic/probe/eval
-    # identities (`is_synthetic_identity`). `is_synthetic_identity` is a Python prefix/regex classifier that
-    # is NOT expressible in SQL, so — exactly like `_activity_by_rule` — we GROUP BY the discriminating columns
-    # and drop the excluded rows Python-side before aggregating (bounded cardinality, not a full table scan).
+    # exclude fabricated calls (red-team, Simulate, probes) and synthetic/probe/eval identities with the shared
+    # `is_non_real_traffic`. Like `_activity_by_rule`, we GROUP BY the discriminating columns and drop the
+    # excluded rows Python-side before aggregating. `agent_id` is one of them: the Policy Tester runs under a
+    # real class and marks itself only in its SVID (`sa/policy-tester-<rand>`).
     stmt = (
         select(
             AuditLogEntry.tool_name,
@@ -207,11 +221,12 @@ async def audit_stats(
             func.count(AuditLogEntry.id),
             func.sum(AuditLogEntry.latency_ms),
             func.count(AuditLogEntry.latency_ms),  # non-null latency count → matches AVG() semantics
+            AuditLogEntry.agent_id,
         )
         .where(AuditLogEntry.timestamp_utc >= since)
         .group_by(
             AuditLogEntry.tool_name, AuditLogEntry.decision, AuditLogEntry.agent_class,
-            AuditLogEntry.framework, AuditLogEntry.rule_id,
+            AuditLogEntry.framework, AuditLogEntry.rule_id, AuditLogEntry.agent_id,
         )
     )
     if namespace:
@@ -236,10 +251,10 @@ async def audit_stats(
     latency_sum = 0.0
     latency_n = 0
     tool_counts: dict[str, int] = {}
-    for tool_name, decision, agent_class, framework, rule_id, count, lat_sum, lat_n in (
+    for tool_name, decision, agent_class, framework, rule_id, count, lat_sum, lat_n, agent_id in (
         await session.execute(stmt)
     ).all():
-        if str(framework or "") == "redteam" or is_synthetic_identity(str(agent_class or "")):
+        if is_non_real_traffic(framework, agent_class, agent_id):
             continue  # excluded from Overview so it reconciles with Compliance/MITRE + RedTeam efficacy
         n = int(count or 0)
         total += n
@@ -284,12 +299,11 @@ async def top_blocked_tools(
     """Top blocked tool names by count."""
     namespace = read_namespace(user, namespace)
     since = _since_for_range(range)
-    # Reconcile: the Overview headline (audit_stats) already excludes red-team framework events +
-    # synthetic/probe identities so it counts the SAME real-traffic population as Compliance/MITRE. This
-    # sibling widget must too, or the Top-Blocked-Tools list on the same page contradicts its own headline.
-    # is_synthetic_identity is a Python prefix/regex classifier NOT expressible in SQL, so — exactly like
-    # audit_stats — we load the blocked rows (already the small decision=='block' subset) and drop the
-    # excluded ones Python-side before summing per tool_name and taking the top-N.
+    # Reconcile: the Overview headline (audit_stats) already excludes fabricated calls + synthetic/probe
+    # identities so it counts the SAME real-traffic population as Compliance/MITRE. This sibling widget
+    # must too, or the Top-Blocked-Tools list on the same page contradicts its own headline. Like
+    # audit_stats, we load the blocked rows (already the small decision=='block' subset) and drop the
+    # excluded ones Python-side, with the shared `is_non_real_row`, before summing per tool_name.
     query = (
         select(AuditLogEntry)
         .where(AuditLogEntry.decision == "block")
@@ -300,9 +314,7 @@ async def top_blocked_tools(
     records = (await session.execute(query)).scalars().all()
     tool_counts: dict[str, int] = {}
     for record in records:
-        if str(getattr(record, "framework", "") or "") == "redteam" or is_synthetic_identity(
-            str(getattr(record, "agent_class", "") or "")
-        ):
+        if is_non_real_row(record):
             continue  # excluded from the Overview so it reconciles with the headline + Compliance/MITRE
         name = str(record.tool_name or "")
         tool_counts[name] = tool_counts.get(name, 0) + 1
@@ -328,12 +340,10 @@ async def audit_volume(
     records = (await session.execute(query)).scalars().all()
     buckets: dict[str, dict[str, int | str]] = {}
     for record in records:
-        # Reconcile: drop red-team + synthetic/probe traffic so the volume chart counts the same
+        # Reconcile: drop fabricated + synthetic/probe traffic so the volume chart counts the same
         # real-traffic population as the Overview headline + Compliance/MITRE (this query already loads full
         # rows, so agent_class/framework are on-hand — no extra query).
-        if str(getattr(record, "framework", "") or "") == "redteam" or is_synthetic_identity(
-            str(getattr(record, "agent_class", "") or "")
-        ):
+        if is_non_real_row(record):
             continue
         key = _bucket_key(record.timestamp_utc, bucket_minutes)
         if key not in buckets:

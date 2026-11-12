@@ -123,7 +123,8 @@ change rather than just be alarmed by it.
 **Try this:**
 1. **Approve served definition** — the tool comes back, `approved_by` becomes your username, and the
    status flips to `PINNED`. (Don't, in a real deployment. This one is malicious.)
-2. **Revoke** — the tool is withheld again on the next `tools/list`.
+2. **Revoke** — once the proxy's pin refresh loads it (30 s by default), the tool is withheld again
+   on the next `tools/list` and calls to it are refused, even from a client that listed it before.
 3. Try approving a digest the server has not served (via the API): you get a **409**. An approval
    must name a definition somebody actually reviewed, so a server that changes again mid-review
    cannot get the new one blessed by a click meant for the old one.

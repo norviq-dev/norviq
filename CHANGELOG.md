@@ -5,12 +5,12 @@ versions follow SemVer. Each 0.2.x entry is a summary — the linked GitHub rele
 grouped by upgrade impact, security relevance and operator-visible behaviour. Entries for 0.2.0 and
 earlier are taken from the annotated tags, the only record those versions have.
 
-Nineteen released versions. The `pre-public-cleanup-20260712` tag is not a release and is omitted.
+Twenty released versions. The `pre-public-cleanup-20260712` tag is not a release and is omitted.
 Three versions published incompletely — `v0.1.0` shipped no chart, `v0.1.1` shipped it unsigned,
 `v0.2.0` shipped no chart — and their headings say so: they are listed because they happened, not
 because they should be installed.
 
-## [Unreleased]
+## [0.2.8] — 2026-11-12 — the console reports what is enforced
 
 **Upgrade impact — read before `helm upgrade`.**
 
@@ -37,7 +37,8 @@ because they should be installed.
   between Block and Monitor no longer hides half the window. Tool Call Volume includes audit and
   escalate decisions.
 - The Attack Graph and the Asset Graph count a Monitor would-block as monitored, not blocked. A path
-  with allowed end-to-end traffic now reads exploitable.
+  with allowed end-to-end traffic now reads exploitable. Simulate evaluates as the path's own identity
+  and does not call a rule that depends on argument values a policy gap.
 - A frozen agent stays frozen in the Agents list, the trust chart, search and the notification bell;
   it used to read as its last score about 30 s after the freeze. Unfreeze lifts the freeze without
   leaving a trust cap behind, Reset Trust is now Reset Behavior Record and calls the reset endpoint,
@@ -50,6 +51,10 @@ because they should be installed.
 
 **Fixes.** The asset graph no longer loses tool calls when the API runs more than one replica: saves
 merge instead of overwriting, and removing a node is kept as a tombstone every replica honours.
+Red-team runs, Attack Graph Simulate and probes no longer register agents, move trust scores or add
+graph nodes.
+
+**Security.** This release contains security fixes; their advisories publish with the release.
 
 ## [0.2.7] — 2026-11-11 — a pod that carries the injector's parts is refused
 

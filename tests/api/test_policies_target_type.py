@@ -248,8 +248,12 @@ def test_matches_counts_real_workload_traffic_only() -> None:
     assert rows[0]["matches"] == 4200  # the tier resolution itself is unchanged
     # The class-name prefixes are bound parameters, so they only appear once the binds are inlined.
     sql = str(seen[0].compile(compile_kwargs={"literal_binds": True}))
-    assert "'redteam'" in sql, "the match count does not exclude red-team rows"
-    assert "policy-tester-%" in sql, "the match count does not exclude Policy-Tester identities"
+    # The twin is one regex per column (norviq/api/synthetic.py), so the tags and class names are in its
+    # patterns rather than in quoted literals and LIKE prefixes; the patterns themselves are what to find.
+    from norviq.api import synthetic
+
+    assert synthetic._FRAMEWORK_PATTERN in sql, "the match count does not exclude red-team rows"
+    assert synthetic._SVID_PATTERN in sql, "the match count does not exclude Policy-Tester identities"
     # ...and it is the ONE shared predicate, not a second hand-rolled copy.
     from sqlalchemy import func, select
 

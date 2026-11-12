@@ -362,6 +362,11 @@ class HttpProxy:
             # Answered locally: the upstream is never contacted. This is the block path, and the
             # 200 is correct — the JSON-RPC envelope carries the refusal, not the HTTP status.
             return Response(mediation.reply, media_type="application/json")
+        if mediation.forward is None and msg.is_notification:
+            # A notification the firewall dropped (one to a blocked server). A notification has no
+            # answer, so the transport's own acknowledgement is the right one; a 400 here read as a
+            # transport fault to the client.
+            return Response(status_code=202)
         if mediation.forward is None:
             return JSONResponse(P.error_response(msg.id, P.E_INTERNAL, "message refused by firewall"),
                                 status_code=400)
@@ -480,6 +485,15 @@ class HttpProxy:
                 if origin is not None:
                     corr = origin.resumption()
         if not corr.resumed:
+            if fw.server_blocked:
+                # A blocked server is not contacted for a stream of its own requests and
+                # notifications. 405 is the transport's answer for "no standalone stream here"; the
+                # client keeps POSTing, and the lifecycle messages still pass there. A resumption of
+                # a stream opened before the block goes on: it answers a request the client is
+                # waiting for, and that answer is replaced by the firewall.
+                fw.stats["server_blocked_get_stream_refused"] = (
+                    fw.stats.get("server_blocked_get_stream_refused", 0) + 1)
+                return Response(status_code=405, headers={"Allow": "POST, DELETE"})
             corr.upstream_headers = _connection_headers(request)
         return await self._stream_through(fw, "GET", request, None, corr,
                                           last_event_id=server_last_id)

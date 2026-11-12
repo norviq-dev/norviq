@@ -361,6 +361,10 @@ class AttackGraphEngine:
             ),
             session_id="attack-graph-engine",
             trust_score=agent["properties"].get("trust_score", 0.5),
+            # A path check is not a call the agent made. Untagged, it ran as the agent's real SVID with
+            # empty arguments and wrote trust, history, profile and a graph edge for that agent. The tag
+            # is the shared synthetic marker (norviq/api/synthetic.py), the same one Simulate sends.
+            framework="attack-graph",
         )
 
         try:

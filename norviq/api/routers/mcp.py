@@ -554,6 +554,10 @@ async def forget_server(
 
     Destructive in the security-relevant direction: the next `tools/list` re-pins whatever the server
     serves at that moment. Admin-only and logged at WARNING for exactly that reason.
+
+    A running proxy drops the pins at its next pin refresh, and a call to a tool a client listed
+    before this is re-pinned as first sight would pin it (`PinRegistry.repin`): refused under
+    `strict` until approved, callable under `tofu`.
     """
     require_admin(user)
     scoped_namespace(user, namespace)

@@ -24,7 +24,7 @@ individually described.
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
 | API | 109 | `norviq/api/main.py`, `norviq/api/routers/*` |
-| MCP | 65 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
+| MCP | 67 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
 | WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/injector_owned.go`, `webhook/controller.go`, `webhook/injector.go` |
 | ENG | 55 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | DB | 45 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
@@ -32,7 +32,7 @@ individually described.
 | SDK | 40 | `norviq/sdk/*` |
 | REG | 25 | `norviq/engine/policy_loader.py` |
 | SDC | 32 | `norviq/sidecar/*` |
-| AUTH | 29 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py` |
+| AUTH | 30 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py` |
 | AUD | 13 | `norviq/engine/audit_emitter.py`, `norviq/api/audit_retention.py` |
 | GRP | 18 | `norviq/engine/graph/*` |
 | RED | 12 | `norviq/redteam/*`, `norviq/api/routers/redteam.py` |
@@ -42,7 +42,7 @@ individually described.
 | SIEM | 6 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **569** (including `*-DEBUG-*` traces). Counted 2026-11-12 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
+Total unique codes: **572** (including `*-DEBUG-*` traces). Counted 2026-11-11 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
 
 ## API
 
@@ -248,6 +248,7 @@ OIDC / JWKS token validation. Distinct prefix from `NRVQ-SIEM-14xxx`.
 | NRVQ-AUTH-14027 | `nrvq.auth.revocations_persisted_late` (INFO: queued 14024 revocations have now landed in Postgres) | `norviq/api/session_revocation.py` |
 | NRVQ-AUTH-14028 | `nrvq.auth.revocation_cache_reseeded` (WARNING: Redis had lost the logout denylist — restart without its RDB, failover to an empty replica, flush, or the first 0.2.6 boot, since 0.2.5 never set the marker — and it was rebuilt from this process's memory. Logged by each process whose pass finds the marker missing, so processes starting or passing at about the same time each log it once; the rewrites are idempotent) | `norviq/api/session_revocation.py` |
 | NRVQ-AUTH-14029 | `nrvq.startup.revocations_load_failed` (ERROR: startup REFUSED — the durable revocation set could not be loaded after retries; a pod that served with an empty mirror could accept logged-out tokens) | `norviq/api/main.py` |
+| NRVQ-AUTH-14030 | `nrvq.auth.synthetic_tag_not_honoured` (WARNING: an /evaluate caller sent a synthetic `framework` (one of `SYNTHETIC_FRAMEWORKS` in `norviq/api/synthetic.py`, such as `redteam`) but is not an operator credential (role admin or viewer, not bound to an agent identity). The call is evaluated and recorded as real traffic with `framework=""`, and the tag is kept on the audit row as `claimed_framework`. Not a refusal) | `norviq/api/auth.py` |
 | NRVQ-AUTH-14031 | `nrvq.auth.revocations_unpersisted_at_shutdown` (ERROR: an API process shut down with `entries=<n>` logouts Postgres never got, after one last try. They are in Redis, and the next API process to boot imports them into Postgres; until then a Redis data loss would drop them) | `norviq/api/session_revocation.py` |
 
 ## FLT
@@ -427,7 +428,7 @@ mentions it in a comment is not listed.
 | NRVQ-MCP-5065 | `nrvq.mcp.http.pin_store_upgraded` (WARNING: the HTTP proxy was configured with the `memory` pin store and uses `control-plane` instead) | `norviq/mcp/http.py` |
 | NRVQ-MCP-5066 | `nrvq.mcp.gate_b.schema_violation` (WARNING: a `tools/call` did not match the tool's declared `inputSchema` and was refused) | `norviq/mcp/firewall.py` |
 | NRVQ-MCP-5067 | `nrvq.mcp.gate_a.item_list_flagged` (WARNING: entries in a `resources/list`, `resources/templates/list` or `prompts/list` result had scan findings; `withheld`) | `norviq/mcp/firewall.py` |
-| NRVQ-MCP-5068 | `nrvq.mcp.gate_a.server_blocked` (WARNING: the server is blocked in the registry, so its tools were withheld from `tools/list`); also `nrvq.mcp.gate_a.elicitation_flagged` (WARNING: a server elicitation had scan findings) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5068 | `nrvq.mcp.gate_a.server_blocked` (WARNING: the server is blocked in the registry, so the answer to a listing forwarded before the block was withheld: its tools from `tools/list`, or the entries of its `resources/list`, `resources/templates/list` or `prompts/list`; `surface` names which. A listing asked after the block is never sent and logs `NRVQ-MCP-5096`); also `nrvq.mcp.gate_a.elicitation_flagged` (WARNING: a server elicitation had scan findings) | `norviq/mcp/firewall.py` |
 | NRVQ-MCP-5069 | `nrvq.mcp.server.decision` (WARNING: an admin set a server decision through `POST /api/v1/mcp/servers/decision`); also `nrvq.mcp.notification_flagged` (WARNING: a server notification had scan findings) | `norviq/api/routers/mcp.py`, `norviq/mcp/firewall.py` |
 | NRVQ-MCP-5070 | `nrvq.mcp.gate_a.schema_not_fully_enforceable` (WARNING, once at discovery: schema conformance is on and this tool's schema cannot be fully checked) | `norviq/mcp/firewall.py` |
 | NRVQ-MCP-5071 | `nrvq.mcp.servers.loaded`, `nrvq.mcp.servers.control_plane_recovered` (INFO: the server registry was loaded from the control plane) | `norviq/mcp/servers.py` |
@@ -454,6 +455,8 @@ mentions it in a comment is not listed.
 | NRVQ-MCP-5093 | `nrvq.mcp.discover.withheld` (WARNING: an `initialize` or `server/discover` result was larger than the scan budget allows and was answered to the client with an error) | `norviq/mcp/firewall.py` |
 | NRVQ-MCP-5095 | `nrvq.mcp.control_plane.client_misconfigured` (ERROR: the server registry, `store=servers`, or the pin store, `store=pins`, could not be loaded for a reason of this client's own, as `NRVQ-SDK-1018` defines it; `problem` says which. The store degrades exactly as for NRVQ-MCP-5077 / NRVQ-MCP-5046) | `norviq/mcp/servers.py`, `norviq/mcp/pins.py` |
 | NRVQ-MCP-5094 | `nrvq.mcp.input_required.withheld` (WARNING: a demand for input was larger than the scan budget allows and became a tool error) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5096 | `nrvq.mcp.server_blocked.request_refused` (WARNING: a request was refused because the server is blocked in the registry. `direction=client`: any client request but the handshake and `ping` (`tools/call`, a listing, `resources/read`, `completion/complete`, `resources/subscribe`, unknown methods), answered by the proxy; the upstream never saw it. Covers clients that listed the tools before the block. `direction=server`: a request from the server but `ping` (`sampling/createMessage`, `elicitation/create`, `roots/list`), refused back to the server; the client never saw it) | `norviq/mcp/firewall.py` |
+| NRVQ-MCP-5097 | `nrvq.mcp.gate_a.pin_status_refreshed` (INFO: a call found that a listed tool's approval changed since it was listed, after a Revoke, an Approve or a Forget reached the pin store, and the call path now uses the new verdict; `previous`, `current`. After a Forget the tool is re-pinned as first sight would pin it) | `norviq/mcp/firewall.py` |
 
 ## REG / GRP / AUD / RED / TEL / CLI / SDK / IDT
 
@@ -524,7 +527,7 @@ NRVQ-MCP-5065, NRVQ-MCP-5066, NRVQ-MCP-5067, NRVQ-MCP-5068, NRVQ-MCP-5069, NRVQ-
 NRVQ-MCP-5072, NRVQ-MCP-5073, NRVQ-MCP-5074, NRVQ-MCP-5075, NRVQ-MCP-5076, NRVQ-MCP-5077, NRVQ-MCP-5078,
 NRVQ-MCP-5079, NRVQ-MCP-5080, NRVQ-MCP-5081, NRVQ-MCP-5082, NRVQ-MCP-5083, NRVQ-MCP-5084, NRVQ-MCP-5085,
 NRVQ-MCP-5087, NRVQ-MCP-5088, NRVQ-MCP-5089, NRVQ-MCP-5090, NRVQ-MCP-5091, NRVQ-MCP-5092, NRVQ-MCP-5093,
-NRVQ-MCP-5094, NRVQ-MCP-5095
+NRVQ-MCP-5094, NRVQ-MCP-5095, NRVQ-MCP-5096, NRVQ-MCP-5097
 
 NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012,
 NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019,
@@ -563,7 +566,7 @@ NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14
 NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013, NRVQ-AUTH-14014, NRVQ-AUTH-14015,
 NRVQ-AUTH-14016, NRVQ-AUTH-14017, NRVQ-AUTH-14018, NRVQ-AUTH-14019, NRVQ-AUTH-14020, NRVQ-AUTH-14021, NRVQ-AUTH-14022,
 NRVQ-AUTH-14023, NRVQ-AUTH-14024, NRVQ-AUTH-14025, NRVQ-AUTH-14026, NRVQ-AUTH-14027, NRVQ-AUTH-14028, NRVQ-AUTH-14029,
-NRVQ-AUTH-14031
+NRVQ-AUTH-14030, NRVQ-AUTH-14031
 
 NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-AUD-6005, NRVQ-AUD-6006,
 NRVQ-AUD-6007, NRVQ-AUD-6008, NRVQ-AUD-6009, NRVQ-AUD-6010, NRVQ-AUD-6012, NRVQ-AUD-6013

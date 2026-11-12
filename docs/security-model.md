@@ -309,6 +309,17 @@ There is no separate "policy editor" role today — policy mutation endpoints re
 `admin_or_service` for the narrow CRD-sync create/delete paths the controller uses); a human who needs
 to edit policies needs the `admin` role.
 
+**Synthetic-traffic tags** — a `framework` in `SYNTHETIC_FRAMEWORKS` (`norviq/api/synthetic.py`, such
+as `redteam` or `probe`) tells the engine the call was made up by the product itself, so
+it writes no agent registry row, trust, trust breakdown, history, behavioural profile or asset-graph
+state for it, counts it in its own rate-limit window instead of the agent's, and real-traffic views
+leave its row out. `/evaluate` honours that tag only from an operator credential: role `admin` or
+`viewer`, not bound to an agent identity (`auth.may_tag_synthetic`). That covers `norviq redteam run`
+and the console graph page's Simulate; the console's Red Team runner evaluates in process and never
+reaches the route. From a `service` credential (sidecar, SDK key, controller), or any credential carrying an `agent_class`, `spiffe_id` or
+`workload` claim, the call is recorded as real traffic with `framework=""` and the tag is kept on the
+audit row as `claimed_framework` (`NRVQ-AUTH-14030`).
+
 **Namespace scoping** — `scoped_namespace`/`read_namespace` in `auth.py` bind every namespace-scoped
 request to the caller's JWT/API-key namespace claim: an admin (or a claim of `"*"`) may read/write any
 namespace or request `namespace=all`; anyone else is pinned to their own claimed namespace, and a

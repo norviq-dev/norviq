@@ -15,9 +15,10 @@ Two gates, with deliberately different costs:
   Gate B (invocation) — `tools/call`, `resources/read`, `sampling/createMessage`.
                         One `/evaluate` round trip. Runs per CALL.
 
-Gate A never runs on the Gate B path. The call path's entire Gate A cost is one dict lookup against
-a catalog built at discovery — that is the whole reason the two are separated rather than
-re-deriving a verdict per call.
+Gate A never runs on the Gate B path. The call path's entire Gate A cost is a few in-memory dict
+lookups: the catalog built at discovery, plus the server decision and the tool's pin as the refresh
+timer last loaded them — that is the whole reason the two are separated rather than re-deriving a
+verdict per call.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from norviq.engine.masking import mask_text, mask_structure_counted
 from norviq.mcp import protocol as P
 from norviq.mcp.pins import (
     PIN_DRIFT,
+    PIN_OK,
     PIN_QUARANTINED,
     PinRegistry,
     canonical_definition,
@@ -272,8 +274,10 @@ def _params_slot(envelope: dict) -> dict | None:
 class CatalogEntry:
     """Everything the CALL path needs to know about a tool, precomputed at discovery.
 
-    This exists so `tools/call` costs one dict lookup. Every field here is the frozen result of work
-    already done — scanning, hashing, pin comparison — and none of it is recomputed per call.
+    This exists so `tools/call` costs one dict lookup. Scanning and hashing are never redone per call.
+    `pin_status` and `action` are the exception: they are re-read against the pin store at call time
+    (`_refresh_pin_status`), because an operator's Approve or Revoke reaches the store on the refresh
+    timer and must reach calls too, not only the next listing. That re-read is an in-memory lookup.
     """
 
     name: str
@@ -282,6 +286,10 @@ class CatalogEntry:
     scan_severity: str
     action: str                  # pass | sanitize | strip
     findings: list[dict] = field(default_factory=list)
+    # The action the SCAN alone chose, with the pin left out. `action` is this, or `strip` while the
+    # pin is drift or quarantined, so when an approval lands the call path can go back to exactly
+    # what the scan decided. Empty when unknown, and then an approval is applied at the next listing.
+    scan_action: str = ""
     stale: bool = False          # server announced a catalog change we have not re-read yet
     # The canonical JSON of the definition as served. Carried so the control plane can store it and
     # the console can DIFF approved-vs-served when a rug pull fires — the old definition cannot be
@@ -340,8 +348,9 @@ class MediationResult:
     decision: PolicyDecision | None = None
     note: str = ""
     # True when handling this message scanned a catalog the driver has not seen go past: the proxy's
-    # own `tools/list` for a cold catalog. The driver reports the catalog to the control plane on it,
-    # exactly as it does after forwarding a `tools/list` response.
+    # own `tools/list` for a cold catalog, or a call that re-pinned a forgotten tool. The driver
+    # reports the catalog to the control plane on it, exactly as it does after forwarding a
+    # `tools/list` response.
     catalog_scanned: bool = False
 
 
@@ -753,6 +762,9 @@ class McpFirewall:
         # (monotonic of the last unmatched-response log line, drops suppressed since). See
         # `_drop_unmatched`.
         self._unmatched_log: tuple[float, int] = (0.0, 0)
+        # Set when the call path re-created a forgotten pin; the call's result then asks the driver to
+        # report the catalog (`_refresh_pin_status`).
+        self._repinned = False
         self.stats: dict[str, int] = {}
 
     # ---------------------------------------------------------------- helpers
@@ -886,6 +898,26 @@ class McpFirewall:
     async def _on_client_message(
         self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None,
     ) -> MediationResult:
+        # THE SERVER DECISION FIRST, before every gate below. A blocked server is not a policy
+        # question, so nothing here asks policy about it (not even the answer gate), and it is not a
+        # per-method question either: every message is refused except the session lifecycle. It used
+        # to be checked for `tools/call`, `resources/read` and `prompts/get` only, and everything else
+        # (completion/complete, resources/subscribe, the listings, unknown methods) reached the server.
+        if not self._server_reachable():
+            return await self._blocked_client_message(msg)
+        result = await self._gate_client_message(msg, list_upstream)
+        # AND AGAIN BEFORE IT LEAVES. The gates above await (policy, the proxy's own listing), and a
+        # registry refresh that lands meanwhile blocks the server while this request is still held.
+        # Read once at entry, the request was forwarded anyway; only the server's answer was replaced.
+        if result.forward is not None and not self._server_reachable():
+            self._bump("server_blocked_while_gated")
+            return await self._blocked_client_message(msg)
+        return result
+
+    async def _gate_client_message(
+        self, msg: P.JsonRpcMessage, list_upstream: ListUpstream | None,
+    ) -> MediationResult:
+        """The gates for a client message to a server that is not blocked."""
         method = msg.method
         # ANSWER PLANE (2026-07-28 MRTR). A retry carries `inputResponses` — data leaving the trust
         # boundary in reply to a question the SERVER composed. That is the confused-deputy vector the
@@ -931,19 +963,32 @@ class McpFirewall:
 
         # Server-INITIATED request (the reverse direction: sampling, roots/list, elicitation).
         if msg.is_request:
+            # A blocked server cannot ask the client anything either: sampling, elicitation and
+            # roots/list from it used to be forwarded like any other server's.
+            if not self._server_reachable():
+                return self._blocked_server_request(msg)
             self._server_pending.put(msg.id, msg.method)
             if msg.method == P.M_SAMPLING_CREATE:
                 alias = _message_alias(msg.params)
                 if alias:
                     return self._refuse_alias(msg, msg.method, alias)
             if msg.method == P.M_SAMPLING_CREATE and settings.mcp_govern_sampling:
-                return await self._gate_b_sampling(msg)
+                result = await self._gate_b_sampling(msg)
+                # The policy call awaits; a block that lands meanwhile still applies (see
+                # `_on_client_message`).
+                if result.forward is not None and not self._server_reachable():
+                    self._bump("server_blocked_while_gated")
+                    self._server_pending.discard(msg.id)              # the client never sees it
+                    return self._blocked_server_request(msg)
+                return result
             # The server asking a HUMAN a question it composed. Sampling was gated; this was not.
             if msg.method == P.M_ELICITATION_CREATE:
                 return self._gate_a_elicitation(msg)
             return MediationResult(forward=msg.framed)
 
         if msg.is_notification:
+            if not self._server_reachable():
+                return self._blocked_server_notification(msg)
             alias = _message_alias(msg.params)
             if alias:
                 return self._refuse_alias(msg, msg.method, alias)
@@ -1009,6 +1054,10 @@ class McpFirewall:
             if defect:
                 return self._drop_unmatched(msg, f"not a well-formed answer: {defect}")
             corr.pending.pop(pending_key)
+            # An answer to a request forwarded before the block reached this proxy. The client is
+            # waiting for it, so it gets one, but not the server's content.
+            if not self._server_reachable():
+                return await self._blocked_server_response(msg, requested)
             # Results the firewall reads by member name: an alias key fails closed (`_refuse_alias`).
             if requested in (P.M_TOOLS_CALL, P.M_RESOURCES_READ, P.M_PROMPTS_GET):
                 alias = _message_alias(msg.result)
@@ -1113,7 +1162,8 @@ class McpFirewall:
     def _mcp_context(self, tool_name: str, surface: str) -> dict:
         """Gate-A state for this tool, as a policy- and audit-visible context object.
 
-        Every value here was computed at DISCOVERY and cached on the catalog entry, so building this
+        Every value here was computed at DISCOVERY and cached on the catalog entry (`pin_status` is
+        brought up to date with the pin store first, by `_refresh_pin_status`), so building this
         is a dict lookup plus a literal — no scanning, no hashing, nothing that scales with the
         catalog. That is what makes it affordable to send on every call: the alternative (a policy
         that wants to gate on drift having to re-derive it) would put Gate A back on the hot path.
@@ -1495,14 +1545,30 @@ class McpFirewall:
         # cannot be decided before the catalog exists.
         scanned = await self._warm_cold_catalog(msg, list_upstream)
         result = await self._gate_b_decide(msg, name, arguments, timer0)
-        result.catalog_scanned = scanned
+        # A pin re-created on this call (`_refresh_pin_status`) is reported the same way.
+        repinned, self._repinned = self._repinned, False
+        result.catalog_scanned = scanned or repinned
         return result
 
     async def _gate_b_decide(self, msg: P.JsonRpcMessage, name: str, arguments: dict,
                              timer0: float) -> MediationResult:
         """The catalog-dependent half of `_gate_b_tools_call`: Gate A carry-over, schema, policy."""
+        # --- The server decision, read NOW. ---
+        #
+        # Blocking used to act only on `tools/list`, so a client that had listed before the block kept
+        # its tool names and every call to them was forwarded and executed. The registry object is the
+        # one the refresh timer updates in place, so this is the same decision Gate A reads, as of the
+        # last refresh. `_on_client_message` already refused a call to a server blocked when it
+        # arrived; this is read again because the cold-catalog step above awaits, and a refresh can
+        # land during that wait.
+        if not self._server_reachable():
+            record_path_phase("mcp", "call_total", (perf_counter() - timer0) * 1000.0)
+            return await self._refuse_blocked_server(msg, P.M_TOOLS_CALL, name, arguments)
+
         # --- Gate A carry-over: one dict lookup, no scanning, no hashing. ---
         entry = self._catalog.get(name)
+        if entry is not None:
+            self._refresh_pin_status(entry)
         if entry is not None and entry.call_denied:
             self._bump("gate_a_denied")
             reason = self._gate_a_denial_reason(entry)
@@ -1584,6 +1650,303 @@ class McpFirewall:
             blocked=True, decision=decision, note=f"gate_b:{decision.decision}",
         )
 
+    def _server_reachable(self) -> bool:
+        """The operator's decision about this server, as of the registry's last refresh."""
+        return self._servers.get(self._server_id).reachable
+
+    @property
+    def server_blocked(self) -> bool:
+        """True while an operator's decision blocks this server. For a transport deciding whether to
+        open a connection of its own to the upstream (the HTTP driver's standalone GET stream)."""
+        return not self._server_reachable()
+
+    # ------------------------------------------------------------ a blocked server
+    #
+    # A blocked server is not usable at all, in either direction. What still passes is what the
+    # SESSION needs, and nothing that carries either side's content:
+    #
+    #   * the handshake (`initialize`, `notifications/initialized`, and `server/discover`, its
+    #     2026-07-28 replacement). A host treats a failed handshake as a broken server and may stop
+    #     the session, and an Unblock must not need a reconnect. The answer is built here from the
+    #     protocol version, the standard capability flags and the server's name and version
+    #     (`_blocked_handshake`); `instructions`, titles, descriptions and any other key the server
+    #     chose are not passed on.
+    #   * `ping`, both ways, so neither side concludes the connection is dead.
+    #   * `notifications/cancelled`, both ways, so either side can stop waiting.
+    #
+    # Each of these is re-encoded from the fields the protocol needs (the handshake request excepted:
+    # the server needs the client's version and capabilities), so neither peer can carry anything
+    # else on it. Every other request is answered here with a JSON-RPC answer, so no side waits for
+    # a reply that will never come; every other notification is dropped, as a notification needs no
+    # answer.
+
+    def _blocked_meta(self) -> dict:
+        return {"gate": "A", "server_blocked": True, "server": self._server_id,
+                "status": self._servers.get(self._server_id).status}
+
+    @staticmethod
+    def _lifecycle_notification(msg: P.JsonRpcMessage, allowed: tuple[str, ...]) -> bytes | None:
+        """The lifecycle notification `msg` is, re-encoded with nothing but its required fields."""
+        if msg.method not in allowed:
+            return None
+        if msg.method == P.N_INITIALIZED:
+            return P.encode({"jsonrpc": "2.0", "method": P.N_INITIALIZED})
+        request_id = msg.params.get("requestId")
+        if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
+            return P.encode({"jsonrpc": "2.0", "method": P.N_CANCELLED,
+                             "params": {"requestId": request_id}})
+        return None
+
+    # The capability flags a handshake answer may carry for a blocked server: the standard keys, each
+    # with its standard boolean flags only. `experimental` and unknown keys are server-chosen objects.
+    _BLOCKED_CAPABILITY_FLAGS = {
+        "tools": ("listChanged",), "resources": ("subscribe", "listChanged"),
+        "prompts": ("listChanged",), "logging": (), "completions": (),
+    }
+
+    @classmethod
+    def _blocked_handshake(cls, result: dict, meta: dict) -> dict:
+        """The handshake answer for a blocked server, built here rather than edited from the server's.
+
+        Removing `instructions` and forwarding the rest kept every other key the server chose to send
+        (a top-level note, `serverInfo.title`/`description`, a foreign `_meta`), which is the reason
+        `_blocked_listing` builds its answer too. Only what a client needs to finish the handshake
+        and talk to the server after an Unblock is kept: the protocol version, the standard capability
+        flags, and the server's name and version.
+        """
+        def text(value: Any) -> str:
+            return value if isinstance(value, str) else ""
+
+        info = result.get("serverInfo")
+        info = info if isinstance(info, dict) else {}
+        offered = result.get("capabilities")
+        offered = offered if isinstance(offered, dict) else {}
+        capabilities: dict = {}
+        for key, flags in cls._BLOCKED_CAPABILITY_FLAGS.items():
+            entry = offered.get(key)
+            if isinstance(entry, dict):
+                capabilities[key] = {f: entry[f] for f in flags if isinstance(entry.get(f), bool)}
+        built: dict = {"capabilities": capabilities,
+                       "serverInfo": {"name": text(info.get("name")), "version": text(info.get("version"))}}
+        if isinstance(result.get("protocolVersion"), str):
+            built["protocolVersion"] = result["protocolVersion"]
+        _annotate(built, meta)
+        return built
+
+    def _blocked_listing(self, msg_id: Any, method: str) -> bytes:
+        """An empty answer to a discovery listing, built here rather than edited from the server's.
+
+        Built from nothing because a listing result is an object the server wrote: emptying its list
+        and forwarding the rest kept every other key it chose to send. `_meta.norviq` says why it is
+        empty, so the client is told rather than shown a server with nothing in it.
+        """
+        result: dict = {_LIST_RESULT_KEYS[method]: []}
+        _annotate(result, {"server_blocked": True, "server_id": self._server_id,
+                           "status": self._servers.get(self._server_id).status})
+        return P.encode({"jsonrpc": "2.0", "id": msg_id, "result": result})
+
+    async def _blocked_client_message(self, msg: P.JsonRpcMessage) -> MediationResult:
+        """Mediate a client message to a server an operator blocked (see the block comment above)."""
+        if msg.is_request:
+            method = msg.method
+            # A handshake that carries ANSWERS is not lifecycle: the answers are client data for a
+            # question the server composed, and a blocked server gets none of those (see the
+            # response branch below). Forwarding it as a handshake let them through with no gate.
+            if method in (P.M_INITIALIZE, P.M_SERVER_DISCOVER) and self._answer_payload(msg) is None:
+                return MediationResult(forward=msg.framed, note="server_blocked_handshake")
+            if method == P.M_PING:
+                return MediationResult(forward=P.encode({"jsonrpc": "2.0", "id": msg.id, "method": P.M_PING}))
+            if method == P.M_TOOLS_CALL:
+                arguments = msg.params.get("arguments")
+                return await self._refuse_blocked_server(
+                    msg, method, str(msg.params.get("name", "")),
+                    arguments if isinstance(arguments, dict) else {})
+            return await self._refuse_blocked_server(msg, method)
+        if msg.is_notification:
+            lifecycle = self._lifecycle_notification(msg, (P.N_INITIALIZED, P.N_CANCELLED))
+            if lifecycle is not None:
+                return MediationResult(forward=lifecycle)
+            self._bump("server_blocked_notification_dropped")
+            return MediationResult(blocked=True, note="server_blocked")
+        if msg.is_response:
+            # The client answering a request the server sent before the block reached this proxy.
+            # The server is waiting, so it gets an answer, but not the client's: an error in its place.
+            asked = self._server_pending.take(msg.id)
+            if asked == P.M_PING and "result" in msg.data:
+                return MediationResult(forward=P.encode({"jsonrpc": "2.0", "id": msg.id, "result": {}}))
+            self._bump("server_blocked_answer_withheld")
+            return MediationResult(
+                forward=P.encode(P.error_response(
+                    msg.id, P.E_POLICY_DENIED,
+                    f"Norviq MCP firewall withheld the client's answer: MCP server '{self._server_id}' "
+                    "is blocked by operator decision")),
+                blocked=True, note="server_blocked")
+        self._bump("server_blocked_notification_dropped")
+        return MediationResult(blocked=True, note="server_blocked")
+
+    async def _refuse_blocked_server(self, msg: P.JsonRpcMessage, surface: str, name: str = "",
+                                     arguments: dict | None = None) -> MediationResult:
+        """Refuse a client request to a server an operator blocked. The upstream never sees it.
+
+        A `tools/call` gets a tool error, like every other call refusal. A discovery listing gets an
+        EMPTY listing marked `server_blocked`, the answer a host already got for a blocked server's
+        listing: hosts list at startup, and an error there reads as a broken server rather than a
+        refused one. Every other request gets the JSON-RPC policy error `-32001`.
+        """
+        meta = self._blocked_meta()
+        surface = surface[:64]
+        self._bump("server_blocked_call")
+        log.warning("nrvq.mcp.server_blocked.request_refused", server=self._server_id, direction="client",
+                    surface=surface, tool=name[:200], status=meta["status"], code="NRVQ-MCP-5096")
+        reason = (f"MCP server '{self._server_id}' is blocked by operator decision; the request was "
+                  f"refused before reaching it")
+        if surface == P.M_TOOLS_CALL:
+            await self._report_denial(name, arguments or {}, "mcp_server_blocked", reason)
+            text = (f"Norviq MCP firewall blocked '{name}': the MCP server '{self._server_id}' is "
+                    f"blocked by operator decision. The tool was NOT executed. Do not retry; choose a "
+                    f"different approach or ask the user.")
+            return MediationResult(
+                reply=P.encode(P.tool_error_result(msg.id, text, {**meta, "tool": name})),
+                blocked=True, note="server_blocked")
+        # The audit row names the METHOD, as the blocked listing does: the URI or prompt name is the
+        # blocked server's own string.
+        if surface in _LIST_RESULT_KEYS:
+            await self._report_denial(
+                surface, {}, "mcp_server_blocked",
+                f"discovery refused: MCP server '{self._server_id}' is blocked by operator decision; "
+                "the proxy answered the listing with an empty one and the server was not asked",
+                surface=surface)
+            return MediationResult(reply=self._blocked_listing(msg.id, surface), blocked=True,
+                                   note="server_blocked")
+        await self._report_denial(surface, {}, "mcp_server_blocked", reason, surface=surface)
+        return MediationResult(
+            reply=P.encode(P.error_response(
+                msg.id, P.E_POLICY_DENIED,
+                f"Norviq MCP firewall refused {surface}: MCP server '{self._server_id}' is blocked by "
+                f"operator decision", meta)),
+            blocked=True, note="server_blocked")
+
+    def _blocked_server_request(self, msg: P.JsonRpcMessage) -> MediationResult:
+        """Refuse a request FROM a blocked server (sampling, elicitation, roots/list, anything but
+        `ping`), back to the server. The client never sees it.
+
+        Logged, and not reported to the control plane as an audit row: the method name is the blocked
+        server's own string, and a row per request would hand a refused server a way to keep writing
+        into the console that refused it.
+        """
+        if msg.method == P.M_PING:
+            self._server_pending.put(msg.id, P.M_PING)
+            return MediationResult(forward=P.encode({"jsonrpc": "2.0", "id": msg.id, "method": P.M_PING}))
+        meta = self._blocked_meta()
+        surface = msg.method[:64]
+        self._bump("server_blocked_request_refused")
+        log.warning("nrvq.mcp.server_blocked.request_refused", server=self._server_id, direction="server",
+                    surface=surface, tool="", status=meta["status"], code="NRVQ-MCP-5096")
+        return MediationResult(
+            reply=P.encode(P.error_response(
+                msg.id, P.E_POLICY_DENIED,
+                f"Norviq MCP firewall refused {surface}: MCP server '{self._server_id}' is blocked by "
+                "operator decision", meta)),
+            blocked=True, note="server_blocked")
+
+    def _blocked_server_notification(self, msg: P.JsonRpcMessage) -> MediationResult:
+        """Drop a notification from a blocked server, except a cancellation."""
+        if msg.method in (P.N_TOOLS_CHANGED, P.N_PROMPTS_CHANGED, P.N_RESOURCES_CHANGED):
+            # Not forwarded, but still recorded: after an Unblock, calls must not rely on a catalog
+            # the server has since said is out of date.
+            self._on_catalog_changed(msg.method)
+        lifecycle = self._lifecycle_notification(msg, (P.N_CANCELLED,))
+        if lifecycle is not None:
+            return MediationResult(forward=lifecycle)
+        self._bump("server_blocked_notification_dropped")
+        return MediationResult(blocked=True, note="server_blocked")
+
+    async def _blocked_server_response(self, msg: P.JsonRpcMessage, requested: str) -> MediationResult:
+        """Answer the client for a request forwarded before the block, without the server's content."""
+        meta = self._blocked_meta()
+        handshake = requested in (P.M_INITIALIZE, P.M_SERVER_DISCOVER)
+        if "error" in msg.data and (handshake or requested == P.M_PING):
+            # The session still has to learn the handshake or ping failed; the server's message
+            # text is not part of that.
+            return MediationResult(forward=P.encode(P.error_response(
+                msg.id, msg.data["error"]["code"],
+                f"MCP server '{self._server_id}' answered {requested} with an error; it is blocked by "
+                "operator decision, so its message was withheld", meta)), note="server_blocked")
+        if requested == P.M_PING:
+            return MediationResult(forward=P.encode({"jsonrpc": "2.0", "id": msg.id, "result": {}}))
+        if handshake:
+            scanned = self._gate_a_handshake(
+                msg, requested, "result.initialize" if requested == P.M_INITIALIZE else "result.server_discover")
+            body = json.loads(scanned.forward) if scanned.forward else {}
+            result = body.get("result")
+            if not isinstance(result, dict):
+                return scanned
+            # Keep the scan's verdict when it flagged the answer, without each finding's `evidence`,
+            # which quotes the server's text. A `_meta` the server sent is not passed on.
+            own = result.get("_meta") if scanned.note == "discover_flagged" else None
+            prior = own.get("norviq") if isinstance(own, dict) else None
+            findings = prior.get("scan") if isinstance(prior, dict) else None
+            verdict = {"scan": [{k: f.get(k) for k in ("rule", "severity", "field")}
+                                for f in findings if isinstance(f, dict)]} if isinstance(findings, list) else {}
+            built = self._blocked_handshake(result, {**verdict, **meta})
+            return MediationResult(forward=P.encode({"jsonrpc": "2.0", "id": msg.id, "result": built}),
+                                   note="server_blocked_handshake")
+        if "result" in msg.data and requested == P.M_TOOLS_LIST:
+            # Withheld wholesale, reported once with the count of what was withheld.
+            listing = await self._gate_a_tools_list(msg)
+            self._client_list_generation += 1
+            return listing
+        if "result" in msg.data and requested in _LIST_RESULT_KEYS:
+            self._bump("server_blocked")
+            log.warning("nrvq.mcp.gate_a.server_blocked", server=self._server_id, surface=requested,
+                        status=meta["status"], items_withheld=len(msg.result[_LIST_RESULT_KEYS[requested]]),
+                        code="NRVQ-MCP-5068")
+            return MediationResult(forward=self._blocked_listing(msg.id, requested), note="server_blocked")
+        self._bump("server_blocked_answer_withheld")
+        text = (f"Norviq MCP firewall withheld the answer to {requested}: MCP server "
+                f"'{self._server_id}' is blocked by operator decision")
+        if requested == P.M_TOOLS_CALL:
+            return MediationResult(forward=P.encode(P.tool_error_result(msg.id, text, meta)),
+                                   note="server_blocked")
+        return MediationResult(forward=P.encode(P.error_response(msg.id, P.E_POLICY_DENIED, text, meta)),
+                               note="server_blocked")
+
+    def _refresh_pin_status(self, entry: CatalogEntry) -> None:
+        """Bring a cached entry's pin verdict up to date with the pin store. In-memory only.
+
+        The store is the one the refresh timer reloads, so a Revoke refuses calls and an Approve
+        restores them within one refresh, without waiting for the client to list again. Only a change
+        into or out of drift/quarantine is applied: `first_seen` and `pinned` mean the same thing to
+        the call path, and rewriting one as the other would change the facts policy reads.
+
+        No pin at all means the tool was forgotten after it was listed (Forget deletes every pin for
+        a server). That used to leave the cached verdict in place, so under `strict` a forgotten tool
+        stayed callable until the client listed again. It is now re-pinned as first sight would pin
+        it: `strict` refuses it until approved, `tofu` changes nothing a call can see. The new pin is
+        reported, so the console has a row to approve.
+        """
+        fresh = self._pins.current_status(self._server_id, entry.name, entry.digest)
+        if fresh is None:
+            fresh = self._pins.repin(self._server_id, entry.name, entry.digest, entry.canonical,
+                                     entry.scan_severity)
+            # The catalog has not changed, so its fingerprint has not either, and the report would be
+            # skipped as already sent. The control plane no longer has it.
+            self.stats.pop("_reported_fingerprint", None)
+            self._repinned = True
+        if fresh == entry.pin_status:
+            return
+        held = (PIN_DRIFT, PIN_QUARANTINED)
+        if fresh in held:
+            action = "strip"
+        elif entry.pin_status in held and entry.scan_action:
+            action = entry.scan_action
+        else:
+            return
+        log.info("nrvq.mcp.gate_a.pin_status_refreshed", server=self._server_id, tool=entry.name,
+                 previous=entry.pin_status, current=fresh, action=action, code="NRVQ-MCP-5097")
+        entry.pin_status = fresh
+        entry.action = action
+
     @staticmethod
     def _gate_a_denial_reason(entry: CatalogEntry) -> str:
         if entry.pin_status == PIN_DRIFT:
@@ -1595,8 +1958,9 @@ class McpFirewall:
             )
         if entry.pin_status == PIN_QUARANTINED:
             return (
-                f"Norviq MCP firewall blocked '{entry.name}': the tool definition is not approved "
-                f"(pin mode 'strict' requires operator approval before first use)."
+                f"Norviq MCP firewall blocked '{entry.name}': the tool definition is not approved. "
+                f"An operator revoked its approval, or pin mode 'strict' requires approval before "
+                f"first use. The call was not executed."
             )
         return (
             f"Norviq MCP firewall blocked '{entry.name}': its definition matched instruction-injection "
@@ -1814,9 +2178,6 @@ class McpFirewall:
         tools = msg.result.get("tools")
         if not isinstance(tools, list):
             return MediationResult(forward=msg.framed)
-        # Set before the server-level decision below: a blocked server's listing has been through Gate
-        # A too, and a cold-catalog self-list must not repeat on every call because it left no entries.
-        self._catalog_listed = True
 
         # THE SERVER-LEVEL DECISION COMES FIRST, and it withholds WHOLESALE rather than per tool.
         #
@@ -1874,13 +2235,13 @@ class McpFirewall:
                 f"discovery refused: MCP server '{self._server_id}' is blocked by operator decision; "
                 f"{len(tools)} tool definition(s) were withheld before reaching the model",
                 surface="tools/list")
-            rewritten = json.loads(msg.raw)
-            rewritten["result"]["tools"] = []
-            _annotate(rewritten.get("result"), {
-                "server_blocked": True, "server_id": self._server_id, "status": decision.status,
-            })
-            return MediationResult(forward=P.encode(rewritten), note="server_blocked")
+            return MediationResult(forward=self._blocked_listing(msg.id, P.M_TOOLS_LIST),
+                                   note="server_blocked")
 
+        # Set only for a listing that built the catalog. A blocked listing leaves no entries, so after
+        # an unblock the first call must still scan before use (the cold-catalog self-list). While the
+        # server stays blocked that cannot repeat: calls are refused and the self-list skips it.
+        self._catalog_listed = True
         kept: list[dict] = []
         changed = False
         # ONE budget across the whole listing. A per-TOOL bound is not a bound at all: the server
@@ -1923,6 +2284,7 @@ class McpFirewall:
 
             verdict = self._pins.check(self._server_id, tool, scan_severity=severity)
             action = self._action_for(severity, verdict.status)
+            scan_action = self._action_for(severity, PIN_OK)
             # A DEFINITION THIS PASS COULD NOT READ IS WITHHELD, not sanitised. `sanitize` replaces
             # the description and drops `annotations`, and leaves `inputSchema` — whose `description`
             # and `default` values reach the model exactly as prose does. This file's own argument for
@@ -1932,6 +2294,7 @@ class McpFirewall:
             # by both. Only the first did, and a definition the walk could not finish was passed.
             if report.budget_exhausted:
                 action = "strip"
+                scan_action = "strip"
 
             schema = tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {}
             notes = self._schema_enforceability(schema) if schema else []
@@ -1942,6 +2305,7 @@ class McpFirewall:
                 scan_severity=severity,
                 action=action,
                 findings=[f.as_dict() for f in report.findings],
+                scan_action=scan_action,
                 canonical=canonical_definition(tool)[:_CANONICAL_MAX],
                 input_schema=schema,
                 schema_notes=notes,
@@ -2085,9 +2449,11 @@ class McpFirewall:
         and a bare string in a `prompts` array carried the identical injection payload straight
         through while its dict sibling was withheld.
         """
+        items = msg.result.get(key)
+        # A blocked server's catalogues never get here: `on_server_message` answers them first
+        # (`_blocked_server_response`), whatever the scan switch says.
         if not settings.mcp_scan_responses:
             return MediationResult(forward=msg.framed)
-        items = msg.result.get(key)
         if not isinstance(items, list) or not items:
             return MediationResult(forward=msg.framed)
 

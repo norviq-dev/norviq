@@ -11,8 +11,13 @@ hop's zero counts are produced by `_snapshot_to_assets`, so a test has to go thr
 
 from __future__ import annotations
 
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 import pytest
 
+from norviq.api.routers import graphs as G
 from norviq.api.routers import threats as T
 
 AGENT = "spiffe://norviq/ns/analytics/sa/data-analyst"
@@ -170,3 +175,60 @@ class TestSiblingChokepointsAreSeparatePaths:
                               _counts(execute_sql={"allow": 4}, delete_record={"would_block": 3}))
         assert sorted(p.tool for p in paths) == ["delete_record", "execute_sql"]
         assert len({p.id for p in paths}) == 2
+
+
+@pytest.mark.asyncio
+class TestThePathCarriesItsIdentity:
+    async def test_spiffe_id_is_the_agent_node(self, monkeypatch):
+        paths = await _derive(monkeypatch, _snapshot({"send_email": ["smtp/outbound"]}), _counts())
+        assert paths[0].spiffe_id == AGENT
+
+    async def test_spiffe_id_is_unqualified_in_a_multi_namespace_union(self, monkeypatch):
+        """With ns=all node ids are "<ns>::<id>"; the identity Simulate sends must not carry that prefix."""
+        paths = await _derive(monkeypatch, _snapshot({"send_email": ["smtp/outbound"]}), _counts(),
+                              namespaces=None)
+        assert paths[0].spiffe_id == AGENT
+
+
+class _SqliteSession:
+    """Runs the real `_decision_counts` SQL against an in-memory audit_log, so the test exercises the
+    query itself rather than a stub of it."""
+
+    def __init__(self, rows):
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("CREATE TABLE audit_log (namespace TEXT, timestamp_utc TEXT, agent_id TEXT, "
+                        "tool_name TEXT, decision TEXT, framework TEXT)")
+        self.db.executemany("INSERT INTO audit_log VALUES (?, ?, ?, ?, ?, ?)", rows)
+
+    async def execute(self, stmt, params):
+        bound = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in params.items()}
+        out = [dict(r) for r in self.db.execute(str(stmt), bound).fetchall()]
+
+        class _R:
+            def mappings(self):
+                return self
+
+            def all(self):
+                return out
+
+        return _R()
+
+
+class TestSimulateIsNotTraffic:
+    @pytest.mark.asyncio
+    async def test_simulate_rows_are_left_out_of_the_counts(self):
+        """Simulate evaluates as the path's real identity, so its rows carry that agent_id. One allowed
+        empty-argument preview on a path real traffic blocked would read as allow=1 and flip it."""
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [("payments", now, AGENT, "run_shell", "block", "langchain")] * 3
+        rows += [("payments", now, AGENT, "run_shell", "allow", "attack-graph")]
+        rows += [("payments", now, AGENT, "run_shell", "audit", None)]
+        counts = await G._decision_counts(_SqliteSession(rows), "payments",
+                                          datetime.now(timezone.utc) - timedelta(hours=1))
+        assert counts[(AGENT, "run_shell")] == {"allow": 0, "block": 3, "escalate": 0, "would_block": 1}
+
+    def test_the_excluded_tag_is_the_one_simulate_sends(self):
+        """The exclusion keys on a string the console sets. If the two drift, it excludes nothing."""
+        src = (Path(__file__).resolve().parents[2] / "ui/src/pages/AttackGraph.tsx").read_text()
+        assert f'framework: "{G.SIMULATE_FRAMEWORK}"' in src

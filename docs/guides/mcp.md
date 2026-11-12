@@ -19,11 +19,12 @@ approved it. Norviq splits enforcement accordingly:
 | Runs on | `tools/list` and its siblings, prompt templates, notifications | `tools/call`, `resources/read`, `sampling/createMessage` |
 | Frequency | a handful of times per session | every call |
 | Cost | scan + hash + pin comparison | one `/evaluate` round trip |
-| Decided by | the proxy, from config — **policy is never consulted** | policy, after five proxy-side checks |
+| Decided by | the proxy, from config — **policy is never consulted** | policy, after six proxy-side checks |
 | Nature | heuristic, evadable by construction | deterministic backstop |
 
-Gate A never runs on the Gate B path: a `tools/call` costs one dict lookup against a catalog built at
-discovery (`norviq/mcp/firewall.py` `McpFirewall._mcp_context`). That separation is the reason it is affordable to put
+Gate A never runs on the Gate B path: a `tools/call` costs a few in-memory lookups — the catalog built
+at discovery, plus the server decision and the tool's pin as the last refresh loaded them
+(`norviq/mcp/firewall.py` `McpFirewall._mcp_context`). That separation is the reason it is affordable to put
 Gate-A state in front of every policy decision.
 
 If you have not read [Writing Policies](writing-policies.md), do that first — everything in §5 below
@@ -77,7 +78,7 @@ docker build -f scripts/mcp-proxy-payload.Dockerfile -t <registry>/norviq-mcp-pa
 # it with the mount read-only, the way an injected container does.
 scripts/mcp-proxy-payload-verify.sh node:22-bookworm python:3.12-slim
 
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.7 -n norviq \
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.8 -n norviq \
   --set webhook.injection.enabled=true \
   --set webhook.injection.mcp.enabled=true \
   --set webhook.injection.mcp.proxyImage=<registry>/norviq-mcp-payload:0.2.0
@@ -160,6 +161,45 @@ differently from the proxy is refused first (see the end of this section)
 | `resources/read` | client → server | `mcp_govern_resources` (default `true`, `firewall.py` `McpFirewall._on_client_message`) | JSON-RPC error `-32001` |
 | `sampling/createMessage` | server → client | `mcp_govern_sampling` (default `true`, `firewall.py` `McpFirewall.on_server_message`) | JSON-RPC error `-32001`, returned to the **server** |
 | any request carrying `params.inputResponses` | client → server | always (`firewall.py` `McpFirewall._gate_answer`) | JSON-RPC error `-32001` |
+
+A server an operator has **blocked** is not usable at all, in either direction, and the check runs
+before any of these gates, the answer gate included: no request for it is evaluated, whatever
+`mcp_govern_resources` or `mcp_govern_sampling` says (`firewall.py`
+`McpFirewall._blocked_client_message`, `McpFirewall._blocked_server_request`). What still passes is
+the session lifecycle. `ping` and the notifications are re-encoded so they carry nothing but their
+required fields; the client's handshake request is forwarded as sent, because the server needs its
+version and capabilities:
+
+| Still passes | Why |
+|---|---|
+| `initialize` / `notifications/initialized`, `server/discover` | a host treats a failed handshake as a broken server, and an Unblock must not need a reconnect. The answer is built by the proxy from `protocolVersion`, the standard capability flags and `serverInfo.name`/`version`; `instructions`, titles, descriptions, `experimental` and any other key the server sent are not passed on (`McpFirewall._blocked_handshake`) |
+| `ping`, both directions | so neither side decides the connection is dead |
+| `notifications/cancelled`, both directions, without its `reason` | so either side can stop waiting |
+
+Everything else is answered by the proxy, so no side waits for a reply that never comes:
+
+| Message | Answer |
+|---|---|
+| client `tools/call` | MCP tool error (`result.isError`), as for every call refusal |
+| client `tools/list`, `resources/list`, `resources/templates/list`, `prompts/list` | an empty list with `_meta.norviq.server_blocked`, built by the proxy; the server is not asked |
+| any other client request (`resources/read`, `prompts/get`, `completion/complete`, `resources/subscribe`, `logging/setLevel`, `subscriptions/listen`, unknown methods) | JSON-RPC error `-32001` |
+| any server request but `ping` (`sampling/createMessage`, `elicitation/create`, `roots/list`, unknown methods) | JSON-RPC error `-32001`, returned to the **server**; logged, not written as an audit row |
+| any other notification, either direction | dropped (on HTTP the client gets `202`). A dropped `list_changed` still marks the catalog stale |
+| the client's answer to a server request sent before the block | replaced by `-32001` to the server |
+| the server's answer to a client request sent before the block | the empty list for a listing, a tool error for `tools/call`, `-32001` otherwise |
+
+That includes a client that listed the tools before the block and still holds their names. The
+decision is the one the proxy's registry refresh last loaded (`mcp_pin_refresh_s`, see §6), so a
+block reaches calls and listings at the same time (`NRVQ-MCP-5096`). It is read when a request
+arrives and again before a gated request leaves, so a refresh that lands while policy is being asked
+still keeps the request from the server.
+
+On HTTP, a client's standalone `GET` stream to a blocked server is answered `405` (the transport's
+"no stream here") without contacting the upstream; a resumption of a stream opened before the block
+still goes through, because it answers a request the client is waiting for, and that answer is
+replaced as above. Two things still reach the upstream: the client's `DELETE` (session teardown, which
+carries no content and whose answer body is not passed on) and the proxy's own `-32001` answers to the
+server's requests, sent back as a `POST` so the server does not wait.
 
 A `tools/call` refusal is deliberately shaped as `result.isError` rather than a JSON-RPC `error`:
 several hosts treat a server-originated protocol error on a tool call as a session fault and tear the
@@ -473,20 +513,21 @@ rather than claiming to know your threshold (`ui/src/pages/McpServers.tsx:243-25
 
 ## 4. What the proxy enforces before policy is consulted
 
-This is the distinction that determines what you can change with a rule. A `tools/call` passes five
-proxy-side checks *before* `/evaluate` is reached (`firewall.py` `McpFirewall._gate_b_tools_call`; check 1 sits one level up,
-in `on_client_message` at `firewall.py` `McpFirewall.on_client_message`), in this order:
+This is the distinction that determines what you can change with a rule. A `tools/call` passes six
+proxy-side checks *before* `/evaluate` is reached (`firewall.py` `McpFirewall._gate_b_tools_call`; checks 1 and 2 sit one level up,
+in `firewall.py` `McpFirewall.on_client_message` and `McpFirewall._on_client_message`, ahead of the answer gate), in this order:
 
 | # | Check | Refuses when | Turned off by |
 |---|---|---|---|
 | 1 | JSON-RPC batch | the message is an array | nothing |
-| 2 | Transport-header smuggling | any argument at any depth is named `x-mcp-header` | `mcp_allow_tool_headers=true` |
-| 3 | Malformed `arguments` | `params.arguments` is present and not an object | nothing |
-| 4 | **Gate-A carry-over** | the tool's pin status is `drift` or `quarantined`, **or** its discovery action was `strip` | nothing (change the thresholds, or approve the pin) |
-| 5 | **Schema conformance** | a missing `required` argument, a wrong-typed value, or — when the server set `additionalProperties: false` — an argument the tool never declared | `mcp_enforce_schema=false` |
-| 6 | Policy | `data.<package>.decision` is not an allow | this is where your rules live |
+| 2 | **Server blocked** | an operator blocked the server in the registry, as of the last registry refresh. Read again after the cold-catalog list, which awaits | nothing (unblock the server) |
+| 3 | Transport-header smuggling | any argument at any depth is named `x-mcp-header` | `mcp_allow_tool_headers=true` |
+| 4 | Malformed `arguments` | `params.arguments` is present and not an object | nothing |
+| 5 | **Gate-A carry-over** | the tool's pin status is `drift` or `quarantined` (re-read from the pin store on each call; a tool whose pin was forgotten is re-pinned as first sight would pin it, so `quarantined` under `strict`), **or** its discovery action was `strip` | nothing (change the thresholds, or approve the pin) |
+| 6 | **Schema conformance** | a missing `required` argument, a wrong-typed value, or — when the server set `additionalProperties: false` — an argument the tool never declared | `mcp_enforce_schema=false` |
+| 7 | Policy | `data.<package>.decision` is not an allow | this is where your rules live |
 
-Check 5 runs before the evaluation on purpose. An argument the tool never declared is one no policy
+Check 6 runs before the evaluation on purpose. An argument the tool never declared is one no policy
 mentions either, so evaluating first would produce an `allow` meaning "no rule objected to a field
 nobody knew about" — true and useless. Refusing first keeps the allow honest: every argument that
 reaches policy is one the server admits to. It is a **deliberate subset** of JSON Schema, not a
@@ -501,7 +542,7 @@ withhold one it passed — those are configuration changes and pin approvals, no
 
 ### The reachability consequence
 
-Because check 4 fires before check 6, several `input.mcp` values **cannot be observed by a policy on
+Because check 5 fires before check 7, several `input.mcp` values **cannot be observed by a policy on
 the ordinary `tools/call` path**:
 
 - `pin_status == "drift"` and `pin_status == "quarantined"` — the call is already refused
@@ -525,8 +566,9 @@ blocked.
 
 ## 5. The facts `input.mcp` publishes
 
-Built by `_mcp_context` (`firewall.py` `McpFirewall._mcp_context`) from values computed at discovery and cached, so
-assembling it is a dict lookup plus a literal — that is what makes it affordable on every call. The
+Built by `_mcp_context` (`firewall.py` `McpFirewall._mcp_context`) from values computed at discovery and cached
+(`pin_status` is first re-read from the in-memory pin store, so it reflects a Revoke or Approve the
+proxy's refresh has loaded), so assembling it is a dict lookup plus a literal — that is what makes it affordable on every call. The
 evaluator publishes it as `input.mcp`, and lifts `input.direction` out of it, for MCP callers only;
 for every other caller `input.mcp` is `{}` and `input.direction` is `"call"`
 (`norviq/engine/evaluator.py:967-984`).
@@ -660,10 +702,21 @@ blessed by a click meant for the old one (`norviq/api/routers/mcp.py:284-306`). 
 409 into a dialog naming all three digests rather than a generic failure
 (`ui/src/pages/McpServers.tsx:407-421`).
 
-**Revoke** withdraws approval; the tool is withheld until re-approved. **Forget**
+**Revoke** withdraws approval: the tool is withheld from the next `tools/list` and calls to it are
+refused, including from a client that listed it before, until it is re-approved. An approval likewise
+lets calls through again without waiting for the client to list. Each call re-reads the tool's pin
+from the in-memory store (`PinRegistry.current_status`), so either change applies once the proxy's
+pin refresh has loaded it (below). **Forget**
 (`DELETE /api/v1/mcp/servers/{namespace}/{server_id}`, admin, logged at `NRVQ-MCP-5045`) deletes every
 pin for a server — the next `tools/list` re-pins whatever it serves at that moment, which is a
-deliberate re-TOFU and destructive in the security-relevant direction.
+deliberate re-TOFU and destructive in the security-relevant direction. A running proxy drops the
+forgotten pins at its next pin refresh: a load drops a pin the control plane held before and no longer
+returns. A pin the control plane has never held (it was pinned while the control plane was down, or
+its report failed) is kept, so a definition changed after it is still drift. A call to a tool
+listed before the Forget is then re-pinned the way first sight would pin it: under `strict` it is
+refused until an operator approves it, under `tofu` it stays callable, including a definition that
+had drifted. The re-created pin is reported, so the console shows the tool for that approval
+(`pins.py` `PinRegistry.repin`, `firewall.py` `McpFirewall._refresh_pin_status`).
 
 ### What survives a restart
 
@@ -678,9 +731,11 @@ instance, so a per-process store means replica A approves what replica B has nev
 driver upgrades it to `control-plane` and logs `NRVQ-MCP-5065` (`http.py` `HttpProxy.__init__`).
 
 The control-plane store reads once at startup and then **re-reads on a timer**
-(`mcp_pin_refresh_s`, default 30s, `config.py` `NorviqSettings.mcp_pin_refresh_s`). Without that refresh a running proxy holds its
-startup copy for its whole lifetime, so an operator who revoked approval would see the console update
-while the tool stayed listed and callable until the pod restarted (`pins.py:375-392`).
+(`mcp_pin_refresh_s`, default 30s, `config.py` `NorviqSettings.mcp_pin_refresh_s`); the server
+registry re-reads on the same timer whatever the pin store is. Until the next refresh a running proxy
+acts on the previous decision, for listings and calls alike, so an Approve, Revoke, Block or Unblock
+takes up to one interval to apply. With `0` the timer is off and a decision reaches a running proxy
+only when it restarts.
 
 ### A call before any list: the cold catalog
 
@@ -900,7 +955,7 @@ All read from the **proxy process's** environment, prefix `NRVQ_`:
 | `NRVQ_MCP_PIN_MODE` | `tofu` | `tofu` pins on first sight; `strict` quarantines until approved; anything else → `strict` |
 | `NRVQ_MCP_PIN_STORE` | `memory` | `memory` \| `file` \| `control-plane` (the chart sets `control-plane`) |
 | `NRVQ_MCP_PIN_PATH` | `""` | file location when the store is `file` |
-| `NRVQ_MCP_PIN_REFRESH_S` | `30` | how often a control-plane-backed proxy re-reads pins; `0` disables |
+| `NRVQ_MCP_PIN_REFRESH_S` | `30` | how often a running proxy re-reads pins (control-plane store) and server decisions; a decision applies to listings and calls within one interval; `0` disables |
 | `NRVQ_MCP_SCAN_STRIP_SEVERITY` | `high` | at/above this, a definition is removed from `tools/list` |
 | `NRVQ_MCP_SCAN_SANITIZE_SEVERITY` | `medium` | at/above this, the description is replaced by a stub |
 | `NRVQ_MCP_SCAN_RESPONSES` | `true` | scan server-returned content and the non-`tools/list` discovery surfaces |

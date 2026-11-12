@@ -159,7 +159,8 @@ not a bug; the Compliance surface labels its number "blocked or escalated".
 ### 1.6 Real traffic only
 
 Both audit joins exclude synthetic/probe/eval identities (`norviq/api/synthetic.py::is_synthetic_identity`)
-**and** every event tagged `framework="redteam"` (`mitre.py:112`, `mitre.py:154`). Red-team runs write
+**and** every event whose `framework` is a synthetic tag (`redteam`, `attack-graph`, `probe`, …;
+`SYNTHETIC_FRAMEWORKS` in `norviq/api/synthetic.py`), through `is_non_real_traffic`. Red-team runs write
 audit rows for evidence (`redteam.py:425-445`) but must never inflate an attestation, so
 observed/blocked counts, and the per-technique "affected agent classes" chips, both drop them. The
 number dropped is reported as `synthetic_excluded` so the console and the evidence pack can state the
@@ -461,8 +462,8 @@ forever.
   becomes non-zero only if you pass an explicit synthetic `target_agent` — in which case *every* row
   is excluded and the scorecard correctly reads 0% over a denominator of 0.
 - **The fallback target is scored as if real.** `redteam-test` (`redteam.py:34`) matches no prefix in
-  `SYNTHETIC_CLASS_PREFIXES` (`norviq/api/synthetic.py:29-42`) and is not in `SYNTHETIC_CLASS_EXACT`
-  (`:45`), so a suite run in a namespace with no seeded agent classes produces a real-looking
+  `SYNTHETIC_CLASS_PREFIXES` (`norviq/api/synthetic.py:42-55`) and is not in `SYNTHETIC_CLASS_EXACT`
+  (`:58`), so a suite run in a namespace with no seeded agent classes produces a real-looking
   percentage measured against an identity that carries no policy of its own. Check the "N classes"
   summary on the scorecard before quoting a number.
 - **`sector_not_enabled` and `non_enforcement` are returned but not displayed** as scorecard figures;

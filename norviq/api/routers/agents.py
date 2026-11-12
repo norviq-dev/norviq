@@ -21,7 +21,7 @@ from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.graph_maintenance import try_remove_graph_node
 from norviq.config import settings
-from norviq.api.synthetic import is_synthetic_identity  # the ONE shared synthetic/probe classifier
+from norviq.api.synthetic import audit_row_is_fabricated, is_synthetic_identity  # the ONE shared synthetic/probe classifier
 from norviq.sdk.core.trust import TrustScore
 from norviq.startup_retry import warm_with_backoff
 
@@ -469,6 +469,8 @@ async def agent_tool_usage(
     stmt = select(AuditLogEntry.tool_name, AuditLogEntry.decision).where(
         AuditLogEntry.agent_id == spiffe_id,
         AuditLogEntry.timestamp_utc >= _since_for_range(range_),
+        # A red-team run or a Simulate made under this SVID is not this agent's tool use.
+        ~audit_row_is_fabricated(AuditLogEntry),
     )
     if namespace and namespace != "all":
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
@@ -521,6 +523,8 @@ async def agent_trust_history(
     ).where(
         AuditLogEntry.agent_id == spiffe_id,
         AuditLogEntry.timestamp_utc >= _since_for_range(range_),
+        # Same exclusion as tool-usage: fabricated calls are not this agent's history.
+        ~audit_row_is_fabricated(AuditLogEntry),
     )
     if namespace and namespace != "all":
         stmt = stmt.where(AuditLogEntry.namespace == namespace)

@@ -36,7 +36,7 @@ from norviq.api.db.models import AuditLogEntry, IntentDraft
 from norviq.api.db.session import get_session
 from norviq.api.routers.graphs import _resolve_namespaces
 from norviq.api.replay_values import audit_row_lacks_values
-from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # proposals derive from REAL traffic only
+from norviq.api.synthetic import audit_row_is_non_real, is_non_real_row  # proposals derive from REAL traffic only
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES, OPAEvaluator
 from norviq.engine.intent import IntentError, compile_intent, dry_run, propose_intent
 
@@ -583,9 +583,7 @@ async def _recorded_calls(
         # itself (framework tag + the ONE shared identity classifier), so a session that did not run the
         # predicate still cannot let an attack's tool name become an allowlist grant. Skipped rows never
         # enter `calls`, so `sampled` counts only traffic a rule may legitimately be derived from.
-        if str(getattr(row, "framework", "") or "") == "redteam" or is_synthetic_identity(
-            row.agent_class, getattr(row, "agent_id", None)
-        ):
+        if is_non_real_row(row):
             continue
         payload = row.payload if isinstance(row.payload, dict) else {}
         masked = payload.get("masked_params")

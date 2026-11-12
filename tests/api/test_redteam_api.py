@@ -25,14 +25,23 @@ class FakeEvaluator:
 
 
 class _FakeSession:
-    """Returns the seeded agent classes for the distinct-agent_class query."""
+    """Returns the seeded registry identities for the distinct (agent_class, spiffe_id) query.
 
-    def __init__(self, classes: list[str]) -> None:
+    A seed is a class name (registered under its own `sa/<class>` SVID) or an explicit
+    (class, spiffe_id) pair, for identities whose service account is not named after the class."""
+
+    def __init__(self, classes: list) -> None:
         self.classes = classes
 
+    def _rows(self) -> list[tuple[str, str]]:
+        return [c if isinstance(c, tuple) else (c, f"spiffe://norviq/ns/default/sa/{c}") for c in self.classes]
+
     async def execute(self, stmt):
-        _ = stmt  # only the distinct-agent_class query is issued by the redteam router
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self.classes)))
+        _ = stmt  # only the distinct registry-identity query is issued by the redteam router
+        return SimpleNamespace(
+            all=lambda: self._rows(),
+            scalars=lambda: SimpleNamespace(all=lambda: [c for c, _ in self._rows()]),
+        )
 
     async def close(self) -> None:
         return None
