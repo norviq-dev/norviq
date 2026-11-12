@@ -40,8 +40,8 @@ because they should be installed.
   with allowed end-to-end traffic now reads exploitable.
 - A frozen agent stays frozen in the Agents list, the trust chart, search and the notification bell;
   it used to read as its last score about 30 s after the freeze. Unfreeze lifts the freeze without
-  leaving a trust cap behind, Reset Trust calls the reset endpoint, an active cap is shown and can be
-  removed, and Freeze asks for confirmation. While the trust store cannot be read, the console shows
+  leaving a trust cap behind, Reset Trust is now Reset Behavior Record and calls the reset endpoint,
+  an active cap is shown and can be removed, and Freeze asks for confirmation. While the trust store cannot be read, the console shows
   the freeze as unknown instead of "not frozen".
 - Proposing a policy from traffic no longer grants a tool whose every recorded call was blocked or
   would-blocked. A tool that was also allowed is still proposed, and the console says how often it was

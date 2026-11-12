@@ -5,7 +5,8 @@
 // end-to-end through the console:
 //   * Settings → set a namespace to Monitor (audit) mode via the real toggle + Save → a blocked tool in
 //     that namespace softens to an allow-but-log `audit` decision; set it back to Block → it re-blocks.
-//   * Agents → Freeze Agent via the real button → that agent's calls block; Reset Trust → recovers.
+//   * Agents → Freeze Agent via the real button and its confirm → that agent's calls block; Unfreeze →
+//     recovers, with no trust cap left behind.
 import { test, expect, type Page } from "@playwright/test";
 
 const PW = process.env.NRVQ_E2E_PASSWORD || "CHANGE_ME-e2e-pw";
@@ -134,7 +135,7 @@ test("the Settings Monitor toggle softens enforcement, and back re-blocks", asyn
   await expect.poll(() => evalTool(page, "blocked_tool"), { timeout: 10000 }).toBe("block/e2e_block");
 });
 
-test("the real Agents 'Freeze Agent' button blocks the agent; 'Reset Trust' recovers it", async ({ page }) => {
+test("the real Agents 'Freeze Agent' button blocks the agent; 'Unfreeze Agent' recovers it", async ({ page }) => {
   await realLogin(page);
   // Register the agent (one observed call) so it renders on the Agents page.
   const freezeSpiffe = `spiffe://norviq/ns/${NS}/sa/freeze-bot`;
@@ -161,23 +162,24 @@ test("the real Agents 'Freeze Agent' button blocks the agent; 'Reset Trust' reco
   await expect(row).toBeVisible({ timeout: 20000 });
   await row.click();
 
-  // Drive the REAL "Freeze Agent" button and assert the enforced effect.
+  // Drive the REAL "Freeze Agent" button and assert the enforced effect. Freeze blocks every call the
+  // agent makes, so the button opens a confirm and only the confirm sends the PUT.
+  await page.getByRole("button", { name: /freeze agent/i }).click();
+  await expect(page.getByTestId("agent-trust-confirm")).toBeVisible();
   const putFreeze = page.waitForResponse(
     (r) => /\/api\/v1\/agents\/.+\/trust/.test(r.url()) && r.request().method() === "PUT", { timeout: 15000 });
-  await page.getByRole("button", { name: /freeze agent/i }).click();
+  await page.getByTestId("agent-trust-confirm-submit").click();
   await putFreeze;
   await expect.poll(() => evalTool(page, "benign_tool", freezeSpiffe), { timeout: 10000 }).toBe("block/trust_frozen");
 
-  // Drive the REAL recovery button → recovers.
-  //
-  // A FROZEN agent's control is "Unfreeze Agent", not "Reset Trust" — AgentMonitor.tsx:291-300 swaps
-  // them deliberately, because resetting the score of a frozen agent is, in its own words, "a
-  // no-op-looking dead end". Both call updateTrust(spiffe, 0.8), so the PUT this waits on is the
-  // same; only the label differs, and this spec was looking for the one that is absent precisely
-  // when the agent is in the state the test just put it in. Matched loosely so either label works.
-  const putReset = page.waitForResponse(
+  // Drive the REAL recovery button → recovers. A frozen agent's control is "Unfreeze Agent". It sends
+  // score 1.0, which lifts the freeze and sets no cap; the old 0.8 left the agent capped at 0.8, so the
+  // response must show neither.
+  const putUnfreeze = page.waitForResponse(
     (r) => /\/api\/v1\/agents\/.+\/trust/.test(r.url()) && r.request().method() === "PUT", { timeout: 15000 });
-  await page.getByRole("button", { name: /unfreeze agent|reset trust/i }).click();
-  await putReset;
+  await page.getByRole("button", { name: /unfreeze agent/i }).click();
+  const lifted = await (await putUnfreeze).json();
+  expect(lifted.frozen).toBe(false);
+  expect(lifted.trust_cap).toBeNull();
   await expect.poll(() => evalTool(page, "benign_tool", freezeSpiffe), { timeout: 10000 }).not.toContain("trust_frozen");
 });

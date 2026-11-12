@@ -156,7 +156,9 @@ test.describe("Compliance framework cards have no 'coverage steady' line", () =>
     await expect(page.getByText("MITRE ATLAS")).toBeVisible({ timeout: 15000 });
     // the framework cards render (donut %, counts) but no trend "coverage steady" line
     await expect(page.getByText(/coverage steady/i)).toHaveCount(0);
-    await expect(page.getByText(/enforced/i).first()).toBeVisible(); // counts still there
+    // Counts still there. The word beside the count follows the namespace's posture ("enforced", or
+    // "rules present" in Monitor), so the count is found by its test id.
+    await expect(page.getByTestId("compliance-card-present").first()).toHaveText(/^\d+ \S/);
     recorder.expectNoConsoleErrors();
     recorder.expectNoApiFailures();
   });
