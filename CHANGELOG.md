@@ -5,12 +5,12 @@ versions follow SemVer. Each 0.2.x entry is a summary — the linked GitHub rele
 grouped by upgrade impact, security relevance and operator-visible behaviour. Entries for 0.2.0 and
 earlier are taken from the annotated tags, the only record those versions have.
 
-Nineteen released versions. The `pre-public-cleanup-20260712` tag is not a release and is omitted.
+Twenty released versions. The `pre-public-cleanup-20260712` tag is not a release and is omitted.
 Three versions published incompletely — `v0.1.0` shipped no chart, `v0.1.1` shipped it unsigned,
 `v0.2.0` shipped no chart — and their headings say so: they are listed because they happened, not
 because they should be installed.
 
-## [Unreleased]
+## [0.2.8] — 2026-11-12 — the console reports what is enforced
 
 **Upgrade impact — read before `helm upgrade`.**
 
