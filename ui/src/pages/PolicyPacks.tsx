@@ -23,6 +23,7 @@ import { useApi, invalidateApiCache } from "../hooks/useApi";
 import { useMutationScope } from "../hooks/useMutationScope";
 import { registerRego } from "../lib/monaco-rego";
 import { useApp } from "../store/AppContext";
+import { useEnforcementVerdict } from "../lib/posture";
 
 // After a pack/override mutation, drop every cached read of pack + settings state (this page's own key AND
 // Target Settings' distinct `tgt-*` keys) so a remount or a hop to Target Settings reflects the change immediately
@@ -53,6 +54,8 @@ const GAP = "#ff5c7c";
 
 export function PolicyPacks() {
   const { namespace } = useApp();
+  // The enable/disable confirm says what the pack's rules do here; in Monitor they log, they do not block.
+  const packVerdict = useEnforcementVerdict(namespace);
   // A pack is enabled PER NAMESPACE. At the aggregate scope the API cannot answer that question and
   // does not try: `fetchPolicyPacks` omits `?namespace`, and the route defaults it to "default" — so
   // every row describes ONE namespace while the page header says "all". Everything that renders
@@ -389,7 +392,7 @@ export function PolicyPacks() {
         {/* Reflect the namespace's apply-mode up-front — dry-run-only means applies are refused server-side. */}
         {isAdmin && !blockedReason && dryRunOnly && (
           <div data-testid="pack-dryrun-banner" style={{ color: GAP, fontSize: 13, marginBottom: 8, padding: "8px 12px", border: `1px solid ${GAP}`, borderRadius: 8 }}>
-            This namespace is <span className="mono">dry-run-only</span> — pack applies are disabled. Switch it to Enforce in Target Settings to enable packs.
+            This namespace is <span className="mono">dry-run-only</span> — pack applies are disabled. Set change control to Live in Target Settings to enable packs.
           </div>
         )}
 
@@ -725,9 +728,18 @@ export function PolicyPacks() {
             </div>
             <div style={{ fontSize: 13, color: "var(--text-secondary)", margin: "8px 0 14px", lineHeight: 1.5 }}>
               {confirmPack.enabled ? (
-                <>This removes the pack's enforcing rules from namespace <b style={{ color: "var(--text-primary)" }}>{namespace}</b>. Agents in this namespace will no longer be blocked by these controls.</>
+                packVerdict === "monitor" ? (
+                  <>This removes the pack's rules from namespace <b style={{ color: "var(--text-primary)" }}>{namespace}</b>. The namespace is in Monitor mode, so they were only logging would-blocks; that logging stops.</>
+                ) : (
+                  <>This removes the pack's enforcing rules from namespace <b style={{ color: "var(--text-primary)" }}>{namespace}</b>. Agents in this namespace will no longer be blocked by these controls.</>
+                )
               ) : (
-                <>This loads the pack's enforcing rules into namespace <b style={{ color: "var(--text-primary)" }}>{namespace}</b>, effective on the next tool call{confirmPack.composes?.length ? <> — composing canonical rules: <span className="mono">{confirmPack.composes.join(", ")}</span></> : null}.</>
+                <>
+                  This loads the pack's {packVerdict === "monitor" ? "" : "enforcing "}rules into namespace <b style={{ color: "var(--text-primary)" }}>{namespace}</b>, effective on the next tool call{confirmPack.composes?.length ? <> — composing canonical rules: <span className="mono">{confirmPack.composes.join(", ")}</span></> : null}.
+                  {packVerdict === "monitor" && (
+                    <span data-testid="pack-confirm-monitor"> The namespace is in Monitor mode, so their matches are logged as would-blocks and nothing is blocked live.</span>
+                  )}
+                </>
               )}
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>

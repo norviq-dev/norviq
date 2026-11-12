@@ -10,7 +10,7 @@
     "name": "Sensitive Information Disclosure",
     "scope": "enforceable",
     "description": "The model discloses sensitive data (secrets, PII, proprietary content) through its tool calls, including encoded exfiltration.",
-    "policies": ["llm02_data_leakage", "base64_decoded_threat"],
+    "policies": ["llm02_data_leakage", "base64_decoded_threat", "pii_detection", "pci_card_numbers"],
     "also": "MITRE ATLAS · AML.T0057",
     "remediation": "egress"
   },
@@ -31,7 +31,7 @@
     "scope": "enforceable",
     "description": "Downstream systems trust unsanitized model output; enforced by blocking dangerous tool calls (e.g. SQL injection, encoded payloads) that result from that output.",
     "policies": ["deny_sql_injection", "base64_decoded_threat"],
-    "also": "MITRE ATLAS · AML.T0050"
+    "also": "MITRE ATLAS · AML.T0049"
   },
   "LLM06:2025": {
     "name": "Excessive Agency",
@@ -67,7 +67,6 @@
     "priority": "medium",
     "description": "Uncontrolled resource/cost consumption (denial-of-wallet). Enforced through Norviq's rate/cost limits on tool calls (engine configuration), not a generated policy rule — configure limits in Settings.",
     "policies": [],
-    "also": "MITRE ATLAS · AML.T0034",
     "remediation": "rate"
   }
 }

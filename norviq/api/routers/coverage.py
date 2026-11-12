@@ -192,7 +192,8 @@ async def _agent_class_policies(
         summary["would_block"] = e.get("would_block", 0)
         # A policy set to block but in a Monitor namespace is LOADED, not enforcing — say so honestly.
         summary["enforcing"] = summary["enforcement_mode"] == "block" and ns_mode != "audit"
-        # "effective" = has actually stopped (or would-stop, in monitor) traffic — the proven-blocking signal.
+        # "effective" = real traffic fired these rules: a block, or a Monitor would-block. A would-block RAN,
+        # so this is "proven to match", not "proven to block"; `enforcing` and the Overview legend say which.
         summary["effective"] = e.get("blocked", 0) > 0 or e.get("would_block", 0) > 0
         out.append(summary)
     out.sort(key=lambda s: (not s["effective"], s["cls"]))

@@ -242,6 +242,10 @@ describe("Tools page", () => {
     );
     const err = await screen.findByTestId("tools-error");
     expect(err).toHaveTextContent(/not the same as .there are none./i);
+    // A registry read says nothing about posture: written policies keep applying, which in a Monitor
+    // namespace means logging. "keep enforcing" claimed more than this page knows.
+    expect(err).toHaveTextContent(/policies already written keep applying/i);
+    expect(err).not.toHaveTextContent(/keep enforcing/i);
     expect(screen.queryByTestId("tools-declared")).not.toBeInTheDocument();
   });
 

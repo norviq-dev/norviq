@@ -40,7 +40,8 @@ function Line({ color, label, labelColor, dashed }: { color: string; label: stri
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
       {dashed ? (
-        // Dashed swatch matches the canvas: a stopped hop (enforced block OR monitor would-block) dashes.
+        // Dashed swatch matches the canvas: a hop a policy matched dashes — an enforced block, or a
+        // Monitor would-block whose calls ran (amber, never the red of a stop).
         <span style={{ display: "flex", gap: 2.5 }}>
           <span style={{ width: 6, height: 2.5, borderRadius: 2, background: color }} />
           <span style={{ width: 6, height: 2.5, borderRadius: 2, background: color }} />

@@ -240,7 +240,7 @@ export function Tools() {
               <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 5 }}>Couldn&rsquo;t read the tool registry</div>
               <p className="muted" style={{ fontSize: 12.5, lineHeight: 1.6, margin: 0 }}>
                 Not the same as &ldquo;there are none&rdquo;. Treat any absence as unknown, not an all-clear —
-                policies already written keep enforcing, and a tool can still be named in a new one.
+                policies already written keep applying, and a tool can still be named in a new one.
               </p>
               <div className="mono" style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 8 }}>{error}</div>
             </div>

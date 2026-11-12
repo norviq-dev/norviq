@@ -272,6 +272,12 @@ describe("BuilderSheet — unsaved-changes guard on close", () => {
         HttpResponse.json({ valid: true, errors: [], total_records_checked: 5, newly_blocked: 0, recommendation: "n/a" })
       ),
       http.post("/api/v1/policies", () => HttpResponse.json({ version: 1 })),
+      // The namespace's posture. This test had none (its server has no /settings handler), and the button
+      // still read "Save & enforce": a claim made from a posture never read. It now reads "Save" there, so
+      // the test supplies the enforcing posture the label it asserts depends on.
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({ namespace: "default", enforcement_mode: "block", enforcement_mode_source: "namespace", trust_threshold: 0.7, rate_limit: 60 })
+      ),
       // verifyPolicyApplied's convergence poll — resolve on the very first tick so no timers linger.
       http.get("/api/v1/policies", () =>
         HttpResponse.json([{ namespace: "default", agent_class: "builder-spike", current_version: 1, enforcement_mode: "block" }])
@@ -1657,7 +1663,9 @@ describe("a negated scoping fact is visible, not merely enforced", () => {
     expect(row).toHaveTextContent("NOT");
     // In the same words the generated rego's header comment uses.
     expect(row).toHaveTextContent("data_classes excludes {secret}");
-    expect(row).toHaveTextContent(/Compiles and enforces/i);
+    // REWRITTEN (was /Compiles and enforces/): the fact compiles into the rule, but whether that rule
+    // enforces depends on the namespace posture and the policy mode, which this row does not know.
+    expect(row).toHaveTextContent(/Compiles into the policy/i);
 
     // And it is removable, which it was not when it rendered nothing at all.
     fireEvent.click(screen.getByTestId("builder-fact-remove-send_email-0"));
@@ -1842,6 +1850,66 @@ describe("the dry-run's per-tool traffic numbers state the size of the sample th
     expect(screen.getByTestId("builder-scope-sample-note-send_email")).toHaveTextContent(
       "The dry-run replayed no recent calls, so this grant's effect on real traffic is unmeasured — not zero."
     );
+  });
+
+  it("counts argument refusals on value-less records apart, and shows the server's advisory", async () => {
+    // The server sets these aside: refused only on the tool's argument grant with every refinement met,
+    // from records that kept no argument values. They used to arrive as newly-blocked flips, and the advisory explaining why the
+    // numbers could be wrong was typed in client.ts and never rendered.
+    const advisory =
+      "Replayed records carry empty tool_params because audit_capture_masked_params is off (the default).";
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 30,
+      newly_blocked: 0,
+      newly_blocked_samples: [],
+      cannot_evaluate: 6,
+      cannot_evaluate_samples: Array.from({ length: 6 }, () => ({
+        tool_name: "send_email",
+        was: "allow",
+        now: "block",
+        rule_id: "intent_constraint_violation"
+      })),
+      truncated: false,
+      advisory,
+      recommendation: "No call the replay could evaluate would be newly blocked."
+    });
+
+    const panel = screen.getByTestId("builder-dryrun-result");
+    expect(panel).toHaveTextContent("0 newly blocked");
+    expect(screen.getByTestId("builder-dryrun-cannot-evaluate")).toHaveTextContent("6 cannot evaluate (no argument values)");
+    expect(screen.getByTestId("builder-dryrun-cannot-evaluate-detail")).toHaveTextContent("send_email × 6");
+    // Says what the server sets aside, and no more: a refinement refusal is never in this count.
+    expect(screen.getByTestId("builder-dryrun-cannot-evaluate-detail")).toHaveTextContent(
+      "Refused only on the tool's argument grant, with every refinement met"
+    );
+    expect(screen.getByTestId("builder-dryrun-advisory")).toHaveTextContent(advisory);
+    // The grant whose calls could not be judged gets no all-clear, and the row says why.
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/No replayed call would be denied/i);
+    expect(screen.getByTestId("builder-scope-sample-note-send_email")).toHaveTextContent(
+      "6 replayed calls to this tool could not be evaluated"
+    );
+    // A tool with none of them, in a complete run, keeps its measured all-clear.
+    expect(screen.getByTestId("builder-scope-cell-http_post-impact")).toHaveTextContent(/No replayed call would be denied/i);
+  });
+
+  it("shows neither note when the server reports nothing set aside and no advisory", async () => {
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 30,
+      newly_blocked: 0,
+      newly_blocked_samples: [],
+      cannot_evaluate: 0,
+      cannot_evaluate_samples: [],
+      truncated: false,
+      advisory: "",
+      recommendation: "No currently-allowed traffic would be newly blocked — safe to deploy."
+    });
+    expect(screen.queryByTestId("builder-dryrun-cannot-evaluate")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("builder-dryrun-advisory")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(/No replayed call would be denied/i);
   });
 });
 

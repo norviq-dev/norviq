@@ -257,7 +257,14 @@ def agent_get(ctx: click.Context, spiffe_id: str) -> None:
 def agent_reset_trust(ctx: click.Context, spiffe_id: str, score: float) -> None:
     """Reset an agent trust score."""
     data = ctx.obj["client"].put(f"/api/v1/agents/{spiffe_id}/trust", {"score": score})
-    click.echo(f"Trust reset: {data.get('spiffe_id')} -> {data.get('score')} ({data.get('category')})")
+    # The endpoint answers with the control it put in force, not a score: a cap is not the agent's trust.
+    if data.get("frozen"):
+        click.echo(f"Agent frozen: {data.get('spiffe_id')}")
+    elif data.get("trust_cap") is not None:
+        click.echo(f"Trust capped at {data.get('trust_cap')}: {data.get('spiffe_id')} "
+                   "(the engine uses min(computed, cap); --score 1.0 lifts it)")
+    else:
+        click.echo(f"Freeze and cap lifted: {data.get('spiffe_id')}")
     _ok("agent.reset-trust")
 @agent.command("freeze")
 @click.argument("spiffe_id")

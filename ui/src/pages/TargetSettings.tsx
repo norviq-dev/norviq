@@ -20,6 +20,7 @@ import { useApi, invalidateApiCache } from "../hooks/useApi";
 import { useMutationScope } from "../hooks/useMutationScope";
 import { useApp } from "../store/AppContext";
 import { useState } from "react";
+import { verdictFromSettings } from "../lib/posture";
 
 export function TargetSettings() {
   const { namespace, refreshPosture } = useApp();
@@ -99,6 +100,15 @@ export function TargetSettings() {
   // The posture read itself faulted (not merely in flight): the knobs below show no state at all, so say why
   // rather than leaving two un-highlighted toggles to be read as "nothing is set".
   const postureUnreadable = !settingsKnown && !!settings.error;
+  // What the ENGINE does, through lib/posture like every other surface. `enforcementMode` above is the merged
+  // setting (the control's state); an "audit" inherited from the cluster-wide default still blocks on this
+  // namespace's policies, and the note below used to say "a matched rule logs a would-block" for it anyway.
+  // This page's own read is for `namespace`, so a payload without the echo is taken as answering for it.
+  const engineVerdict = verdictFromSettings(
+    settings.data ? { ...settings.data, namespace: settings.data.namespace ?? namespace } : null,
+    namespace
+  );
+  const modeSourceKnown = settings.data?.enforcement_mode_source != null;
 
   const enabledPacks = (packs.data ?? []).filter((p) => p.enabled);
   // Bind the subtitle/working-scope label to the ACTUAL working scope — never "Namespace: all" over data.
@@ -148,14 +158,25 @@ export function TargetSettings() {
                 ONLY on an explicit per-namespace override (`_resolve_posture`: "a null/global mode does NO
                 softening"), so "Monitor" here is not on its own proof that THIS namespace is softened. */}
             {enforcementMode === "audit" && (concrete ? (
-              <div data-testid="enforcement-monitor-note"
-                style={{ fontSize: 11, color: "var(--block, #ff5c7c)", marginTop: 4, maxWidth: 300 }}>
-                Monitor — a matched rule logs a would-block instead of stopping the call.
-                <div style={{ color: "var(--text-muted)", marginTop: 2 }}>
-                  The engine softens calls only where this namespace sets Monitor itself; this reading also
-                  reflects the cluster-wide default.
+              engineVerdict === "enforcing" ? (
+                <div data-testid="enforcement-monitor-inherited"
+                  style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, maxWidth: 300 }}>
+                  Monitor here is the cluster-wide default, not this namespace&apos;s own setting. It relaxes only
+                  calls no policy decides: this namespace&apos;s policies still block. Set the mode here to give the
+                  namespace its own.
                 </div>
-              </div>
+              ) : (
+                <div data-testid="enforcement-monitor-note"
+                  style={{ fontSize: 11, color: "var(--block, #ff5c7c)", marginTop: 4, maxWidth: 300 }}>
+                  Monitor — a matched rule logs a would-block instead of stopping the call.
+                  {!modeSourceKnown && (
+                    <div style={{ color: "var(--text-muted)", marginTop: 2 }}>
+                      The engine softens calls only where this namespace sets Monitor itself; this reading also
+                      reflects the cluster-wide default.
+                    </div>
+                  )}
+                </div>
+              )
             ) : (
               // NOT "the cluster-wide default is Monitor". `fetchSettings("all")` DROPS the namespace param
               // (client.ts: `if (namespace && namespace !== "all")`), and the endpoint's own signature is
@@ -201,9 +222,9 @@ export function TargetSettings() {
                 (`row.apply_mode if row and row.apply_mode else "enforce"`), so this sentence is true of the
                 namespace as written. */}
             {applyMode === "dry_run_only" && (
-              <div data-testid="apply-mode-dryrun-note" title="Frozen freezes POLICY EDITS for this namespace; the live policy still enforces."
+              <div data-testid="apply-mode-dryrun-note" title="Frozen freezes POLICY EDITS for this namespace; the live policy keeps running unchanged, in whatever enforcement mode the namespace has."
                 style={{ fontSize: 11, color: "var(--block, #ff5c7c)", marginTop: 4 }}>
-                Frozen — policy edits are frozen (live policy still enforces).
+                Frozen — policy edits are frozen (the live policy keeps running unchanged).
               </div>
             )}
             {postureUnreadable && (

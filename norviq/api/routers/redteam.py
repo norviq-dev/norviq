@@ -19,12 +19,14 @@ from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import AgentRegistryEntry, RedTeamRun
 from norviq.api.db.session import get_session
 from norviq.api.redteam_efficacy import (
-    attack_mapping,
     attack_passed,
     catalog_entry,
     compute_efficacy,
+    mapping_fields,
     pass_summary,
     row_outcome,
+    with_current_breakdowns,
+    with_current_mapping,
     with_outcomes,
 )
 from norviq.api.synthetic import is_synthetic_identity
@@ -455,8 +457,12 @@ def _pass_figures(row: RedTeamRun) -> dict[str, Any]:
 
 
 def _run_summary(row: RedTeamRun) -> dict[str, Any]:
-    """Lightweight run summary for the history list (no full result rows)."""
-    eff = row.efficacy or {}
+    """Lightweight run summary for the history list (no full result rows).
+
+    The headline is counted the way the run's detail counts it (`with_current_breakdowns`), so the
+    history list and the run it opens cannot show two proven-blocking numbers for one run.
+    """
+    eff = with_current_breakdowns(row.efficacy, row.results) or {}
     overall = eff.get("overall", {}) if isinstance(eff, dict) else {}
     return {
         "run_id": row.id,
@@ -484,15 +490,18 @@ def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
     per-attack detail has been retention-pruned (``results IS NULL``), return an empty results list plus
     ``detail_pruned=true`` so the caller knows the summary (efficacy) is authoritative but the rows are gone."""
     pruned = row.results is None
+    # Stored rows carry the mapping they were written with; serve them, and the two framework
+    # breakdowns counted from them, under the current one (`with_current_mapping`).
+    results = with_current_mapping(row.results)
     return {
         "run_id": row.id,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "namespace": row.namespace,
         "targets": row.targets,
         **_pass_figures(row),
-        "results": with_outcomes(row.results),
+        "results": with_outcomes(results),
         "detail_pruned": pruned,
-        "efficacy": row.efficacy,
+        "efficacy": with_current_breakdowns(row.efficacy, results),
     }
 
 
@@ -529,12 +538,8 @@ def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolC
 def _mapping_fields(attack: Any) -> dict[str, Any]:
     """The ATLAS/OWASP mapping fields carried on every result row so the efficacy roll-up can group by
     technique + control without re-deriving them."""
-    m = attack_mapping(attack)
     return {
-        "atlas_technique": m["atlas"]["technique_id"],
-        "atlas_technique_name": m["atlas"]["technique_name"],
-        "owasp_control": m["owasp"]["control_id"] if m["owasp"] else None,
-        "owasp_control_name": m["owasp"]["control_name"] if m["owasp"] else None,
+        **mapping_fields(attack),
         # None, not "", for an attack with no MCP vector — `compute_efficacy` skips falsy vectors, and
         # None reads as "this attack exercises no MCP vector" rather than as an empty vector id.
         "mcp_vector": getattr(attack, "mcp_vector", "") or None,

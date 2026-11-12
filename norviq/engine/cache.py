@@ -651,13 +651,33 @@ class RedisCache:
     # took over. A missing owner key (a flush, an eviction) fences everyone off: the next claim restores it.
     _OWNER_TTL_MS = 30_000
     FENCE_APPLIED, FENCE_LOST, FENCE_MISSING = 1, 0, -1
+    # A write that is not a freeze drops a FROZEN trust:<id> snapshot (the freeze's own display row, or one an
+    # evaluation wrote while the agent was frozen). It describes a freeze that is no longer in force; left in place
+    # it kept the agent reading frozen, then "unscored", until it expired. Reads then fall back to the registry's
+    # last computed score. A write that removes or raises the cap likewise drops a snapshot the OLD cap held down
+    # (score within 1e-4 of it, the calculator's rounding): that score was min(computed, old cap), not a score
+    # the engine will use again, and after Remove Cap it was shown with no cap beside it until the agent's next
+    # call. The registry's copy is marked "Unscored" by the same rule (agents.py::_cap_held_snapshot). Any other
+    # snapshot is left alone: it is a score the engine computed.
     _FENCED_CONTROL_LUA = """
 local owner = redis.call('GET', KEYS[1])
 if not owner then return -1 end
 if owner ~= ARGV[1] then return 0 end
+local old_cap = tonumber(redis.call('GET', KEYS[3]) or '')
+local new_cap = tonumber(ARGV[3])
 if ARGV[2] == '1' then redis.call('SET', KEYS[2], '1') else redis.call('DEL', KEYS[2]) end
 if ARGV[3] ~= '' then redis.call('SET', KEYS[3], ARGV[3]) else redis.call('DEL', KEYS[3]) end
-if ARGV[4] ~= '' then redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[5]) end
+if ARGV[4] ~= '' then
+  redis.call('SET', KEYS[4], ARGV[4], 'EX', ARGV[5])
+elseif ARGV[2] ~= '1' then
+  local shown = redis.call('GET', KEYS[4])
+  if shown and string.find(shown, '"category":"[Ff]rozen"') then
+    redis.call('DEL', KEYS[4])
+  elseif shown and old_cap and (not new_cap or new_cap > old_cap) then
+    local score = tonumber(string.match(shown, '"score":%s*([-%d.eE+]+)'))
+    if score and score >= old_cap - 0.0001 then redis.call('DEL', KEYS[4]) end
+  end
+end
 return 1
 """
     # The boot warm's write: ADDS what Postgres holds (a freeze, else a cap) and deletes nothing, fenced the same way.
@@ -738,7 +758,9 @@ return token
         """Write one agent's whole admin control state — freeze flag, cap, and optionally the displayed score —
         atomically, and only while ``token`` owns the agent. Returns FENCE_APPLIED, FENCE_LOST (another writer
         owns it) or FENCE_MISSING (the owner key is gone, so the store's state is unknown). One script, so a
-        freeze-to-cap change never has an instant with neither, as separate DEL and SET commands did."""
+        freeze-to-cap change never has an instant with neither, as separate DEL and SET commands did. A write
+        that is not a freeze also drops a frozen ``trust:<id>`` snapshot, and one that removes or raises the cap
+        drops a snapshot the old cap held down (see _FENCED_CONTROL_LUA)."""
         keys = [f"agent_trust_owner:{spiffe_id}", f"agent_frozen:{spiffe_id}", f"agent_trust_override:{spiffe_id}",
                 f"trust:{spiffe_id}"]
         args = [str(token), "1" if frozen else "0", "" if cap is None else str(float(cap)),

@@ -36,10 +36,11 @@ async def remove_graph_node(request, namespace: str, node_id: str) -> bool:
     node was not in the graph. Callers must report that answer rather than assume success — claiming a
     removal that did not happen is the defect this module exists to close.
 
-    Operates on the evaluator's LIVE builder so in-memory state and the snapshot cannot diverge, and
-    restores the persisted snapshot first when this process has not touched the namespace yet. The
-    subsequent ``store.save`` re-snapshots and invalidates the per-namespace analysis caches, so every
-    graph surface reflects the removal immediately.
+    With a store bound, the removal is made against the PERSISTED graph merged with this process's
+    builder, under the store's per-namespace lock, and leaves a tombstone in the snapshot. Removing
+    from this process's builder alone was not enough with several API replicas: the node GET served
+    could be one only another replica held (so DELETE said 404), and a replica that still held a
+    removed node saved it straight back (so a 200 did not stick).
     """
     evaluator = getattr(request.app.state, "evaluator", None)
     store = getattr(request.app.state, "graph_store", None)
@@ -49,11 +50,9 @@ async def remove_graph_node(request, namespace: str, node_id: str) -> bool:
     if restore is not None:
         await restore(namespace)
     graph = evaluator.get_graph(namespace)
-    if not graph.remove_node(node_id):
-        return False
-    if store is not None:
-        await store.save(namespace, graph)
-    return True
+    if store is None:
+        return graph.remove_node(node_id)
+    return await store.remove_node(namespace, graph, node_id)
 
 
 async def try_remove_graph_node(request, namespace: str, node_id: str) -> bool:

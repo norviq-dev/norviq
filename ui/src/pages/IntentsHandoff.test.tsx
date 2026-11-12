@@ -150,6 +150,53 @@ describe("intents -> builder handoff", () => {
   });
 });
 
+describe("switching a handed-off intent to Tighten-only rules", () => {
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+  });
+
+  function renderSeeded(graph: ReturnType<typeof intentToBuilderGraph>["graph"]) {
+    vi.spyOn(client, "apiSend").mockResolvedValue({ classes: [], namespaces: [] } as never);
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <ToastProvider>
+            <BuilderSheet namespace="agents" seedGraph={graph} onClose={() => {}} />
+          </ToastProvider>
+        </AppProvider>
+      </MemoryRouter>
+    );
+  }
+
+  it("starts rules mode at the tighten-only default, even from a graph that carries a block default", async () => {
+    // A graph built before the converter was fixed still carries `block` in `defaults`. Allowlist mode
+    // never read it; switching to rules mode made it the policy's default, so a "tighten-only" policy
+    // blocked every call no rule matched.
+    const { graph } = intentToBuilderGraph(CONVERTIBLE.intent);
+    renderSeeded({ ...graph, defaults: { decision: "block", reason: "not permitted by this intent" } });
+    const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByDisplayValue("report-gen")).toBeInTheDocument());
+    await user.click(screen.getByTestId("builder-mode-rules"));
+    expect(screen.getByTestId("builder-defaults-decision")).toHaveValue("allow");
+    expect(screen.queryByTestId("builder-defaults-not-tighten-only")).not.toBeInTheDocument();
+  });
+
+  it("says the policy is no longer tighten-only when the operator sets the default to block", async () => {
+    const { graph } = intentToBuilderGraph(CONVERTIBLE.intent);
+    renderSeeded(graph);
+    const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByDisplayValue("report-gen")).toBeInTheDocument());
+    await user.click(screen.getByTestId("builder-mode-rules"));
+    await user.selectOptions(screen.getByTestId("builder-defaults-decision"), "block");
+    expect(screen.getByTestId("builder-defaults-not-tighten-only")).toHaveTextContent(
+      /every call no rule matches is blocked/i
+    );
+    await user.selectOptions(screen.getByTestId("builder-defaults-decision"), "allow");
+    expect(screen.queryByTestId("builder-defaults-not-tighten-only")).not.toBeInTheDocument();
+  });
+});
+
 describe("an unmentioned argument is a flag, not a gate", () => {
   it("names the argument the rule never mentions AND still hands the proposal to the builder", async () => {
     // Two properties in one test, deliberately.

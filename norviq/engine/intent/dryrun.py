@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from norviq.engine.capability import verb_reads_payload
 from norviq.engine.intent.compiler import CompiledIntent, compile_intent
 
 _PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([A-Za-z0-9_.]+)\s*$")
@@ -110,6 +111,22 @@ class CallOutcome:
         return self.decision != "allow"
 
 
+def _outcome_dict(o: CallOutcome) -> dict:
+    return {
+        "index": o.index,
+        "tool_name": o.tool_name,
+        "reason": o.reason,
+        # The near miss as data. `predicates` is EVERY clause the closest rule asserts, including the
+        # ones the compiler adds itself (the plane, and the availability guards for version-gated
+        # roots). Rendering only the operator-authored clauses is what makes "met 3 of 4" fail to add
+        # up against a list of two.
+        "closest_rule": o.closest_rule,
+        "met": o.met,
+        "predicates": list(o.predicates),
+        "failed": list(o.failed),
+    }
+
+
 @dataclass
 class DryRunReport:
     """What the operator is shown before they are asked to approve."""
@@ -117,41 +134,71 @@ class DryRunReport:
     total: int = 0
     would_allow: int = 0
     would_block: int = 0
+    # Calls the replay could not judge: the record kept no argument VALUES, and every rule that could
+    # still have matched failed only on predicates over those values. Counted apart from `would_block`
+    # because a refusal caused by what the audit log lacks is not one the policy would make.
+    cannot_evaluate: int = 0
     # Rule id -> how many calls it permitted. A rule covering ZERO recorded calls is the interesting
     # one: either the traffic does not exercise it, or it is written wrongly and never matches.
     coverage: dict = field(default_factory=dict)
+    # Rule id -> how many of the `cannot_evaluate` calls it might have permitted, had values been
+    # recorded. A rule with none covered but some here has not been shown to match nothing.
+    unevaluated: dict = field(default_factory=dict)
     # The calls that would newly break, with the near-miss for each. This is the list the operator
     # actually reads, so it is kept whole rather than summarised to a count.
     blocked: list = field(default_factory=list)
+    unevaluable: list = field(default_factory=list)
 
     @property
     def unused_rules(self) -> list:
-        return sorted(rid for rid, n in self.coverage.items() if n == 0)
+        return sorted(rid for rid, n in self.coverage.items() if n == 0 and not self.unevaluated.get(rid))
 
     def as_dict(self) -> dict:
         return {
             "total": self.total,
             "would_allow": self.would_allow,
             "would_block": self.would_block,
+            "cannot_evaluate": self.cannot_evaluate,
             "coverage": dict(sorted(self.coverage.items())),
+            "unevaluated": dict(sorted(self.unevaluated.items())),
             "unused_rules": self.unused_rules,
-            "blocked": [
-                {
-                    "index": o.index,
-                    "tool_name": o.tool_name,
-                    "reason": o.reason,
-                    # The near miss as data. `predicates` is EVERY clause the closest rule asserts,
-                    # including the ones the compiler adds itself (the plane, and the availability
-                    # guards for version-gated roots). Rendering only the operator-authored clauses
-                    # is what makes "met 3 of 4" fail to add up against a list of two.
-                    "closest_rule": o.closest_rule,
-                    "met": o.met,
-                    "predicates": list(o.predicates),
-                    "failed": list(o.failed),
-                }
-                for o in self.blocked
-            ],
+            "blocked": [_outcome_dict(o) for o in self.blocked],
+            "unevaluable": [_outcome_dict(o) for o in self.unevaluable],
         }
+
+
+def _value_labels_for(compiled: CompiledIntent, rid: str, tool_name: str) -> set[str]:
+    """The labels of rule `rid` whose truth, for a call to `tool_name`, depends on argument values.
+
+    Always the predicates over value-derived facts. Also the predicates on `derived.verb` when the
+    classifier takes this tool's verb from its payload: replayed without values, such a call publishes
+    the verb its NAME gives (often `unknown`), not the one the real call had.
+    """
+    labels = set(compiled.value_labels.get(rid, ()))
+    if verb_reads_payload(tool_name):
+        labels |= set(compiled.verb_labels.get(rid, ()))
+    return labels
+
+
+def _rules_waiting_on_values(result: dict, outcome: CallOutcome, compiled: CompiledIntent) -> list[str]:
+    """Rules that refused this call ONLY on predicates over argument values.
+
+    Read from the module's own `_failed` (every rule's false clauses) when the evaluator returns it,
+    because the near miss names one rule and another may be the one waiting on a value. Without it,
+    the closest rule is the only evidence, which can only under-count: a call no rule is shown to be
+    waiting on stays a block.
+    """
+    failed_map = result.get("_failed")
+    if isinstance(failed_map, dict) and failed_map:
+        per_rule = {str(rid): set(labels) for rid, labels in failed_map.items() if isinstance(labels, list)}
+    elif outcome.closest_rule:
+        per_rule = {outcome.closest_rule: set(outcome.failed)}
+    else:
+        return []
+    return sorted(
+        rid for rid, failed in per_rule.items()
+        if failed and failed <= _value_labels_for(compiled, rid, outcome.tool_name)
+    )
 
 
 def opa_subprocess_evaluator(rego: str, payload: dict) -> dict:
@@ -167,7 +214,7 @@ def opa_subprocess_evaluator(rego: str, payload: dict) -> dict:
         path = Path(tmp) / "intent.rego"
         path.write_text(rego, encoding="utf-8")
         out: dict = {}
-        for key in ("decision", "rule_id", "reason"):
+        for key in ("decision", "rule_id", "reason", "_failed"):
             proc = subprocess.run(
                 ["opa", "eval", "--v0-compatible", "-d", str(path), "-I",
                  f"data.{_declared_package(rego)}.{key}"],
@@ -182,8 +229,12 @@ def dry_run(
     intent: dict | CompiledIntent,
     calls: Sequence[dict] | Iterable[dict],
     evaluator: Evaluator | None = None,
+    values_missing: Sequence[bool] | None = None,
 ) -> DryRunReport:
     """Replay `calls` (policy input documents) against `intent` without enforcing anything.
+
+    `values_missing[i]` says call i was recorded without its argument values. Such a call refused only
+    on predicates over those values is counted as `cannot_evaluate`, not `would_block`.
 
     Returns a report, never a decision: nothing here writes to `policies`, and applying a draft stays
     an explicit operator action through the gated Policies flow.
@@ -194,6 +245,8 @@ def dry_run(
     report = DryRunReport()
     # Seed every rule at zero so a rule that matches nothing is visible as 0 rather than absent.
     counts: Counter = Counter({rid: 0 for rid in compiled.rule_ids})
+    waiting: Counter = Counter()
+    missing = list(values_missing or ())
 
     for index, payload in enumerate(calls):
         result = evaluate(compiled.rego, payload) or {}
@@ -227,7 +280,16 @@ def dry_run(
                     outcome.predicates = candidates
                     outcome.failed = failed
         report.total += 1
-        if outcome.would_block:
+        waiting_on = (
+            _rules_waiting_on_values(result, outcome, compiled)
+            if outcome.would_block and index < len(missing) and missing[index]
+            else []
+        )
+        if waiting_on:
+            report.cannot_evaluate += 1
+            report.unevaluable.append(outcome)
+            waiting.update(waiting_on)
+        elif outcome.would_block:
             report.would_block += 1
             report.blocked.append(outcome)
         else:
@@ -235,4 +297,5 @@ def dry_run(
             counts[rule_id] += 1
 
     report.coverage = dict(counts)
+    report.unevaluated = dict(waiting)
     return report

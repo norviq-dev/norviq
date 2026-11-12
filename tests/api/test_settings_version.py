@@ -152,3 +152,21 @@ def test_settings_requires_auth() -> None:
     client, _ = _client(row=None)
     assert client.get("/api/v1/settings").status_code in (401, 403)
     assert client.get("/api/v1/version").status_code in (401, 403)
+
+
+def test_settings_says_whether_the_mode_is_the_namespace_s_own() -> None:
+    """The engine relaxes policy blocks only on a namespace's OWN enforcement_mode=audit; a cluster-wide
+    audit default leaves them enforced. The merged `enforcement_mode` reads "audit" in both cases, so the
+    console could not tell a Monitor namespace from one that inherits audit and still blocks."""
+    headers = {"Authorization": f"Bearer {_token()}"}
+    own = SimpleNamespace(namespace="default", enforcement_mode="audit", trust_threshold=None, rate_limit=None)
+    client, _ = _client(row=own)
+    body = client.get("/api/v1/settings?namespace=default", headers=headers).json()
+    assert body["enforcement_mode"] == "audit"
+    assert body["enforcement_mode_source"] == "namespace"
+
+    for row in (None, SimpleNamespace(namespace="default", enforcement_mode=None, trust_threshold=0.5, rate_limit=None)):
+        client, _ = _client(row=row)
+        body = client.get("/api/v1/settings?namespace=default", headers=headers).json()
+        assert body["enforcement_mode"] == settings.enforcement_mode
+        assert body["enforcement_mode_source"] == "cluster_default", row

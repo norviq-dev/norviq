@@ -14,6 +14,7 @@ comes from the namespace COLUMN filter, never the substring match; the no-claim 
 
 from __future__ import annotations
 
+from fnmatch import fnmatch
 from types import SimpleNamespace
 
 import pytest
@@ -22,8 +23,10 @@ from fastapi.testclient import TestClient
 from norviq.api.auth import get_current_user
 from norviq.api.db.session import get_session
 from norviq.api.main import create_app
+from norviq.api.routers import agents as agents_router
 from norviq.api.routers import search as search_router
 from norviq.api.routers import threats as threats_router
+from norviq.sdk.core.trust import TrustScore
 
 _ADMIN = {"sub": "admin", "role": "admin", "namespace": "*"}
 _VIEWER_DEFAULT = {"sub": "v", "role": "viewer", "namespace": "default"}
@@ -226,3 +229,124 @@ def test_search_policies_respects_cap() -> None:
         "bot", "default",
     )
     assert len(rows) == search_router._LIMIT
+
+
+class _AgentRowsSession(_FakeSession):
+    """Answers the agent query with registry rows; the tool query (audit_log) with none."""
+
+    def __init__(self, rows: list[SimpleNamespace]) -> None:
+        self.rows = rows
+
+    async def execute(self, stmt):
+        is_agents = "agent_registry" in str(stmt)
+        return SimpleNamespace(all=lambda: self.rows if is_agents else [])
+
+
+class _Store:
+    """A Redis double over one key/value map, for the agent reads search shares with GET /agents."""
+
+    def __init__(self, values: dict[str, str]) -> None:
+        self.values = values
+        self.broken = False
+
+    def _client(self) -> "_Store":
+        return self
+
+    async def scan_iter(self, match: str):
+        for key in list(self.values):
+            if fnmatch(key, match):
+                yield key
+
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        if self.broken and any(k.startswith(("agent_frozen:", "agent_trust_override:")) for k in keys):
+            raise ConnectionError("store unavailable")
+        return [self.values.get(k) for k in keys]
+
+    async def get_ns_settings(self, _namespace: str) -> dict | None:
+        return None
+
+
+_NS = "spiffe://norviq/ns/payments/sa/"
+
+
+def _registry_hit(sid: str, score: float, category: str, frozen: bool = False, cap: float | None = None):
+    """One agent_registry row as the search query selects it (frozen/trust_cap are the durable copy)."""
+    return SimpleNamespace(spiffe_id=_NS + sid, namespace="payments", agent_class=sid, trust_score=score,
+                           trust_category=category, last_seen=None, frozen=frozen, trust_cap=cap)
+
+
+def _search_and_list(monkeypatch, rows: list[SimpleNamespace], store: _Store) -> tuple[dict, dict]:
+    """The ⌘K agent hits and the GET /agents rows, from one app over the same registry and store."""
+    app = create_app()
+
+    async def _session():
+        yield _AgentRowsSession(rows)
+
+    async def _roster(_ns):
+        return [{"spiffe_id": r.spiffe_id, "namespace": r.namespace, "agent_class": r.agent_class,
+                 "last_seen": None, "score": r.trust_score, "category": r.trust_category.lower(),
+                 "violation_count": 0, "signals": {}, "dominant_signal": "", "recommendation": "",
+                 "synthetic": False, "frozen": r.frozen, "trust_cap": r.trust_cap} for r in rows]
+
+    async def _last_seen(_ns):
+        return {}
+
+    monkeypatch.setattr(agents_router, "_agents_from_registry", _roster)
+    monkeypatch.setattr(agents_router, "_registry_last_seen", _last_seen)
+    app.dependency_overrides[get_session] = _session
+    app.dependency_overrides[get_current_user] = lambda: _ADMIN
+    app.state.loader = SimpleNamespace(_policies={})
+    app.state.cache = store
+    client = TestClient(app)
+    found = client.get("/api/v1/search?q=a")
+    listed = client.get("/api/v1/agents?namespace=payments")
+    assert found.status_code == 200 and listed.status_code == 200, (found.text, listed.text)
+    return ({a["agent_class"]: a for a in found.json()["agents"]},
+            {a["agent_class"]: a for a in listed.json()})
+
+
+def test_search_agents_show_the_freeze_and_cap_the_engine_enforces(monkeypatch) -> None:
+    """The ⌘K hits took the freeze and the cap from agent_registry's durable copy and the score from its snapshot,
+    while GET /agents (the Agent Monitor) and the engine read both controls from the store and the score from the
+    warm trust:<id> row. A freeze only in the store read "not frozen" here, a freeze lifted in the store but not
+    yet in the registry read "frozen", and a fresher score was ignored. Every hit now matches /agents."""
+    rows = [
+        _registry_hit("store-frozen", 0.455, "Medium"),                 # frozen in the store, not (yet) the registry
+        _registry_hit("store-lifted", 0.455, "Medium", frozen=True),    # the registry's copy is stale
+        _registry_hit("store-capped", 0.9, "High"),                     # the cap only in the store
+        _registry_hit("lifted", 0.0, "Frozen"),                         # a frozen snapshot, freeze since lifted
+        _registry_hit("warm", 0.82, "High"),                            # a fresher score in trust:<id>
+        _registry_hit("cap-above", 0.455, "Medium", cap=0.8),
+    ]
+    store = _Store({
+        f"agent_frozen:{_NS}store-frozen": "1",
+        f"agent_trust_override:{_NS}store-capped": "0.5",
+        f"agent_trust_override:{_NS}cap-above": "0.8",
+        f"trust:{_NS}warm": TrustScore(score=0.61, category="Medium").model_dump_json(),
+    })
+    found, listed = _search_and_list(monkeypatch, rows, store)
+    shown = {k: (a["trust_score"], a["frozen"], a["trust_cap"], a["controls"]) for k, a in found.items()}
+    assert shown == {
+        "store-frozen": (0.0, True, None, "live"),
+        "store-lifted": (0.455, False, None, "live"),
+        "store-capped": (0.5, False, 0.5, "live"),
+        "lifted": (None, False, None, "live"),
+        "warm": (0.61, False, None, "live"),
+        "cap-above": (0.455, False, 0.8, "live"),
+    }
+    for name, hit in found.items():
+        row = listed[name]
+        assert (hit["trust_score"], hit["category"], hit["frozen"], hit["trust_cap"]) == (
+            row["score"], row["category"], row["frozen"], row["trust_cap"]), name
+
+
+def test_search_agents_say_the_freeze_is_unknown_when_the_store_cannot_be_read(monkeypatch) -> None:
+    """The engine blocks every call while it cannot read the store; a "not frozen" from the registry copy here
+    contradicted it."""
+    rows = [_registry_hit("never-frozen", 0.455, "Medium"), _registry_hit("frozen", 0.455, "Medium", frozen=True)]
+    store = _Store({})
+    store.broken = True
+    found, _ = _search_and_list(monkeypatch, rows, store)
+    for hit in found.values():
+        assert (hit["frozen"], hit["trust_cap"], hit["trust_score"], hit["category"], hit["controls"]) == (
+            None, None, None, "unknown", "unavailable")

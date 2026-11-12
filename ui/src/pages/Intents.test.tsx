@@ -174,6 +174,59 @@ describe("Intents", () => {
     });
   });
 
+  it("counts calls without argument values apart from blocks, and shows the API's caveat", async () => {
+    const note =
+      "6 of the sampled call(s) carry no recorded argument VALUES, so a dry run over them cannot satisfy any argument-level predicate.";
+    const report = {
+      ...REPORT_WITH_BLOCKS,
+      total: 11,
+      would_allow: 5,
+      would_block: 0,
+      cannot_evaluate: 6,
+      coverage: { "postgres-prod-read-select-rows": 5, "send-send-email": 0 },
+      unevaluated: { "send-send-email": 6 },
+      unused_rules: [],
+      blocked: [],
+      unevaluable: Array.from({ length: 6 }, (_, i) => ({ index: i + 5, tool_name: "send_email", reason: "x" })),
+      replayed_without_values: 6,
+      params_notes: [note]
+    };
+    const send = vi.spyOn(client, "apiSend");
+    send.mockResolvedValueOnce(PROPOSAL as never).mockResolvedValueOnce(report as never);
+    const user = userEvent.setup();
+    renderPage();
+    await propose(user);
+    await user.click(screen.getByRole("button", { name: /dry run/i }));
+
+    const caveat = await screen.findByTestId("dryrun-caveat");
+    expect(caveat).toHaveTextContent(/6 calls could not be evaluated: no argument values were recorded/);
+    expect(caveat).toHaveTextContent(/not counted under Would block/);
+    // The engine also sets aside a verb refusal when the tool's verb comes from its arguments.
+    expect(caveat).toHaveTextContent(/or on a verb its arguments decide/);
+    expect(caveat).toHaveTextContent(note);
+    expect(screen.getByText("Cannot evaluate")).toBeInTheDocument();
+    expect(screen.getByTestId("rule-send-send-email-unevaluated")).toHaveTextContent(/6 more calls/);
+    expect(within(screen.getByTestId("rule-send-send-email")).queryByText(/matched nothing/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("no-blocks")).toHaveTextContent(/5 of 11 recorded calls evaluated, none refused/);
+    expect(screen.getByTestId("unevaluable-calls")).toHaveTextContent(/send_email.*× 6/);
+  });
+
+  it("shows no replay caveat when every replayed call carried its values", async () => {
+    const send = vi.spyOn(client, "apiSend");
+    send
+      .mockResolvedValueOnce(PROPOSAL as never)
+      .mockResolvedValueOnce({ ...REPORT_WITH_BLOCKS, cannot_evaluate: 0, replayed_without_values: 0, params_notes: ["x"] } as never);
+    const user = userEvent.setup();
+    renderPage();
+    await propose(user);
+    await user.click(screen.getByRole("button", { name: /dry run/i }));
+
+    await waitFor(() => expect(screen.getByTestId("near-misses")).toBeInTheDocument());
+    expect(screen.queryByTestId("dryrun-caveat")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cannot evaluate")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("unevaluable-calls")).not.toBeInTheDocument();
+  });
+
   it("warns when the proposal could only see tool names", async () => {
     vi.spyOn(client, "apiSend").mockResolvedValue({ ...PROPOSAL, params_available: false } as never);
     const user = userEvent.setup();
@@ -185,6 +238,47 @@ describe("Intents", () => {
     // and saying so is the difference between an informed draft and a surprise.
     expect(screen.getByText(/Proposed from tool names only/i)).toBeInTheDocument();
     expect(screen.getByTestId("params-warning")).toHaveTextContent(/grants a tool outright/i);
+  });
+
+  it("names the tools left out because every recorded call to them was refused", async () => {
+    vi.spyOn(client, "apiSend").mockResolvedValue({
+      ...PROPOSAL,
+      sampled: 13,
+      proposed_from: 5,
+      excluded_tools: [
+        { tool_name: "execute_sql", calls: 5, allowed: 0, blocked: 0, would_block: 5 },
+        { tool_name: "run_shell", calls: 3, allowed: 0, blocked: 3, would_block: 0 }
+      ],
+      observed_decisions: {}
+    } as never);
+    const user = userEvent.setup();
+    renderPage();
+    await propose(user);
+
+    const note = await screen.findByTestId("excluded-tools");
+    expect(note).toHaveTextContent(/Left out: 2 tools that were refused on every recorded call/);
+    expect(note).toHaveTextContent(/built only from calls that were allowed \(5 of 13\)/);
+    expect(note).toHaveTextContent(/stay denied under this allowlist/);
+    expect(screen.getByTestId("excluded-tool-execute_sql")).toHaveTextContent(
+      /all 5 recorded calls refused \(5 would-blocked\)/
+    );
+    expect(screen.getByTestId("excluded-tool-run_shell")).toHaveTextContent(/all 3 recorded calls refused \(3 blocked\)/);
+  });
+
+  it("says on the rule that grants a tool that the tool was also refused in traffic", async () => {
+    vi.spyOn(client, "apiSend").mockResolvedValue({
+      ...PROPOSAL,
+      observed_decisions: { select_rows: { calls: 5, allowed: 3, blocked: 1, would_block: 1 } }
+    } as never);
+    const user = userEvent.setup();
+    renderPage();
+    await propose(user);
+
+    const note = await screen.findByTestId("rule-postgres-prod-read-select-rows-refusals");
+    expect(note).toHaveTextContent(/2 of 5 recorded calls refused \(1 blocked, 1 would-blocked\)/);
+    expect(note).toHaveTextContent(/grants the tool outright/);
+    expect(screen.queryByTestId("rule-send-send-email-refusals")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("excluded-tools")).not.toBeInTheDocument();
   });
 
   it("states that a saved draft is not enforcing and where enforcement actually begins", async () => {
@@ -205,6 +299,10 @@ describe("Intents", () => {
     const banner = screen.getByTestId("draft-saved");
     expect(within(banner).getByText(/not enforcing/i)).toBeInTheDocument();
     expect(within(banner).getByText(/Policy Catalog/i)).toBeInTheDocument();
+    // Applying makes a live policy; whether it blocks is the namespace's posture. "the only place
+    // enforcement begins" promised enforcement a Monitor namespace never gives.
+    expect(banner).toHaveTextContent(/the only place a draft becomes a live policy/i);
+    expect(banner).not.toHaveTextContent(/enforcement begins/i);
   });
 
   it("refuses to draft while the scope is All namespaces, because a draft targets one", async () => {

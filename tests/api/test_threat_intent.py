@@ -25,6 +25,7 @@ from norviq.engine.evaluator import OPAEvaluator
 from norviq.api.threat_intent import (
     Intent,
     generate_intent_rego,
+    NO_TECHNIQUE_LABEL,
     mitre_for_tool,
     opa_input_for_step,
     recommended_fix,
@@ -320,9 +321,14 @@ def test_recommended_fix_by_verb():
 
 
 def test_mitre_mapping():
-    assert mitre_for_tool("send_email").startswith("AML.T0040")
-    assert mitre_for_tool("delete_record").startswith("AML.T0048")
-    assert "·" in mitre_for_tool("some_unknown_tool")
+    # Read from the shared ATLAS table through the rule guarding the tool. These were AML.T0040 (ML
+    # Model Inference API Access) and AML.T0048 (External Harms, out of scope in the table), from a
+    # table of this module's own that Red Team and Compliance never read.
+    assert mitre_for_tool("send_email") == "AML.T0057 · LLM Data Leakage"
+    assert mitre_for_tool("delete_record") == "AML.T0053 · LLM Plugin Compromise"
+    # An unknown tool was AML.T0051 (Prompt Injection) labelled "Excessive Agency". It names no technique now.
+    assert mitre_for_tool("some_unknown_tool") == NO_TECHNIQUE_LABEL
+    assert not NO_TECHNIQUE_LABEL.startswith("AML.")
 
 
 class TestPathGovernedBy:

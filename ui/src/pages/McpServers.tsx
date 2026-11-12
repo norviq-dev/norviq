@@ -1369,7 +1369,7 @@ export function McpServers() {
             {allPins.filter((p) => p.server_id === forgetting.server_id).length} pin
             {allPins.filter((p) => p.server_id === forgetting.server_id).length === 1 ? "" : "s"}
           </strong>
-          , their drift history and their findings. Policies are unchanged and keep enforcing.
+          , their drift history and their findings. Policies are unchanged.
         </DestructiveConfirm>
       )}
     </div>

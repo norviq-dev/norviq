@@ -144,7 +144,10 @@ describe("Namespace Governance states the CONSEQUENCE of the mode to every reade
     // FAIL-ON-BUG: pre-fix both notes were `isAdmin &&` gated, so both queries returned null for a viewer.
     const monitorNote = await screen.findByTestId("enforcement-monitor-note");
     expect(monitorNote).toHaveTextContent(/logs a would-block instead of stopping the call/i);
-    expect(screen.getByTestId("apply-mode-dryrun-note")).toHaveTextContent(/policy edits are frozen \(live policy still enforces\)/i);
+    // REWRITTEN (was: "live policy still enforces"). This very namespace is in Monitor, where the live policy
+    // logs would-blocks and enforces nothing, so the asserted sentence was false in the scenario under test.
+    expect(screen.getByTestId("apply-mode-dryrun-note")).toHaveTextContent(/policy edits are frozen \(the live policy keeps running unchanged\)/i);
+    expect(screen.getByTestId("apply-mode-dryrun-note")).not.toHaveTextContent(/still enforces/i);
     // Permission is still stated — as a fact about the CONTROL, next to it.
     expect(screen.getAllByText(/Admin only/i)).toHaveLength(2); // one per control
     // And the read-only segmented control is visibly read-only (`.tab-kit` has no `:disabled` styling of its
@@ -275,5 +278,40 @@ describe("panel spacing", () => {
         parent.classList.contains("stack") || /gap/.test(parent.getAttribute("style") ?? "");
       expect(spaced, `adjacent panels share an unspaced parent: ${parent.className}`).toBe(true);
     }
+  });
+});
+
+// The note under the mode used to say "a matched rule logs a would-block" for every "audit" /settings returned,
+// including one the namespace only inherits from the cluster-wide default — where the engine still blocks on
+// this namespace's policies (`_resolve_posture`). It now reads the same verdict lib/posture gives every page.
+describe("Namespace Governance: an inherited Monitor is not this namespace's Monitor", () => {
+  function settingsFor(source: "namespace" | "cluster_default") {
+    server.use(
+      http.get("/api/v1/me", () => HttpResponse.json({ role: "admin", namespace: null })),
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({ namespace: "payments", apply_mode: "enforce", enforcement_mode: "audit", enforcement_mode_source: source })
+      ),
+      http.get("/api/v1/policy-packs", () => HttpResponse.json([]))
+    );
+  }
+
+  it("inherited from the cluster: says the policies still block, not that matches are only logged", async () => {
+    mockApp.namespace = "payments";
+    settingsFor("cluster_default");
+    renderPage();
+    const note = await screen.findByTestId("enforcement-monitor-inherited");
+    expect(note).toHaveTextContent(/this namespace's policies still block/i);
+    expect(screen.queryByTestId("enforcement-monitor-note")).toBeNull();
+    expect(screen.queryByText(/logs a would-block instead of stopping the call/i)).toBeNull();
+  });
+
+  it("set on the namespace itself: the would-block consequence, without the merged-reading caveat", async () => {
+    mockApp.namespace = "payments";
+    settingsFor("namespace");
+    renderPage();
+    const note = await screen.findByTestId("enforcement-monitor-note");
+    expect(note).toHaveTextContent(/logs a would-block instead of stopping the call/i);
+    expect(note).not.toHaveTextContent(/also reflects the cluster-wide default/i);
+    expect(screen.queryByTestId("enforcement-monitor-inherited")).toBeNull();
   });
 });

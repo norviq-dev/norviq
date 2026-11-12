@@ -103,6 +103,7 @@ test.describe("punch-list — EFFECT proofs on the live console", () => {
     const actions = page.getByText("Agent Actions");
     await expect(actions).toBeVisible();
     await expect(page.getByText("Freeze Agent")).toBeVisible();
-    await expect(page.getByText("Reset Trust")).toBeVisible();
+    // "Reset Trust" sent PUT 0.8, which capped the agent; the button that resets its record replaced it.
+    await expect(page.getByText("Reset Behavior Record")).toBeVisible();
   });
 });

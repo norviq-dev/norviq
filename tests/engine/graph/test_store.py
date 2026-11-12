@@ -17,10 +17,22 @@ class _FakePool:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
 
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        """Set cache value with ignored TTL."""
-        _ = ex
+    async def set(self, key: str, value: str, ex: int | None = None, px: int | None = None,
+                  nx: bool = False) -> bool | None:
+        """Set cache value with ignored TTL (NX honoured: the store takes a lock with it)."""
+        _ = ex, px
+        if nx and key in self.values:
+            return None
         self.values[key] = value
+        return True
+
+    async def eval(self, script: str, numkeys: int, key: str, token: str) -> int:
+        """The store's compare-and-delete lock release."""
+        _ = script, numkeys
+        if self.values.get(key) == token:
+            del self.values[key]
+            return 1
+        return 0
 
     async def get(self, key: str) -> str | None:
         """Get cache value."""

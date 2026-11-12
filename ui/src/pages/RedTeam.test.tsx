@@ -512,3 +512,129 @@ it("rows the scorecard does not score say why, in a muted label — never red", 
   expect(synthetic).toHaveTextContent(/synthetic identity, not scored/);
   for (const r of [runtime, synthetic]) expect(within(r).queryByTestId("redteam-row-failed")).toBeNull();
 });
+
+it("an attack shows a chip for every technique and control its rule maps to, and the unmapped bucket has no id", async () => {
+  // The API credits an attack to every ATLAS technique and OWASP control the Compliance mapping lists its
+  // rule under. llm01_prompt_injection is listed under two techniques; chain_depth_limit under none.
+  const mapped = latest({
+    results: [
+      {
+        attack_id: "PI-001", attack_name: "Ignore instructions", category: "prompt_injection",
+        agent_class: "finance-agent", namespace: "default", expected: "block", actual: "block",
+        passed: true, rule_id: "llm01_prompt_injection",
+        atlas_techniques: [
+          { technique_id: "AML.T0051", technique_name: "LLM Prompt Injection" },
+          { technique_id: "AML.T0054", technique_name: "LLM Jailbreak" }
+        ],
+        owasp_controls: [{ control_id: "LLM01:2025", control_name: "Prompt Injection" }],
+        atlas_technique: "AML.T0051", atlas_technique_name: "LLM Prompt Injection",
+        owasp_control: "LLM01:2025", owasp_control_name: "Prompt Injection"
+      },
+      {
+        attack_id: "CE-001", attack_name: "Chain depth abuse", category: "chain_exploit",
+        agent_class: "finance-agent", namespace: "default", expected: "block", actual: "block",
+        passed: true, rule_id: "chain_depth_limit", atlas_techniques: [], owasp_controls: [],
+        atlas_technique: null, atlas_technique_name: null, owasp_control: null, owasp_control_name: null
+      }
+    ],
+    efficacy: {
+      overall: { total: 2, caught: 2, got_through: 0, proven_blocking_pct: 100.0 },
+      by_technique: [
+        { technique_id: "AML.T0051", technique_name: "LLM Prompt Injection", total: 1, caught: 1, got_through: 0, proven_blocking_pct: 100.0 },
+        { technique_id: "AML.T0054", technique_name: "LLM Jailbreak", total: 1, caught: 1, got_through: 0, proven_blocking_pct: 100.0 },
+        { technique_id: "unmapped", technique_name: "No ATLAS technique maps this rule", total: 1, caught: 1, got_through: 0, proven_blocking_pct: 100.0 }
+      ],
+      by_owasp: [
+        { control_id: "LLM01:2025", control_name: "Prompt Injection", total: 1, caught: 1, got_through: 0, proven_blocking_pct: 100.0 }
+      ],
+      non_enforcement: 0,
+      excluded_synthetic: 0
+    }
+  });
+  server.use(
+    http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(mapped)),
+    http.get("*/api/v1/redteam/results", () => HttpResponse.json(historyPayload()))
+  );
+  renderPage();
+  await screen.findByTestId("redteam-attacks");
+  const rows = screen.getAllByTestId("redteam-attack-row");
+  const pi = rows.find((r) => within(r).queryByText("PI-001"))!;
+  const ce = rows.find((r) => within(r).queryByText("CE-001"))!;
+  expect(within(pi).getAllByTestId("fw-chip-atlas").map((c) => c.textContent)).toEqual(["AML.T0051", "AML.T0054"]);
+  expect(within(pi).getAllByTestId("fw-chip-owasp").map((c) => c.textContent)).toEqual(["LLM01:2025"]);
+  expect(within(ce).queryByTestId("fw-chip-atlas")).toBeNull();
+  expect(within(ce).queryByTestId("fw-chip-owasp")).toBeNull();
+
+  const atlasRows = within(screen.getByTestId("redteam-by-technique"))
+    .getAllByTestId("redteam-breakdown-row")
+    .filter((r) => r.getAttribute("data-taxonomy") === "redteam-breakdown-atlas");
+  const unmapped = atlasRows.find((r) => /No ATLAS technique maps this rule/.test(r.textContent ?? ""))!;
+  expect(unmapped).toBeDefined();
+  // The bucket is a condition, not a technique: its internal key is never shown as if it were an id.
+  expect(unmapped.textContent).not.toMatch(/unmapped/);
+});
+
+it("an attack no OWASP control lists says so, on its row and under the OWASP table", async () => {
+  // SC-001's rule, llm05_supply_chain, is under no 2025 OWASP control (LLM03:2025 Supply Chain is out of
+  // scope in the shared mapping). Its row showed an ATLAS chip and nothing at all for OWASP, and the
+  // OWASP table left it out without a word.
+  const run = latest({
+    results: [
+      {
+        attack_id: "SC-001", attack_name: "Load plugin", category: "supply_chain", agent_class: "finance-agent",
+        namespace: "default", expected: "block", actual: "block", passed: true, outcome: "caught",
+        rule_id: "llm05_supply_chain",
+        atlas_techniques: [{ technique_id: "AML.T0053", technique_name: "LLM Plugin Compromise" }],
+        owasp_controls: [], atlas_technique: "AML.T0053", atlas_technique_name: "LLM Plugin Compromise",
+        owasp_control: null, owasp_control_name: null
+      },
+      {
+        attack_id: "PI-001", attack_name: "Ignore instructions", category: "prompt_injection", agent_class: "finance-agent",
+        namespace: "default", expected: "block", actual: "block", passed: true, outcome: "caught",
+        rule_id: "llm01_prompt_injection",
+        atlas_techniques: [{ technique_id: "AML.T0051", technique_name: "LLM Prompt Injection" }],
+        owasp_controls: [{ control_id: "LLM01:2025", control_name: "Prompt Injection" }],
+        atlas_technique: "AML.T0051", atlas_technique_name: "LLM Prompt Injection",
+        owasp_control: "LLM01:2025", owasp_control_name: "Prompt Injection"
+      },
+      {
+        attack_id: "RL-001", attack_name: "Session flood", category: "unbounded_consumption", agent_class: "finance-agent",
+        namespace: "default", expected: "allow", actual: "allow", passed: true, outcome: "non_enforcement",
+        rule_id: "default_allow", atlas_techniques: [], owasp_controls: [], atlas_technique: null,
+        atlas_technique_name: null, owasp_control: null, owasp_control_name: null
+      }
+    ],
+    efficacy: {
+      overall: { total: 2, caught: 2, got_through: 0, proven_blocking_pct: 100.0 },
+      by_technique: [
+        { technique_id: "AML.T0051", technique_name: "LLM Prompt Injection", total: 1, caught: 1, got_through: 0, proven_blocking_pct: 100.0 },
+        { technique_id: "AML.T0053", technique_name: "LLM Plugin Compromise", total: 1, caught: 1, got_through: 0, proven_blocking_pct: 100.0 }
+      ],
+      by_owasp: [
+        { control_id: "LLM01:2025", control_name: "Prompt Injection", total: 1, caught: 1, got_through: 0, proven_blocking_pct: 100.0 }
+      ],
+      non_enforcement: 1,
+      excluded_synthetic: 0
+    }
+  });
+  server.use(
+    http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(run)),
+    http.get("*/api/v1/redteam/results", () => HttpResponse.json(historyPayload()))
+  );
+  renderPage();
+  await screen.findByTestId("redteam-attacks");
+  const rows = screen.getAllByTestId("redteam-attack-row");
+  const sc = rows.find((r) => within(r).queryByText("SC-001"))!;
+  const pi = rows.find((r) => within(r).queryByText("PI-001"))!;
+  const rl = rows.find((r) => within(r).queryByText("RL-001"))!;
+  expect(within(sc).getByTestId("fw-chip-atlas")).toHaveTextContent("AML.T0053");
+  expect(within(sc).getByTestId("fw-none-owasp")).toHaveTextContent("not mapped to an OWASP control");
+  expect(within(sc).queryByTestId("fw-none-atlas")).toBeNull();
+  expect(within(pi).queryByTestId("fw-none-owasp")).toBeNull();
+  // A row with neither says both, rather than a bare dash.
+  expect(within(rl).getByTestId("fw-none-atlas")).toHaveTextContent("not mapped to an ATLAS technique");
+  expect(within(rl).getByTestId("fw-none-owasp")).toHaveTextContent("not mapped to an OWASP control");
+  // Only scored rows are counted under the OWASP table: SC-001, not the allow-expected RL-001.
+  expect(within(screen.getByTestId("redteam-by-technique")).getByTestId("redteam-owasp-unmapped"))
+    .toHaveTextContent("1 scored attack is not mapped to an OWASP control and not counted in this table.");
+});

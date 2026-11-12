@@ -315,9 +315,10 @@ def _attach_source_capability(nodes: list[AssetNode], edges: list[AssetEdge]) ->
     ``calls`` edge (which carries the decision history), NOT the TOOL→DATA ``accesses`` edge (which has
     none), so we attribute a tool's traffic from its incoming calls edges and map it onto the source via
     the accesses edge:
-      * observed  = the tool for that verb produced traffic (its calls history allow+block+escalate > 0)
+      * observed  = the tool for that verb produced traffic (allow+block+escalate+would_block > 0)
       * granted   = the tool for that verb reaches the source (accesses edge exists) even if silent → dormant
-      * defended  = policy acted on that tool at least once (calls history block/escalate > 0) → a rule guards it
+      * defended  = policy ENFORCED on that tool at least once (block/escalate > 0) → a rule guards it
+      * monitored = calls were logged as would-block and ran (Monitor/audit) → matched, not enforced
     Attaches node.properties.capability = {source_class, findings[], worst}. Read-only enrichment; nodes
     whose source type isn't in the registry are left untouched. No fabricated data. Also tags each
     accesses-edge with its resolved verb so the UI can colour tool→data edges by operation."""
@@ -341,26 +342,23 @@ def _attach_source_capability(nodes: list[AssetNode], edges: list[AssetEdge]) ->
         if e.type != "calls" or e.target not in tool_name_by_id:
             continue
         hist = e.properties.get("decision_history") or {}
-        touched = int(hist.get("allow", 0)) + int(hist.get("block", 0)) + int(hist.get("escalate", 0))
-        # would_block counts as GUARDED. In a Monitor-mode namespace the engine softens a policy's
-        # block/escalate to `audit` with a would-block rule marker, so `block` stays 0 for a rule that
-        # is catching traffic every day. Reading only block+escalate meant the source-capability panel
-        # could never report `defended` on such a namespace: it told the operator either "this grant is
-        # unused — revoke delete on PostgreSQL (least privilege)" for a verb their policy stopped 412
-        # times, or "undefended: observed in traffic, no policy has ever acted on it — author a rule.
-        # This is the live gap" for a rule that is already catching it. The count is fetched a few
-        # lines above and was simply not read here.
-        guarded = (
-            int(hist.get("block", 0)) + int(hist.get("escalate", 0)) + int(hist.get("would_block", 0))
-        ) > 0
-        slot = tool_traffic.setdefault(e.target, {"touched": False, "guarded": False})
+        would_block = int(hist.get("would_block", 0))
+        # A would-block is a call that RAN: in Monitor (or a policy in audit mode) the engine softens
+        # block/escalate to `audit` and lets it through. So it counts as traffic, and it is not a guard.
+        touched = int(hist.get("allow", 0)) + int(hist.get("block", 0)) + int(hist.get("escalate", 0)) + would_block
+        # Guarded = a policy ENFORCED on this tool at least once. would_block used to be added here, so a
+        # Monitor namespace where nothing was ever stopped showed every verb DEFENDED — the same defect the
+        # Attack Graph had when it put Monitor paths under Blocked. It is reported apart, as `monitored`.
+        guarded = (int(hist.get("block", 0)) + int(hist.get("escalate", 0))) > 0
+        slot = tool_traffic.setdefault(e.target, {"touched": False, "guarded": False, "monitored": False})
         slot["touched"] = slot["touched"] or touched > 0
         slot["guarded"] = slot["guarded"] or guarded
+        slot["monitored"] = slot["monitored"] or would_block > 0
         klass = agent_class_by_id.get(e.source)
         if klass:
             tool_callers.setdefault(e.target, set()).add(klass)
 
-    # data_id -> {verb -> {"granted","observed","defended", "classes": set[str]}}
+    # data_id -> {verb -> {"granted","observed","defended","monitored", "classes": set[str]}}
     signals: dict[str, dict[Verb, dict[str, object]]] = {}
     for e in edges:
         if e.type != "accesses" or e.target not in data_node_by_id:
@@ -373,12 +371,13 @@ def _attach_source_capability(nodes: list[AssetNode], edges: list[AssetEdge]) ->
         verb = verb_of_tool(tool, stype)
         if verb == Verb.UNKNOWN:
             continue
-        traffic = tool_traffic.get(e.source, {"touched": False, "guarded": False})
+        traffic = tool_traffic.get(e.source, {"touched": False, "guarded": False, "monitored": False})
         slot = signals.setdefault(e.target, {}).setdefault(
-            verb, {"granted": True, "observed": False, "defended": False, "classes": set()}
+            verb, {"granted": True, "observed": False, "defended": False, "monitored": False, "classes": set()}
         )
         slot["observed"] = bool(slot["observed"]) or traffic["touched"]
         slot["defended"] = bool(slot["defended"]) or traffic["guarded"]
+        slot["monitored"] = bool(slot["monitored"]) or traffic["monitored"]
         cast(set, slot["classes"]).update(tool_callers.get(e.source, set()))
         # Tag the edge itself with its verb for per-operation edge colouring.
         e.properties["verb"] = verb.value
@@ -394,6 +393,7 @@ def _attach_source_capability(nodes: list[AssetNode], edges: list[AssetEdge]) ->
             granted_verbs={v for v, s in per_verb.items() if s["granted"]},
             observed_verbs={v for v, s in per_verb.items() if s["observed"]},
             defended_verbs={v for v, s in per_verb.items() if s["defended"]},
+            monitored_verbs={v for v, s in per_verb.items() if s["monitored"]},
         )
         # Attach the agent-classes exercising each verb so the UI can target a "defend" action.
         finding_dicts = []
@@ -425,9 +425,10 @@ async def remove_asset_graph_node(
     """Admin HOUSEKEEPING: remove one node (and its incident edges) from a namespace's runtime asset
     graph — a decommissioned tool, a probe artifact, a junk identity. The graph is otherwise append-only
     (nodes persist until LRU-cap eviction), so without this an operator has no way to clean it up.
-    Removes from the LIVE builder (restoring the persisted snapshot first if the pod just started) and
-    saves — the save re-snapshots and invalidates the per-namespace analysis caches, so every graph
-    surface reflects the removal immediately. Audited via the log line; graph-only (no audit rows,
+    Removes from the persisted graph merged with this replica's live builder and leaves a tombstone
+    every replica honours on its next save, so the removal holds whichever replica served it; the
+    save also invalidates the per-namespace analysis caches, so every graph surface reflects the
+    removal immediately. Audited via the log line; graph-only (no audit rows,
     policies, or decisions are touched)."""
     require_admin(user)
     evaluator = getattr(request.app.state, "evaluator", None)
@@ -435,7 +436,17 @@ async def remove_asset_graph_node(
         raise HTTPException(status_code=503, detail="Graph engine is unavailable")
     # Shared with DELETE /agents/{spiffe_id} (see norviq/api/graph_maintenance.py) so deregistering an
     # agent and pruning a node cannot drift into two different notions of "removed from the graph".
-    if not await remove_graph_node(request, namespace, node_id):
+    try:
+        removed = await remove_graph_node(request, namespace, node_id)
+    except Exception as exc:  # noqa: BLE001 - reported as "not removed", never as success or a bare 500
+        # The store could not record the removal (database down, or the graph lock held by another
+        # replica). Nothing was removed and no cache shows it removed, so say exactly that.
+        log.warning("nrvq.api.graph.node_prune_failed", namespace=namespace, node_id=node_id,
+                    error=str(exc), code="NRVQ-API-7122")
+        raise HTTPException(status_code=503, detail=(
+            f"node '{node_id}' was not removed: the graph store could not record the removal "
+            f"({type(exc).__name__}). Retry once the database and Redis are reachable.")) from exc
+    if not removed:
         raise HTTPException(status_code=404, detail=f"node '{node_id}' not found in namespace '{namespace}'")
     graph = evaluator.get_graph(namespace)
     log.info("nrvq.api.graph.node_removed", namespace=namespace, node_id=node_id,

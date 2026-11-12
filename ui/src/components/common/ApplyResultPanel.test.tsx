@@ -11,15 +11,22 @@ const fetchFleetRollout = vi.fn();
 vi.mock("../../api/fleet", () => ({ fetchFleetRollout: () => fetchFleetRollout() }));
 
 const verifyPolicyApplied = vi.fn();
-vi.mock("../../api/client", () => ({ verifyPolicyApplied: (...args: unknown[]) => verifyPolicyApplied(...args) }));
+const fetchSettings = vi.fn();
+vi.mock("../../api/client", () => ({
+  verifyPolicyApplied: (...args: unknown[]) => verifyPolicyApplied(...args),
+  fetchSettings: (...args: unknown[]) => fetchSettings(...args)
+}));
 
 import { ApplyResultPanel, type ApplyResult } from "./ApplyResultPanel";
+import { clearApiCache } from "../../hooks/useApi";
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   fetchFleetRollout.mockReset();
   verifyPolicyApplied.mockReset();
+  fetchSettings.mockReset();
+  clearApiCache();
 });
 
 it("local apply: shows the configured resource + honest outcome, does NOT poll rollout", async () => {
@@ -58,7 +65,9 @@ it("failed local apply: shows a FAILED chip + the NRVQ code + the reason (not an
   expect(fetchFleetRollout).not.toHaveBeenCalled();
 });
 
-it("fleet push: polls rollout and renders 'enforcing' when the targeted spoke applied the bundle", async () => {
+// REWRITTEN (was: renders "enforcing @v7"). The spoke reports that it LOADED the bundle; whether a match
+// blocks there depends on that cluster's namespace posture, which the hub never reads.
+it("fleet push: polls rollout and renders 'applied' when the targeted spoke applied the bundle", async () => {
   fetchFleetRollout.mockResolvedValue([
     { cluster_id: "fleet-b", bundle_version: 7, applied_version: 7, state: "applied", updated_at: "2026-06-30T20:00:00Z" },
     { cluster_id: "fleet-a", bundle_version: 3, applied_version: 3, state: "applied", updated_at: null }
@@ -76,7 +85,8 @@ it("fleet push: polls rollout and renders 'enforcing' when the targeted spoke ap
   // Fix 7: a fleet push polling rollout is unmistakably PROPAGATING (not yet fully APPLIED).
   expect(screen.getByText("PROPAGATING")).toBeInTheDocument();
   await waitFor(() => expect(fetchFleetRollout).toHaveBeenCalled());
-  await waitFor(() => expect(screen.getByText(/enforcing @v7/)).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText(/applied @v7/)).toBeInTheDocument());
+  expect(screen.queryByText(/enforcing @v7/)).not.toBeInTheDocument();
   // scoped to the targeted cluster — fleet-a's row is not shown
   expect(screen.queryByText("fleet-a")).not.toBeInTheDocument();
 });
@@ -87,8 +97,10 @@ it("renders nothing when result is null", () => {
 });
 
 // FIX B: a local write's 200 is not proof — when expectedVersion is set, the panel must poll a live read
-// (verifyPolicyApplied) and show VERIFYING first, then ENFORCING vN once the poll confirms convergence.
-it("local verify-by-poll: shows VERIFYING then ENFORCING vN once the polled version matches", async () => {
+// (verifyPolicyApplied) and show VERIFYING first, then the converged version once the poll confirms it.
+// This policy is saved in AUDIT mode, which the engine softens to a logged would-block, so the converged
+// badge is LOADED · AUDIT. It used to assert ENFORCING v2 here: the badge read the version poll alone.
+it("local verify-by-poll: shows VERIFYING then the converged version once the polled version matches", async () => {
   verifyPolicyApplied.mockResolvedValue({ matched: true, current_version: 2, enforcement_mode: "audit" });
   const result: ApplyResult = {
     kind: "local",
@@ -105,7 +117,8 @@ it("local verify-by-poll: shows VERIFYING then ENFORCING vN once the polled vers
   expect(screen.getByText("VERIFYING")).toBeInTheDocument();
   expect(screen.getByText(/Verifying — confirming the new version is loaded/)).toBeInTheDocument();
   await waitFor(() => expect(verifyPolicyApplied).toHaveBeenCalledWith("default", "bot", 2));
-  await waitFor(() => expect(screen.getByText("ENFORCING v2")).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText("LOADED · AUDIT v2")).toBeInTheDocument());
+  expect(screen.queryByText("ENFORCING v2")).not.toBeInTheDocument();
   expect(screen.getByText(/confirmed via a live read/i)).toBeInTheDocument();
   // Never overclaims full-fleet convergence for a single live read.
   expect(screen.queryByText(/loaded on every pod/i)).not.toBeInTheDocument();
@@ -177,4 +190,48 @@ it("local verify-by-poll: STALLED (amber, not red) with a Check again affordance
   expect(screen.getByText("Check again")).toBeInTheDocument();
   // Not the same visual severity as a write-time FAILED.
   expect(screen.queryByText("FAILED")).not.toBeInTheDocument();
+});
+
+// The converged badge says ENFORCING only when the namespace enforces. A block-mode policy in a Monitor
+// namespace is loaded and evaluated, and every match is logged as a would-block instead of blocked.
+describe("converged badge follows the namespace posture", () => {
+  const blockResult: ApplyResult = {
+    kind: "local",
+    title: "Created analytics/data-analyst · v1",
+    ok: true,
+    outcome: 'Policy authored and loaded into this cluster\'s policy engine in mode "block".',
+    manifest: { namespace: "analytics", agent_class: "data-analyst", enforcement_mode: "block" },
+    expectedVersion: 1,
+    expectedMode: "block"
+  };
+  const settings = (enforcement_mode: string, source = "namespace") => ({
+    namespace: "analytics", enforcement_mode, enforcement_mode_source: source, trust_threshold: 0.7, rate_limit: 60
+  });
+
+  it("Monitor namespace: LOADED · MONITOR, with the would-block note, never ENFORCING", async () => {
+    verifyPolicyApplied.mockResolvedValue({ matched: true, current_version: 1, enforcement_mode: "block" });
+    fetchSettings.mockResolvedValue(settings("audit"));
+    render(<ApplyResultPanel result={blockResult} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("LOADED · MONITOR v1")).toBeInTheDocument());
+    expect(fetchSettings).toHaveBeenCalledWith("analytics");
+    expect(screen.getByTestId("apply-posture-note")).toHaveTextContent(/Monitor mode: matches are logged as would-block, not enforced/);
+    expect(screen.queryByText(/ENFORCING/)).not.toBeInTheDocument();
+  });
+
+  it("enforcing namespace: ENFORCING", async () => {
+    verifyPolicyApplied.mockResolvedValue({ matched: true, current_version: 1, enforcement_mode: "block" });
+    fetchSettings.mockResolvedValue(settings("audit", "cluster_default"));
+    render(<ApplyResultPanel result={blockResult} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("ENFORCING v1")).toBeInTheDocument());
+    expect(screen.getByTestId("apply-posture-note")).toHaveAttribute("data-verdict", "enforcing");
+  });
+
+  it("posture unreadable: LOADED, and says it cannot confirm blocking", async () => {
+    verifyPolicyApplied.mockResolvedValue({ matched: true, current_version: 1, enforcement_mode: "block" });
+    fetchSettings.mockRejectedValue(new Error("429"));
+    render(<ApplyResultPanel result={blockResult} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("LOADED v1")).toBeInTheDocument());
+    expect(screen.getByTestId("apply-posture-note")).toHaveTextContent(/could not be read/);
+    expect(screen.queryByText(/ENFORCING/)).not.toBeInTheDocument();
+  });
 });

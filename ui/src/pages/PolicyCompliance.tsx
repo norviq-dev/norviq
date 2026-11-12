@@ -19,6 +19,7 @@ import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { useApi } from "../hooks/useApi";
 import { useApp } from "../store/AppContext";
+import { useEnforcementVerdict } from "../lib/posture";
 
 // Scopes the product owns. They are real policies and they really enforce, but they are not something
 // the customer authored, so they do not belong in a view whose whole subject is "your own policies".
@@ -90,6 +91,9 @@ export function PolicyCompliance() {
   // selector drives this page. Adding an in-page picker gave two range controls on one screen that
   // did not agree — the header said 24h while the page said 7d.
   const { namespace, timeRange } = useApp();
+  // Whether a block-mode policy's match was refused here. In a Monitor namespace it was logged and let
+  // through, and the footnote under the table used to say it was refused.
+  const verdict = useEnforcementVerdict(namespace);
   const range = timeRange;
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -568,7 +572,11 @@ export function PolicyCompliance() {
           <div style={{ fontSize: 11, color: "var(--escalate)", marginTop: 10, maxWidth: 720 }}>
             {nonCompliantRows.some((r) => r.mode !== "block")
               ? "A policy in audit RECORDED these calls and let them through — promote it in Policy Catalog once the counts look right."
-              : "These policies are enforcing, so the calls above were refused. Remediate the workload, or add an exception if the traffic is legitimate."}
+              : verdict === "monitor"
+              ? `${namespace} is in Monitor mode, so these block-mode policies logged the calls above as would-blocks and let them through. Remediate the workload, or add an exception if the traffic is legitimate.`
+              : verdict === "enforcing"
+              ? "These policies are enforcing, so the calls above were refused. Remediate the workload, or add an exception if the traffic is legitimate."
+              : "These policies are in block mode: the calls above were refused wherever their namespace enforces, and logged as would-blocks where it is in Monitor. Remediate the workload, or add an exception if the traffic is legitimate."}
           </div>
         )}
       </Panel>

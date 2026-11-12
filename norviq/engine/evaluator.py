@@ -46,6 +46,7 @@ from norviq.engine.masking import (
 )
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
+from norviq.engine.composition import declares_tighten_only
 from norviq.engine.empty_literals import upgrade_legacy
 from norviq.engine.opa_client import (
     OPA_COMPILE_ERROR,
@@ -1851,7 +1852,10 @@ class OPAEvaluator:
                       code="NRVQ-GRP-11016")
             return
         if restored is not None:
-            self._graphs[namespace] = restored
+            # setdefault, not assignment: two first calls can both reach the load above, and the one
+            # that finishes second used to replace the builder the first had already recorded into.
+            if self._graphs.setdefault(namespace, restored) is not restored:
+                return
             log.info("nrvq.engine.graph.restored", namespace=namespace,
                      nodes=restored.graph.number_of_nodes(), code="NRVQ-GRP-11017")
 
@@ -2071,7 +2075,7 @@ class OPAEvaluator:
         params. SECURITY (cache-key-scope, fail-open): the 5s eval cache keys on (namespace, agent_class,
         <this suffix>); any decision input NOT in the suffix lets one call's cached decision shadow a
         different call's within the TTL — an enforcement bypass. Two such inputs were omitted and are added
-        here: `call_depth` (drives the chain_depth_limit / OWASP-LLM08 anti-recursion block — a shallow-depth
+        here: `call_depth` (drives the chain_depth_limit anti-recursion block — a shallow-depth
         allow must NOT shadow a deep-depth block) and `workload` (workload-tier `deployment:` policies — one
         workload's decision must NOT bleed to another sharing tool+params). Include them so the cached
         decision is only ever served for an identical decision input.
@@ -2472,21 +2476,16 @@ class OPAEvaluator:
         candidates = []
 
         async def _append_policy(target_namespace: str, target_agent_class: str) -> None:
-            # This helper is used ONLY for base/floor lookups (the caller's own class, __baseline__,
-            # namespace/workload tiers) — it NEVER tags "overlay": True. Overlay-ness must come from provenance
-            # (where a candidate was constructed), never from a string-suffix match on the key, so a real
-            # agent_class that happens to end in a reserved suffix (e.g. "...__remediation__") can never be
-            # misclassified as an overlay and lose its priority-based precedence.
+            # This helper is used ONLY for base lookups (the caller's own class). Overlay-ness comes from
+            # provenance, never from a string-suffix match on the key, so a real agent_class that happens
+            # to end in a reserved suffix (e.g. "...__remediation__") can never be misclassified as an
+            # overlay. The one exception is the module's own declaration — see `_base_candidate`.
             key = f"{target_namespace}:{target_agent_class}"
-            if key in self._loader._policies:
-                entry = self._loader._policies[key]
-                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
-                                   "enforcement_mode": entry.get("enforcement_mode", "block")})
-                return
-            loaded = await self._loader.load_from_db(target_namespace, target_agent_class)
-            if loaded:
-                candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
-                                   "enforcement_mode": loaded.get("enforcement_mode", "block")})
+            entry = self._loader._policies.get(key) if key in self._loader._policies else (
+                await self._loader.load_from_db(target_namespace, target_agent_class)
+            )
+            if entry:
+                candidates.append(self._base_candidate(key, entry))
 
         async def _append_controls_floor(target_namespace: str, scope: str = "__controls__") -> dict | None:
             """A reserved-scope module, tagged as a tighten-only overlay so it acts as a FLOOR.
@@ -2587,16 +2586,12 @@ class OPAEvaluator:
         #   - workload tier applies only when the caller identifies its workload (never guessed).
         ns_tier_key = f"{namespace}:namespace:{namespace}"
         if ns_tier_key in self._loader._policies:
-            entry = self._loader._policies[ns_tier_key]
-            candidates.append({"key": ns_tier_key, "rego": entry["rego"], "priority": entry["priority"],
-                               "enforcement_mode": entry.get("enforcement_mode", "block")})
+            candidates.append(self._base_candidate(ns_tier_key, self._loader._policies[ns_tier_key]))
         workload = getattr(event.agent_identity, "workload", "") or ""
         if workload:
             wl_key = f"{namespace}:deployment:{workload}"
             if wl_key in self._loader._policies:
-                entry = self._loader._policies[wl_key]
-                candidates.append({"key": wl_key, "rego": entry["rego"], "priority": entry["priority"],
-                                   "enforcement_mode": entry.get("enforcement_mode", "block")})
+                candidates.append(self._base_candidate(wl_key, self._loader._policies[wl_key]))
         # Additive sector-pack candidate. In-memory ONLY (no load_from_db) so it costs nothing
         # on the hot path for namespaces with no pack enabled — and is simply absent by default, so the
         # single-cluster path / attack namespaces are unchanged unless a pack is materialized here.
@@ -2666,8 +2661,11 @@ class OPAEvaluator:
             )
             if not entry:
                 return None
-            candidate = {"key": key, "rego": entry["rego"], "priority": entry["priority"],
-                         "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": floor}
+            if floor:
+                candidate = {"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                             "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": True}
+            else:
+                candidate = self._base_candidate(key, entry)
             candidates.append(candidate)
             seen.add(key)
             return candidate
@@ -2716,6 +2714,26 @@ class OPAEvaluator:
                 _append_overlay(f"{ns}:{agent_class}__remediation__")
         await _append_policy("__cluster__", "__baseline__", floor=True)
         return candidates
+
+    @staticmethod
+    def _base_candidate(key: str, entry: dict) -> dict:
+        """A base-tier candidate (agent class, namespace tier, workload tier).
+
+        A module the console generated as TIGHTEN-ONLY (the Visual Builder's rules mode, the New Policy
+        composer) is collected as an overlay instead. Its `allow` default means "no rule of mine fired",
+        not "permit this call". As a base tier it resolved by priority, so a class policy at 100 that
+        only adds blocks discarded a namespace-tier block at 50 and the call went through: a rule
+        labelled tighten-only loosened the namespace. As an overlay it can only make the decision
+        stricter. Its `enforcement_mode` is kept, so an audit-mode trial still only records — the same
+        treatment the floors get. See norviq/engine/composition.py for how a module is recognised.
+        """
+        rego = str(entry.get("rego", ""))
+        candidate = {"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                     "enforcement_mode": entry.get("enforcement_mode", "block")}
+        if declares_tighten_only(rego):
+            candidate["overlay"] = True
+            candidate["tighten_only"] = True
+        return candidate
 
     def _apply_controls_supersede(
         self, candidates: list[dict], controls: dict | None, ns_baseline: dict | None, explain: bool

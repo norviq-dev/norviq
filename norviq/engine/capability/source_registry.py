@@ -16,7 +16,8 @@ Design (per the phased plan, decision c):
     here too but marked wave 2 — their verb specs exist so the classifier already works on them.
   * This module is PURE (no I/O, no graph coupling): callers pass in the sets of granted / observed /
     policy-referenced verbs and get back per-verb findings. That keeps it unit-testable and lets both
-    the asset-graph and attack-graph routes reuse one classifier.
+    the asset-graph and attack-graph routes reuse one classifier. The one read is a verb's ATLAS
+    technique, which comes from the shared mapping file (cached) the first time it is asked for.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from norviq.api.framework_mapping import techniques_for_tool
 from norviq.engine.confusables import skeleton
 from norviq.engine.graph.models import RiskLevel
 
@@ -53,6 +55,10 @@ class CapabilityStatus(str, Enum):
     """Per-verb posture, worst-first. 'Open' verbs (undefended/observed-undefended) are the finding."""
 
     UNDEFENDED = "undefended"                # observed in traffic AND no policy rule guards it — live gap
+    # Observed, and calls were logged as would-block, but none was stopped: a Monitor/audit-mode
+    # namespace or policy softens block/escalate to `audit` and the call runs. Not DEFENDED (nothing
+    # was enforced) and not UNDEFENDED ("author a rule" when one is already matching).
+    MONITORED = "monitored"
     DORMANT_GRANT = "dormant_grant"          # granted/reachable but never exercised — least-privilege gap
     DEFENDED = "defended"                    # observed AND a policy rule references it — covered
     LATENT = "latent"                        # the source exposes it, but nothing grants/observes it — informational
@@ -63,14 +69,26 @@ class CapabilityStatus(str, Enum):
 class _VerbSpec:
     verb: Verb
     risk: RiskLevel
-    # A REAL MITRE ATLAS technique id, or None when no single technique fits (we never fabricate ids —
-    # see the AML.T0000 removal). None renders as a tactic-level label in the UI, not a fake code.
-    technique: str | None
     label: str
     # Tool-name fragments (lowercased substring match) that indicate this verb.
     tool_fragments: tuple[str, ...]
     # Verb-specific remediation fragment ("… for {class}"), composed by callers into a full suggestion.
     fix: str
+
+    @property
+    def technique(self) -> str | None:
+        """The ATLAS technique for this verb, read from the one mapping Red Team and Compliance read.
+
+        The verb is resolved to the baseline rule that guards it the way a tool name is
+        (`rule_for_tool`: `delete` is llm06_excessive_agency, `send` is llm02_data_leakage), and the
+        technique is the first one the ATLAS table lists that rule under. None when no rule guards the
+        verb; the UI then shows the label alone, never a made-up id. Each spec used to carry a literal:
+        deletes under AML.T0048 External Harms, sends under AML.T0040 ML Model Inference API Access,
+        index writes under AML.T0018 Backdoor ML Model, none of which Red Team or Compliance use for
+        these rules. Resolved on read so the hot-path classifier never loads the mapping file.
+        """
+        found = techniques_for_tool(self.verb.value)
+        return found[0][0] if found else None
 
 
 @dataclass(frozen=True)
@@ -95,6 +113,7 @@ class VerbFinding:
     observed: bool
     defended: bool
     recommendation: str = ""
+    monitored: bool = False  # calls logged as would-block that ran (Monitor/audit) — never a defence
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -106,16 +125,17 @@ class VerbFinding:
             "granted": self.granted,
             "observed": self.observed,
             "defended": self.defended,
+            "monitored": self.monitored,
             "recommendation": self.recommendation,
         }
 
 
 # ── the registry ──────────────────────────────────────────────────────────────────────────────────
-# ATLAS ids used below are the real ones already present elsewhere in the codebase's mapping; where no
-# single technique fits (plain reads), technique is None (tactic-level label, no fabricated id).
+# No ATLAS id is written here: `_VerbSpec.technique` reads it from the shared mapping through the rule
+# that guards the verb, and is None where no rule does (plain reads and writes).
 
 _READ = _VerbSpec(
-    Verb.READ, RiskLevel.LOW, None, "read / search",
+    Verb.READ, RiskLevel.LOW, "read / search",
     ("search", "read", "get", "list", "query", "fetch", "select", "scan"),
     "keep read-only and namespace-scoped",
 )
@@ -125,12 +145,12 @@ def _es_specs() -> tuple[_VerbSpec, ...]:
     return (
         _READ,
         _VerbSpec(
-            Verb.WRITE, RiskLevel.HIGH, "AML.T0018", "write / index (knowledge poisoning)",
+            Verb.WRITE, RiskLevel.HIGH, "write / index (knowledge poisoning)",
             ("index", "write", "update", "put", "upsert", "bulk"),
             "block writes to the retrieval index — a poisoned KB steers every downstream agent",
         ),
         _VerbSpec(
-            Verb.DELETE, RiskLevel.CRITICAL, "AML.T0048", "delete / drop (availability)",
+            Verb.DELETE, RiskLevel.CRITICAL, "delete / drop (availability)",
             ("delete", "drop", "purge", "truncate", "clear"),
             "block destructive verbs — deletion of the index is an availability attack",
         ),
@@ -141,12 +161,12 @@ def _pg_specs() -> tuple[_VerbSpec, ...]:
     return (
         _READ,
         _VerbSpec(
-            Verb.WRITE, RiskLevel.HIGH, None, "write / update",
+            Verb.WRITE, RiskLevel.HIGH, "write / update",
             ("insert", "write", "update", "put", "upsert", "modify"),
             "constrain writes to the intended tables/columns",
         ),
         _VerbSpec(
-            Verb.DELETE, RiskLevel.CRITICAL, "AML.T0048", "delete / drop / truncate",
+            Verb.DELETE, RiskLevel.CRITICAL, "delete / drop / truncate",
             ("delete", "drop", "truncate", "purge"),
             "block destructive SQL (DROP/DELETE/TRUNCATE) for this class",
         ),
@@ -158,7 +178,7 @@ def _egress_specs() -> tuple[_VerbSpec, ...]:
     # exfiltration). comprehensive.rego already treats send_email/post_webhook/upload_file as external.
     return (
         _VerbSpec(
-            Verb.SEND, RiskLevel.HIGH, "AML.T0040", "send / egress (data exfiltration)",
+            Verb.SEND, RiskLevel.HIGH, "send / egress (data exfiltration)",
             ("send", "post", "upload", "publish", "webhook", "http", "email", "sms", "export"),
             "restrict egress to allowed destinations and scan payloads for secrets/PII",
         ),
@@ -169,12 +189,12 @@ def _object_store_specs() -> tuple[_VerbSpec, ...]:
     return (
         _READ,
         _VerbSpec(
-            Verb.WRITE, RiskLevel.HIGH, None, "put / upload",
+            Verb.WRITE, RiskLevel.HIGH, "put / upload",
             ("put", "write", "upload", "post"),
             "constrain object writes to intended buckets/prefixes",
         ),
         _VerbSpec(
-            Verb.DELETE, RiskLevel.CRITICAL, "AML.T0048", "delete object",
+            Verb.DELETE, RiskLevel.CRITICAL, "delete object",
             ("delete", "remove", "purge"),
             "block object deletion for this class",
         ),
@@ -704,6 +724,31 @@ def classify_tool(tool_name: str, tool_params: object = None) -> tuple[Verb, Ris
     return verb, risk
 
 
+def verb_reads_payload(tool_name: str) -> bool:
+    """Whether `classify_tool(tool_name, params)` can depend on `params` for this tool NAME.
+
+    The two places `classify_tool` reads the payload, and nowhere else:
+
+    * the name matches no verb token (and is not a control-plane actuation), so the verb is recovered
+      from the payload — `acme_widget` is `unknown` with no payload and `delete` with a DROP in it;
+    * a run qualifier yielded to the read or write it governs (`run_query`), so the payload may raise
+      the verb — a select stays `read`, an UPDATE is `write`.
+
+    So `derived.verb` is a fact about the arguments for such a tool, not only about its name: a call
+    replayed without its argument values may publish a different verb than the real call did. The
+    dry runs use this to tell "refused on the verb" from "the record cannot say what the verb was".
+    `tests/engine/test_capability.py` holds this to `classify_tool` itself.
+    """
+    tokens = _tokenize_tool(tool_name)
+    tset = set(tokens)
+    if tset & _ACTUATION_NOUNS and tset & _CONTROL_VERBS:
+        return False
+    if not any(_VERB_LEXICON.get(t) for t in tokens):
+        return True
+    verb, _risk = classify_tool(tool_name)
+    return verb in (Verb.READ, Verb.WRITE) and bool(tset & _RUN_QUALIFIERS)
+
+
 _DEFAULT_VERB_RISK = {
     Verb.READ: RiskLevel.LOW,
     Verb.WRITE: RiskLevel.HIGH,
@@ -737,28 +782,33 @@ def classify_source(
     granted_verbs: set[Verb] | None = None,
     observed_verbs: set[Verb] | None = None,
     defended_verbs: set[Verb] | None = None,
+    monitored_verbs: set[Verb] | None = None,
 ) -> list[VerbFinding]:
     """Classify every verb a source EXPOSES against the join of what is granted / observed / policy-defended.
 
-    granted  = a tool reaching this source that maps to the verb is registered/allowed
-    observed = real traffic exercised the verb
-    defended = a policy rule references the verb/tool
+    granted   = a tool reaching this source that maps to the verb is registered/allowed
+    observed  = real traffic exercised the verb
+    defended  = a policy ENFORCED on the verb's tool (a block or an escalation)
+    monitored = calls were logged as would-block but ran (Monitor / audit mode); ignored where defended
 
-    Returns findings worst-first (UNDEFENDED → DORMANT_GRANT → DEFENDED → LATENT), each with a
-    verb-specific recommendation. Callers derive per-source/per-path severity via worst_open_verb()."""
+    Returns findings worst-first (UNDEFENDED → MONITORED → DORMANT_GRANT → DEFENDED → LATENT), each
+    with a verb-specific recommendation. Callers derive per-source/per-path severity via worst_open_verb()."""
     spec = _REGISTRY.get(source_type)
     if not spec:
         return []
     granted = granted_verbs or set()
     observed = observed_verbs or set()
     defended = defended_verbs or set()
+    monitored = monitored_verbs or set()
 
     findings: list[VerbFinding] = []
     for vs in spec.verbs:
         is_granted = vs.verb in granted or vs.verb in observed
         is_observed = vs.verb in observed
         is_defended = vs.verb in defended
-        if is_observed and not is_defended:
+        if is_observed and not is_defended and vs.verb in monitored:
+            status = CapabilityStatus.MONITORED
+        elif is_observed and not is_defended:
             status = CapabilityStatus.UNDEFENDED
         elif is_granted and not is_observed:
             status = CapabilityStatus.DORMANT_GRANT
@@ -770,13 +820,18 @@ def classify_source(
         rec = ""
         if status == CapabilityStatus.UNDEFENDED:
             rec = f"{vs.fix} — {spec.display}"
+        elif status == CapabilityStatus.MONITORED:
+            rec = (
+                f"calls were logged as would-block but ran (Monitor) — nothing stopped {vs.verb.value} on "
+                f"{spec.display}; enforce the policy or namespace to block it"
+            )
         elif status == CapabilityStatus.DORMANT_GRANT:
             rec = f"grant is unused — revoke {vs.verb.value} on {spec.display} (least privilege)"
         findings.append(
             VerbFinding(
                 verb=vs.verb, risk=vs.risk, technique=vs.technique, label=vs.label,
                 status=status, granted=is_granted, observed=is_observed, defended=is_defended,
-                recommendation=rec,
+                recommendation=rec, monitored=vs.verb in monitored,
             )
         )
 
@@ -786,20 +841,25 @@ def classify_source(
 
 _STATUS_ORDER = {
     CapabilityStatus.UNDEFENDED: 0,
-    CapabilityStatus.DORMANT_GRANT: 1,
-    CapabilityStatus.DEFENDED: 2,
-    CapabilityStatus.LATENT: 3,
-    CapabilityStatus.NOT_EXPOSED: 4,
+    CapabilityStatus.MONITORED: 1,
+    CapabilityStatus.DORMANT_GRANT: 2,
+    CapabilityStatus.DEFENDED: 3,
+    CapabilityStatus.LATENT: 4,
+    CapabilityStatus.NOT_EXPOSED: 5,
 }
+
+#: Statuses where the verb is reachable and nothing stops it. MONITORED is open: its calls ran.
+_OPEN_STATUSES = (CapabilityStatus.UNDEFENDED, CapabilityStatus.MONITORED, CapabilityStatus.DORMANT_GRANT)
 
 
 def worst_open_verb(findings: list[VerbFinding]) -> VerbFinding | None:
-    """The highest-risk verb that is 'open' (undefended or a dormant grant) — the severity a path/source
-    should carry. Returns None when everything is defended or latent (nothing actionable)."""
-    open_findings = [f for f in findings if f.status in (CapabilityStatus.UNDEFENDED, CapabilityStatus.DORMANT_GRANT)]
+    """The highest-risk verb that is 'open' (undefended, monitored only, or a dormant grant) — the severity
+    a path/source should carry. Returns None when everything is defended or latent (nothing actionable).
+    Within one risk level the worse status wins (undefended, then monitored, then dormant)."""
+    open_findings = [f for f in findings if f.status in _OPEN_STATUSES]
     if not open_findings:
         return None
-    return max(open_findings, key=lambda f: (_RISK_ORDER[f.risk], f.status == CapabilityStatus.UNDEFENDED))
+    return max(open_findings, key=lambda f: (_RISK_ORDER[f.risk], -_STATUS_ORDER[f.status]))
 
 
 def source_meta(source_type: str) -> dict[str, object] | None:

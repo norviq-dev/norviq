@@ -489,3 +489,57 @@ describe("the caveat marker delivers the caveat, and nothing else", () => {
     );
   });
 });
+
+// In a Monitor namespace the engine logs every baseline block or escalate as a would-block and lets the
+// call through. The strip, the Enforce rows and the save message used to claim enforcement there anyway.
+describe("baseline controls follow the namespace posture", () => {
+  const ENFORCED = {
+    ...CONTROLS,
+    counts: { off: 0, monitor: 0, deny: 2 },
+    controls: [
+      { ...CONTROLS.controls[0], effect: "deny" as const, enforced_as: "block" },
+      { ...CONTROLS.controls[1], effect: "deny" as const, enforced_as: "escalate" },
+    ],
+  };
+  function posture(enforcement_mode: "block" | "audit") {
+    return vi.spyOn(client, "fetchSettings").mockResolvedValue({
+      namespace: "chatbot-prod", enforcement_mode, enforcement_mode_source: "namespace",
+      trust_threshold: 0.7, rate_limit: 60, apply_mode: "enforce",
+    } as never);
+  }
+
+  it("Monitor: no 'enforcing' count, rows say would-block, the save message says nothing is blocked", async () => {
+    posture("audit");
+    mockFetch(ENFORCED);
+    vi.spyOn(client, "saveBaselineControls").mockResolvedValue({
+      namespace: "chatbot-prod", preset: "strict",
+      effects: { deny_shell_execution: "deny", pii_detection: "monitor" },
+      enforcing: ["deny_shell_execution"], disabled: [],
+    } as never);
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+
+    const strip = await screen.findByTestId("baseline-counts-monitor");
+    expect(strip).toHaveTextContent("2 at Enforce · would-block only (Monitor)");
+    expect(screen.getByTestId("baseline-counts")).not.toHaveTextContent(/enforcing/);
+    expect(screen.getByTestId("baseline-control-deny_shell_execution")).toHaveTextContent("would be blocked · logged (Monitor)");
+    expect(screen.getByTestId("baseline-control-pii_detection")).toHaveTextContent("would be held · logged (Monitor)");
+    expect(screen.queryByText("call is blocked")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("baseline-pii_detection-monitor"));
+    await userEvent.click(screen.getByTestId("baseline-save"));
+    const msg = await screen.findByTestId("baseline-msg");
+    expect(msg).toHaveTextContent(/chatbot-prod is in Monitor/);
+    expect(msg).toHaveTextContent(/nothing is blocked live/);
+    expect(msg).not.toHaveTextContent(/now enforcing/);
+  });
+
+  it("CONTROL: an enforcing namespace keeps 'enforcing' and 'call is blocked'", async () => {
+    posture("block");
+    mockFetch(ENFORCED);
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const row = await screen.findByTestId("baseline-control-deny_shell_execution");
+    await waitFor(() => expect(screen.getByTestId("baseline-counts")).toHaveTextContent("2 enforcing"));
+    expect(row).toHaveTextContent("call is blocked");
+    expect(screen.queryByTestId("baseline-counts-monitor")).toBeNull();
+  });
+});

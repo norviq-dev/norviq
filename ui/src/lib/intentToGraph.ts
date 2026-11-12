@@ -16,13 +16,14 @@
 // reported: every predicate is either translated or named in `dropped`, and the caller is expected to
 // refuse the handoff (not merely warn) when `dropped` is non-empty. There is a test for that.
 
-import type {
-  BuilderAllowlistGrant,
-  BuilderConditionCollectionFact,
-  BuilderConditionNumericFact,
-  BuilderGrantFact,
-  BuilderGraph,
-  BuilderParamConstraint
+import {
+  TIGHTEN_ONLY_DEFAULTS,
+  type BuilderAllowlistGrant,
+  type BuilderConditionCollectionFact,
+  type BuilderConditionNumericFact,
+  type BuilderGrantFact,
+  type BuilderGraph,
+  type BuilderParamConstraint
 } from "./builderGraph";
 
 /** The subset of the server's intent shape this converter reads. Mirrors norviq/engine/intent/schema.py. */
@@ -300,7 +301,11 @@ export function intentToBuilderGraph(intent: IntentLike, agentClass?: string): I
     scope: { kind: "class", agentClass: cls },
     mode: "allowlist",
     rules: [],
-    defaults: { decision: "block", reason: "not permitted by this intent" },
+    // NOT the intent's deny. Allowlist mode compiles its own default-deny triple and never reads
+    // `defaults`; the only reader is rules mode, if the operator switches to it. Seeding `block` here
+    // turned "Tighten-only rules" into deny-by-default after the handoff: every unmatched call was
+    // blocked while the mode card said unmatched calls keep their outcome.
+    defaults: { ...TIGHTEN_ONLY_DEFAULTS },
     allowlist: {
       tools: [...tools].sort(),
       refinements: { readonly: false, egress: false, scope: false, rate: false },

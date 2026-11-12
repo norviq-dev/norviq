@@ -233,11 +233,20 @@ class _FakeEvaluator:
 
 
 class _FakeStore:
+    """Removal goes through the store (it merges the persisted graph first, so a node another API
+    replica recorded can be removed too). A removal that happened is a snapshot write: `saved`."""
+
     def __init__(self) -> None:
         self.saved: list[str] = []
 
     async def save(self, namespace: str, _graph) -> None:
         self.saved.append(namespace)
+
+    async def remove_node(self, namespace: str, graph, node_id: str) -> bool:
+        removed = graph.remove_node(node_id)
+        if removed:
+            self.saved.append(namespace)
+        return removed
 
 
 def test_deregister_removes_the_agents_node_from_the_asset_graph() -> None:
@@ -298,3 +307,26 @@ def test_deregister_still_succeeds_when_the_graph_prune_raises() -> None:
     assert resp.status_code == 200
     assert resp.json()["deleted"] is True
     assert resp.json()["graph_node_removed"] is False
+
+
+def test_a_node_removal_the_store_cannot_record_is_a_503_not_a_success_or_a_bare_500() -> None:
+    """FAIL-ON-BUG: when the graph store raised (database down, or the Redis graph lock held by another
+    replica) DELETE /asset-graph/node surfaced an unhandled 500. The node was not removed, and with
+    the cache now written only after a commit nothing shows it removed either; the answer says so."""
+    app, _ = _client(set())
+    client = TestClient(app, raise_server_exceptions=False)
+    graph = _FakeGraph({"tool:legacy_export"})
+
+    class _DownStore(_FakeStore):
+        async def remove_node(self, namespace: str, graph, node_id: str) -> bool:
+            raise ConnectionError("postgres: connection refused")
+
+    app.state.evaluator = _FakeEvaluator(graph)
+    app.state.graph_store = _DownStore()
+
+    resp = client.request("DELETE", "/api/v1/asset-graph/node",
+                          params={"namespace": "team-a", "node_id": "tool:legacy_export"}, headers=_hdr(role="admin"))
+
+    assert resp.status_code == 503, resp.text
+    assert "was not removed" in resp.json()["detail"]
+    assert graph.remove_node("tool:legacy_export") is True, "the node must still be there"

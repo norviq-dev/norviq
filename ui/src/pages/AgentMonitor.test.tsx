@@ -10,7 +10,7 @@ vi.mock("echarts-for-react/lib/core", () => ({ default: () => null }));
 
 import { AgentMonitor } from "./AgentMonitor";
 import { AppProvider } from "../store/AppContext";
-import { clearApiCache } from "../hooks/useApi";
+import { clearApiCache, peekApiCache, primeApiCache } from "../hooks/useApi";
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
@@ -84,6 +84,7 @@ describe("AgentMonitor mounts", () => {
     );
     fireEvent.click(await screen.findByText("spiffe://norviq/ns/default/sa/deploy-bot"));
     fireEvent.click(await screen.findByText("Freeze Agent"));
+    fireEvent.click(await screen.findByTestId("agent-trust-confirm-submit")); // Freeze asks first
     // Pre-fix the catch was `// ignore` → no alert, no state change: the button looked like a dead control.
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Admin role required");
@@ -142,6 +143,7 @@ describe("AgentMonitor mounts", () => {
     // Freeze one report-gen agent (optimistic setData replaces agents.data).
     fireEvent.click(screen.getByText("spiffe://norviq/ns/default/sa/report-gen-1"));
     fireEvent.click(await screen.findByText("Freeze Agent"));
+    fireEvent.click(await screen.findByTestId("agent-trust-confirm-submit")); // Freeze asks first
     // Optimistic update landed and it did NOT error.
     await waitFor(() => {
       const frozenTile = screen.getByText("Frozen").closest(".panel") as HTMLElement;
@@ -194,8 +196,9 @@ describe("AgentMonitor mounts", () => {
     // Select an agent and freeze it. Detail swaps Freeze/Reset for the explicit Unfreeze control.
     fireEvent.click(screen.getByText("spiffe://norviq/ns/default/sa/report-gen-1"));
     fireEvent.click(await screen.findByText("Freeze Agent"));
+    fireEvent.click(await screen.findByTestId("agent-trust-confirm-submit")); // Freeze asks first
     await screen.findByText("Unfreeze Agent");
-    expect(screen.queryByText("Reset Trust")).toBeNull(); // frozen agent → no dead "Reset" path
+    expect(screen.queryByText("Reset Behavior Record")).toBeNull(); // frozen agent → only Unfreeze
     await waitFor(() => {
       const frozenTile = screen.getByText("Frozen").closest(".panel") as HTMLElement;
       expect(within(frozenTile).getByText("1")).toBeInTheDocument();
@@ -218,16 +221,26 @@ describe("AgentMonitor mounts", () => {
     expect(agentsGets).toBe(1);
   });
 
-  it("UX-UNFREEZE: a frozen agent can be unfrozen from its detail (restores trust, list intact)", async () => {
+  it("UX-UNFREEZE: Unfreeze lifts the freeze with score 1.0, adds no cap, and shows the agent's real trust", async () => {
+    // It used to send score 0.8, which the API stores as a durable, tighten-only CAP, and paint "high 0.80" —
+    // the value of that cap, not the agent's trust (the engine scored it 0.455 and capped it from then on).
     const fleet = [
-      { spiffe_id: "spiffe://norviq/ns/default/sa/frozen-bot", namespace: "default", agent_class: "batch", last_seen: new Date().toISOString(), score: 0, category: "frozen", violation_count: 5, signals: {}, dominant_signal: "", recommendation: "block" },
-      { spiffe_id: "spiffe://norviq/ns/default/sa/healthy-bot", namespace: "default", agent_class: "web", last_seen: new Date().toISOString(), score: 0.9, category: "high", violation_count: 0, signals: {}, dominant_signal: "", recommendation: "allow" }
+      { spiffe_id: "spiffe://norviq/ns/default/sa/frozen-bot", namespace: "default", agent_class: "batch", last_seen: new Date().toISOString(), score: 0, category: "frozen", frozen: true, trust_cap: null, violation_count: 5, signals: {}, dominant_signal: "", recommendation: "freeze" },
+      { spiffe_id: "spiffe://norviq/ns/default/sa/healthy-bot", namespace: "default", agent_class: "web", last_seen: new Date().toISOString(), score: 0.9, category: "high", frozen: false, trust_cap: null, violation_count: 0, signals: {}, dominant_signal: "", recommendation: "allow" }
     ];
+    const sent: unknown[] = [];
     server.use(
       http.get("/api/v1/agents", () => HttpResponse.json(fleet)),
       http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
       http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([])),
-      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ score: 0.8 }))
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, async ({ request }) => {
+        sent.push(await request.json());
+        return HttpResponse.json({ spiffe_id: fleet[0].spiffe_id, frozen: false, trust_cap: null });
+      }),
+      // The re-read: the agent's trust as the API now reports it.
+      http.get(/\/api\/v1\/agents\/spiffe[^/]*frozen-bot$/, () =>
+        HttpResponse.json({ spiffe_id: fleet[0].spiffe_id, score: 0.455, category: "medium", frozen: false, trust_cap: null, violation_count: 0, signals: {}, dominant_signal: "", recommendation: "allow" })
+      )
     );
     render(
       <MemoryRouter>
@@ -236,18 +249,20 @@ describe("AgentMonitor mounts", () => {
         </AppProvider>
       </MemoryRouter>
     );
-    // Select the already-frozen agent → only the Unfreeze action is offered.
     fireEvent.click(await screen.findByText("spiffe://norviq/ns/default/sa/frozen-bot"));
     const unfreeze = await screen.findByText("Unfreeze Agent");
     expect(screen.queryByText("Freeze Agent")).toBeNull();
-    // Unfreeze → optimistic restore to trust 0.8: the Frozen tile drops to 0, no error surfaced.
     fireEvent.click(unfreeze);
+    await waitFor(() => expect(sent).toEqual([{ score: 1.0 }]));
     await waitFor(() => {
       const frozenTile = screen.getByText("Frozen").closest(".panel") as HTMLElement;
       expect(within(frozenTile).getByText("0")).toBeInTheDocument();
     });
+    // The real score from the re-read — never the 0.80 the old Unfreeze painted — and no cap on screen.
+    expect((await screen.findAllByText("0.46")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("0.80")).toBeNull();
+    expect(screen.queryByTestId("agent-trust-cap")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
-    // Both agents still tracked.
     const trackedTile = screen.getByText("Agents Tracked").closest(".panel") as HTMLElement;
     expect(within(trackedTile).getByText("2")).toBeInTheDocument();
   });
@@ -277,7 +292,216 @@ describe("AgentMonitor mounts", () => {
     // The detail panel opens with the audited actions.
     expect(await screen.findByText("Agent Actions")).toBeInTheDocument();
     expect(screen.getByText("Freeze Agent")).toBeInTheDocument();
-    expect(screen.getByText("Reset Trust")).toBeInTheDocument();
+    expect(screen.getByText("Reset Behavior Record")).toBeInTheDocument();
+  });
+});
+
+describe("AgentMonitor trust controls", () => {
+  const healthy = {
+    spiffe_id: "spiffe://norviq/ns/payments/sa/invoice-agent", namespace: "payments", agent_class: "invoice-agent",
+    last_seen: new Date().toISOString(), score: 0.455, category: "medium", frozen: false, trust_cap: null,
+    violation_count: 6, signals: {}, dominant_signal: "", recommendation: "allow"
+  };
+  const mount = async () => {
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    fireEvent.click(await screen.findByText(healthy.spiffe_id));
+  };
+
+  it("Freeze asks first, and Cancel sends nothing", async () => {
+    const puts: unknown[] = [];
+    server.use(
+      http.get("/api/v1/agents", () => HttpResponse.json([healthy])),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([])),
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, async ({ request }) => {
+        puts.push(await request.json());
+        return HttpResponse.json({ spiffe_id: healthy.spiffe_id, frozen: true, trust_cap: null });
+      })
+    );
+    await mount();
+    fireEvent.click(await screen.findByText("Freeze Agent"));
+    const dialog = await screen.findByTestId("agent-trust-confirm");
+    expect(dialog).toHaveTextContent(healthy.spiffe_id);
+    fireEvent.click(within(dialog).getByText("Cancel"));
+    await waitFor(() => expect(screen.queryByTestId("agent-trust-confirm")).toBeNull());
+    expect(puts).toEqual([]);
+    expect(screen.queryByText("Unfreeze Agent")).toBeNull();
+
+    fireEvent.click(screen.getByText("Freeze Agent"));
+    fireEvent.click(await screen.findByTestId("agent-trust-confirm-submit"));
+    await screen.findByText("Unfreeze Agent");
+    expect(puts).toEqual([{ score: 0 }]);
+  });
+
+  it("Reset Behavior Record calls POST /trust/reset after a confirm, and never PUTs a score", async () => {
+    let resets = 0;
+    let puts = 0;
+    server.use(
+      http.get("/api/v1/agents", () => HttpResponse.json([healthy])),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([])),
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => {
+        puts += 1;
+        return HttpResponse.json({});
+      }),
+      http.post(/\/api\/v1\/agents\/.*\/trust\/reset$/, () => {
+        resets += 1;
+        return HttpResponse.json({
+          reset: true, spiffe_id: healthy.spiffe_id, score_before: 0.455, violation_count: 6,
+          history_entries_cleared: 12, history_blocks_cleared: 6, keys_cleared: [], frozen: false, trust_cap: null
+        });
+      })
+    );
+    await mount();
+    fireEvent.click(await screen.findByText("Reset Behavior Record"));
+    expect(await screen.findByTestId("agent-trust-confirm")).toHaveTextContent(/cannot be undone/);
+    expect(resets).toBe(0);
+    fireEvent.click(screen.getByTestId("agent-trust-confirm-submit"));
+    expect(await screen.findByTestId("agent-action-notice")).toHaveTextContent("12 decisions cleared");
+    expect(resets).toBe(1);
+    expect(puts).toBe(0);
+  });
+
+  it("an active cap is shown, and Remove Cap lifts it with score 1.0 instead of setting another", async () => {
+    const capped = { ...healthy, trust_cap: 0.8 };
+    const puts: unknown[] = [];
+    server.use(
+      http.get("/api/v1/agents", () => HttpResponse.json([capped])),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([])),
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, async ({ request }) => {
+        puts.push(await request.json());
+        return HttpResponse.json({ spiffe_id: healthy.spiffe_id, frozen: false, trust_cap: null });
+      }),
+      http.get(/\/api\/v1\/agents\/spiffe[^/]*invoice-agent$/, () => HttpResponse.json({ ...healthy }))
+    );
+    await mount();
+    expect(await screen.findByTestId("agent-trust-cap")).toHaveTextContent("capped at 0.80");
+    expect(screen.getByTestId("agent-row-cap")).toHaveTextContent("cap 0.80");
+    fireEvent.click(screen.getByText("Remove Cap"));
+    await waitFor(() => expect(screen.queryByTestId("agent-trust-cap")).toBeNull());
+    expect(puts).toEqual([{ score: 1.0 }]);
+    expect(screen.queryByTestId("agent-row-cap")).toBeNull();
+    expect(screen.queryByText("Remove Cap")).toBeNull();
+  });
+
+  it("a row the API reports frozen offers Unfreeze whatever its category says", async () => {
+    // The Unfreeze control keys on the enforced `frozen` flag, not on a category or a score of 0.
+    server.use(
+      http.get("/api/v1/agents", () =>
+        HttpResponse.json([{ ...healthy, frozen: true, score: 0.455, category: "medium" }])
+      ),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([]))
+    );
+    await mount();
+    expect(await screen.findByText("Unfreeze Agent")).toBeInTheDocument();
+    expect(screen.queryByText("Freeze Agent")).toBeNull();
+  });
+});
+
+/**
+ * Trust state the rest of the console shows, and the states between the four bands.
+ *
+ * A freeze here only dropped this page's own cache entry, so the Overview's trust donut (its own cache key, a
+ * 60 s TTL) kept showing the agent unfrozen. After Remove Cap the score shown was the one the cap had held
+ * down. And a row whose freeze the API could not read (trust store down) offered "Freeze" as if the agent were
+ * known not to be frozen, while the engine was blocking it.
+ */
+describe("AgentMonitor — trust state across the console", () => {
+  const sid = "spiffe://norviq/ns/payments/sa/invoice-agent";
+  const row = {
+    spiffe_id: sid, namespace: "payments", agent_class: "invoice-agent", last_seen: new Date().toISOString(),
+    score: 0.455, category: "medium", frozen: false, trust_cap: null, controls: "live",
+    violation_count: 6, signals: {}, dominant_signal: "", recommendation: "allow"
+  };
+  const mount = async (rows: unknown[]) => {
+    server.use(
+      http.get("/api/v1/agents", () => HttpResponse.json(rows)),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([]))
+    );
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    fireEvent.click(await screen.findByText(sid));
+  };
+
+  it("a freeze drops the Overview's cached trust donut too, not only this page's cache", async () => {
+    server.use(
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ spiffe_id: sid, frozen: true, trust_cap: null }))
+    );
+    await mount([row]);
+    // What the Overview had cached for every scope it may have been opened on.
+    for (const ns of ["default", "payments", "all"]) primeApiCache(`dashboard-agents:${ns}`, [{ ...row }]);
+    fireEvent.click(await screen.findByText("Freeze Agent"));
+    fireEvent.click(await screen.findByTestId("agent-trust-confirm-submit"));
+    await screen.findByText("Unfreeze Agent");
+    for (const ns of ["default", "payments", "all"]) expect(peekApiCache(`dashboard-agents:${ns}`)).toBeUndefined();
+  });
+
+  it("Remove Cap says the score is not known yet when the API reports it unscored", async () => {
+    const capped = { ...row, score: 0.3, category: "low", trust_cap: 0.3 };
+    server.use(
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ spiffe_id: sid, frozen: false, trust_cap: null })),
+      http.get(/\/api\/v1\/agents\/spiffe[^/]*invoice-agent$/, () =>
+        HttpResponse.json({ ...row, score: null, category: "unscored", recommendation: "" })
+      )
+    );
+    await mount([capped]);
+    fireEvent.click(await screen.findByText("Remove Cap"));
+    expect(await screen.findByTestId("agent-trust-unscored")).toHaveTextContent(/not known until its next call/);
+    expect(screen.queryByTestId("agent-trust-cap")).toBeNull();
+  });
+
+  it("Remove Cap whose re-read fails does not keep showing the score the cap held down", async () => {
+    const capped = { ...row, score: 0.3, category: "low", trust_cap: 0.3 };
+    server.use(
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ spiffe_id: sid, frozen: false, trust_cap: null })),
+      http.get(/\/api\/v1\/agents\/spiffe[^/]*invoice-agent$/, () => new HttpResponse("boom", { status: 500 }))
+    );
+    await mount([capped]);
+    fireEvent.click(await screen.findByText("Remove Cap"));
+    expect(await screen.findByTestId("agent-action-notice")).toHaveTextContent(/Could not re-read/);
+    expect(screen.getByTestId("agent-trust-unscored")).toBeInTheDocument();
+    expect(screen.queryByText("0.30")).toBeNull();
+  });
+
+  it("Remove Cap whose re-read fails keeps a score the cap never held down", async () => {
+    const above = { ...row, trust_cap: 0.8 };
+    server.use(
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ spiffe_id: sid, frozen: false, trust_cap: null })),
+      http.get(/\/api\/v1\/agents\/spiffe[^/]*invoice-agent$/, () => new HttpResponse("boom", { status: 500 }))
+    );
+    await mount([above]);
+    fireEvent.click(await screen.findByText("Remove Cap"));
+    await screen.findByTestId("agent-action-notice");
+    expect(screen.queryByTestId("agent-trust-unscored")).toBeNull();
+    expect(screen.getAllByText("0.46").length).toBeGreaterThan(0);
+  });
+
+  it("an agent whose freeze could not be read is shown as unknown, never as not frozen", async () => {
+    const unknown = { ...row, frozen: null, trust_cap: null, controls: "unavailable", score: null, category: "unknown" };
+    await mount([unknown]);
+    expect(await screen.findByTestId("agent-controls-unavailable")).toHaveTextContent(/Freeze state unknown/);
+    // Neither lift is offered for a state nobody knows; the kill switch still is.
+    expect(screen.queryByText("Unfreeze Agent")).toBeNull();
+    expect(screen.queryByText("Remove Cap")).toBeNull();
+    expect(screen.getByText("Freeze Agent")).toBeInTheDocument();
+    const frozenTile = screen.getByText("Frozen").closest(".panel") as HTMLElement;
+    expect(frozenTile).toHaveTextContent(/freeze unknown for 1/);
+    const legend = screen.getAllByRole("list", { name: /Trust Distribution legend/ })[0];
+    expect(within(legend).getByText(/freeze unknown/i).parentElement).toHaveTextContent("1");
   });
 });
 

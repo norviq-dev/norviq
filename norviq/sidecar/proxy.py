@@ -306,8 +306,8 @@ class SidecarProxy:
                 #
                 # Trust level: a cooperative signal, not an attestation. An agent that lies about its
                 # depth under-reports, the same way it could lie about session_id. It bounds RUNAWAY
-                # RECURSION in a cooperating agent, which is what OWASP LLM08 asks for; it is not a
-                # defence against an agent that wants to hide its depth.
+                # RECURSION in a cooperating agent; it is not a defence against an agent that wants to
+                # hide its depth.
                 call_depth = _coerce_depth(data.get("call_depth"))
             with timer.phase("evaluate"):
                 decision = await self._interceptor.intercept(

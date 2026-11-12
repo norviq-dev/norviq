@@ -106,6 +106,23 @@ class TestClassify:
         assert delete.status == CapabilityStatus.DEFENDED
         assert delete.recommendation == ""  # nothing to do
 
+    def test_monitored_when_observed_and_only_would_blocked(self):
+        """A would-block ran. It is not a defence, and "author a rule" is wrong when one is matching."""
+        findings = classify_source(
+            "postgresql", observed_verbs={Verb.DELETE}, monitored_verbs={Verb.DELETE}
+        )
+        delete = next(f for f in findings if f.verb == Verb.DELETE)
+        assert delete.status == CapabilityStatus.MONITORED
+        assert delete.defended is False and delete.monitored is True
+        assert "would-block" in delete.recommendation and "ran" in delete.recommendation
+
+    def test_an_enforced_block_outranks_monitor_on_the_same_verb(self):
+        findings = classify_source(
+            "postgresql", observed_verbs={Verb.DELETE}, defended_verbs={Verb.DELETE},
+            monitored_verbs={Verb.DELETE},
+        )
+        assert next(f for f in findings if f.verb == Verb.DELETE).status == CapabilityStatus.DEFENDED
+
     def test_latent_when_neither_granted_nor_observed(self):
         findings = classify_source("elasticsearch")  # nothing granted/observed/defended
         assert all(f.status == CapabilityStatus.LATENT for f in findings)
@@ -115,9 +132,10 @@ class TestClassify:
         findings = classify_source("elasticsearch", observed_verbs={Verb.READ})
         read = next(f for f in findings if f.verb == Verb.READ)
         assert read.technique is None
-        # destructive verbs carry a real ATLAS id.
+        # destructive verbs carry the technique the shared ATLAS table lists their guarding rule
+        # (llm06_excessive_agency) under. It was a literal AML.T0048 External Harms, out of scope there.
         deletef = classify_source("postgresql", observed_verbs={Verb.DELETE})
-        assert next(f for f in deletef if f.verb == Verb.DELETE).technique == "AML.T0048"
+        assert next(f for f in deletef if f.verb == Verb.DELETE).technique == "AML.T0053"
 
 
 class TestWorstOpenVerb:
@@ -144,6 +162,16 @@ class TestWorstOpenVerb:
             defended_verbs={Verb.WRITE, Verb.DELETE},
         )
         assert worst_open_verb(findings) is None
+
+
+    def test_a_monitored_only_verb_is_still_open(self):
+        """Nothing stopped it, so it drives severity the same as any other open verb."""
+        findings = classify_source(
+            "postgresql", observed_verbs={Verb.DELETE}, monitored_verbs={Verb.DELETE},
+        )
+        worst = worst_open_verb(findings)
+        assert worst is not None and worst.verb == Verb.DELETE
+        assert worst.status == CapabilityStatus.MONITORED
 
 
 class TestVerbRisk:

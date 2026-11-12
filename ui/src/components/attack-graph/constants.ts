@@ -35,6 +35,8 @@ export const KIND_COLORS = {
 /** Status chip label + colors. */
 export const STATUS_META: Record<PathStatus, { label: string; bg: string; color: string }> = {
   exploitable: { label: "EXPLOITABLE", bg: "#3a1414", color: "#ff8fa3" },
+  // Monitor: a policy matched, the calls ran. Amber, never the green of an enforced block.
+  would_block: { label: "WOULD BLOCK", bg: "#3a2a0a", color: "#f5b544" },
   blocked: { label: "BLOCKED", bg: "#0d2a1c", color: "#6ee7b7" },
   unsimulated: { label: "NOT SIMULATED", bg: "#1b2436", color: "#8397b6" }
 };

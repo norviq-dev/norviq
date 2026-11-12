@@ -155,6 +155,36 @@ describe("PolicyPacks page", () => {
     expect(sentNs).toHaveLength(0);
   });
 
+  // The enable confirm said "loads the pack's enforcing rules" in a Monitor namespace, where the engine
+  // logs their matches as would-blocks and blocks nothing.
+  it("the enable confirm in a Monitor namespace says matches are logged, not blocked", async () => {
+    server.use(...handlers("admin", new Set()));
+    server.use(
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({ namespace: "default", sector: "Energy", apply_mode: "enforce", enforcement_mode: "audit", enforcement_mode_source: "namespace" })
+      )
+    );
+    renderPage();
+    fireEvent.click((await screen.findAllByRole("button", { name: "Enable" }))[0]);
+    const modal = await screen.findByTestId("pack-confirm-modal");
+    expect(await screen.findByTestId("pack-confirm-monitor")).toHaveTextContent(/nothing is blocked live/);
+    expect(modal).not.toHaveTextContent(/enforcing rules/);
+  });
+
+  it("CONTROL: the enable confirm in an enforcing namespace keeps 'enforcing rules'", async () => {
+    server.use(...handlers("admin", new Set()));
+    server.use(
+      http.get("/api/v1/settings", () =>
+        HttpResponse.json({ namespace: "default", sector: "Energy", apply_mode: "enforce", enforcement_mode: "block", enforcement_mode_source: "namespace" })
+      )
+    );
+    renderPage();
+    fireEvent.click((await screen.findAllByRole("button", { name: "Enable" }))[0]);
+    const modal = await screen.findByTestId("pack-confirm-modal");
+    await waitFor(() => expect(modal).toHaveTextContent(/loads the pack's enforcing rules/));
+    expect(screen.queryByTestId("pack-confirm-monitor")).toBeNull();
+  });
+
   it("under All-namespaces (aggregate) every pack mutation is DISABLED and prompts for a concrete namespace", async () => {
     mockApp.namespace = "all";
     server.use(...handlers("admin", new Set()));
@@ -185,6 +215,10 @@ describe("PolicyPacks page", () => {
     renderPage();
     await screen.findByText("Energy OT/IT Segmentation");
     expect(screen.getByTestId("pack-dryrun-banner")).toHaveTextContent(/dry-run-only/i);
+    // The control that lifts it is change control -> Live. "Switch it to Enforce" named a mode that does not
+    // exist and read as the enforcement switch, which dry-run-only is not.
+    expect(screen.getByTestId("pack-dryrun-banner")).toHaveTextContent(/change control to Live/i);
+    expect(screen.getByTestId("pack-dryrun-banner")).not.toHaveTextContent(/to Enforce/i);
     expect(screen.getByTestId("pack-toggle-energy-ot")).toBeDisabled();
   });
 

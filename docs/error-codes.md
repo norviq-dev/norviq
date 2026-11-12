@@ -23,10 +23,10 @@ individually described.
 
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
-| API | 107 | `norviq/api/main.py`, `norviq/api/routers/*` |
+| API | 109 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | MCP | 65 | `norviq/mcp/*`, `norviq/api/routers/mcp.py` |
 | WHK | 59 | `webhook/main.go`, `webhook/handler.go`, `webhook/injector_owned.go`, `webhook/controller.go`, `webhook/injector.go` |
-| ENG | 54 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
+| ENG | 55 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | DB | 45 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
 | FLT | 39 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
 | SDK | 40 | `norviq/sdk/*` |
@@ -34,7 +34,7 @@ individually described.
 | SDC | 32 | `norviq/sidecar/*` |
 | AUTH | 29 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py` |
 | AUD | 13 | `norviq/engine/audit_emitter.py`, `norviq/api/audit_retention.py` |
-| GRP | 10 | `norviq/engine/graph/*` |
+| GRP | 18 | `norviq/engine/graph/*` |
 | RED | 12 | `norviq/redteam/*`, `norviq/api/routers/redteam.py` |
 | TEL | 8 | `norviq/telemetry/*` |
 | IDT | 8 | `norviq/engine/identity.py` |
@@ -42,7 +42,7 @@ individually described.
 | SIEM | 6 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **558** (including `*-DEBUG-*` traces). Counted 2026-11-10 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
+Total unique codes: **569** (including `*-DEBUG-*` traces). Counted 2026-11-12 the way the index below is built: every `NRVQ-*` literal in `norviq/**/*.py`, `webhook/*.go` and `ui/src/**`, test files excluded.
 
 ## API
 
@@ -144,6 +144,8 @@ Total unique codes: **558** (including `*-DEBUG-*` traces). Counted 2026-11-10 t
 | NRVQ-API-7147 | `nrvq.api.agent.trust_live_failed` — `PUT /agents/{id}/trust` and the store did not take the change (store calls are cut off at 2 s; every store write is fenced on `agent_trust_owner:<id>`, and retried once under a fresh claim), **503**. `direction=tightening durable=true`: the freeze or cap is committed but NOT confirmed live — the store may still enforce the previous, looser state until the next successful change to this agent or the next API start (`warm_agent_overrides`); alert on it. `direction=loosening durable=true`: the registry took the loosening and the store did not confirm it: the store may have taken it, or holds whatever it held before — the previous, stricter state, unless an earlier change was itself reported NOT confirmed live (then possibly older and looser than the registry); retry, or restart the API. `direction=loosening durable=false`: the store could not be fenced, so nothing was applied. `error="fence: ..."` with `refused` in the answer: a newer change (a stolen freeze, or a later writer) owns the agent: check the agent, the store may hold that change or the state before it. A loosening refused after its commit logs `error="fence: a newer admin write owns the agent"` | `norviq/api/routers/agents.py` |
 | NRVQ-API-7150 | `nrvq.api.agent.trust_lock_release_failed` — releasing an agent's admin lock (`pg_advisory_unlock`) failed, did not answer true, or did not finish within 2 s (`error='TimeoutError: '`), or a statement of the change was cut off (`error="statement abandoned: ..."`: the connection is given up at once) — Postgres stopped answering; the orphaned backend keeps the lock until Postgres ends it, about 30-35 s, and changes to that agent meanwhile answer 7149 "in progress"), so the connection was invalidated instead of going back to the pool, and Postgres dropped the lock with the backend. The request's answer stands. Frequent: look at the database connection | `norviq/api/routers/agents.py` |
 | NRVQ-API-7160 | **`nrvq.api.agent.overrides_warm_skipped`** (ERROR) — the boot warm could not write some frozen or capped agents back (`count=`, `spiffe_ids=` up to 10; `phase=retrying` is logged before it retries them, with a 0.3 s lock wait and 2 s in all, and `phase=unwritten` names those still not written): their admin lock stayed held (for example by a backend whose API node vanished mid-transaction, ended by Postgres after the admin connection's idle timeouts) or their store fence would not take after re-claiming. Every other agent was written; the attempt fails so the retry tries only these, and NRVQ-API-7035 follows if they never take. Until then those agents are enforced as not frozen / uncapped | `norviq/api/routers/agents.py` |
+| NRVQ-API-7161 | `nrvq.api.agents.controls_read_failed` — an agent read (`GET /agents`, `GET /agents/{id}`, the console search) could not read the live freeze and cap from the store (`count=`, `error=`). The rows are still served, with `controls: "unavailable"`, `frozen`, `trust_cap` and `score` null and category `unknown`. Not the registry's durable copy: the engine fails closed when it cannot read the store (NRVQ-DB-9024), so a "not frozen" from that copy could contradict what is enforced | `norviq/api/routers/agents.py` |
+| NRVQ-API-7162 | `nrvq.api.agents.snapshot_read_failed` — the console search could not read the warm `trust:<id>` scores for its agent hits (`count=`, `error=`). The hits show the registry's last score instead; their freeze and cap still come from the store, or are reported unavailable (NRVQ-API-7161) | `norviq/api/routers/agents.py` |
 | NRVQ-API-7149 | `nrvq.api.agent.trust_write_contended` — another admin trust write held this agent for longer than the lock timeout (3 s, or `db_command_timeout` − 2 s when smaller, never under 0.2 s; waited for in-process first, then in Postgres), so `PUT /agents/{id}/trust`, `DELETE /agents/{id}` (`op=delete`) or the reset answered **503** and applied nothing — except a freeze (`live=true`), which claims the agent's store fence without the lock and is applied live, not persisted. That stops writes claimed before it; a change already under way that claims after it replaces it with the state that change commits | `norviq/api/routers/agents.py` |
 
 ## WHK
@@ -348,6 +350,7 @@ table stays unpartitioned for that range and retention pruning gets slower over 
 | NRVQ-ENG-2069 | `nrvq.engine.baseline.supersede_check_failed` — comparing the saved controls with the chart's baseline raised; the chart's baseline is kept as a floor (fail closed) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2070 | `nrvq.opa.legacy_literals_upgraded` (INFO, once per policy key and stored source) — a policy holds a bare `{}`/`set()`/`[]`/`[][_]` that OPA 1.21 rejects, on a line exactly as a 0.2.5-or-earlier generator wrote it, and that line was compiled as the typed empty form (the same value) instead; `shapes` names which. Only code lines are rewritten, never one inside a raw string, and only in a module carrying that generator's header — or, for `allow_names`/`allow_skeletons` and `cap_tools`, its package (`norviq.intent.*`, `norviq.remediation.capability.*`), so a hand-written line there is rewritten too. The stored row is not modified. Regenerating the policy from its source (builder, intent, MCP registry) stores the current form | `norviq/engine/evaluator.py`, `norviq/engine/empty_literals.py` |
 | NRVQ-ENG-2071 | `nrvq.opa.module_rejected` (ERROR, once per policy key and stored source) — OPA refused to compile a policy — a response carrying a compile-stage code (`rego_type_error`, `rego_parse_error`, ...); any other refusal, such as a 413, keeps its own message: `key` is the policy key, `error` is OPA's own message. Every call that policy governs is blocked as `evaluator_error` until it is fixed; this is the line that says which policy and why | `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2072 | `nrvq.engine.builder_graph_unreadable` (WARNING) — a policy's body still hashes to its `# nrvq-builder-hash:` header, but its `# nrvq-builder-graph/v1:` blob does not decode, so the engine cannot tell whether it is a tighten-only rules-mode module. It is composed as an ordinary base policy, by priority, instead of as an overlay. Regenerate the policy from the builder | `norviq/engine/composition.py` |
 | NRVQ-ENG-DEBUG-* | OPA I/O and evaluator debug traces | `norviq/engine/evaluator.py` |
 
 ## UI
@@ -457,7 +460,7 @@ mentions it in a comment is not listed.
 | Component | Codes | Source |
 |---|---|---|
 | REG | NRVQ-REG-5000..5008, 5010..5023 (5016 includes `nrvq.policy.remote_unloaded`, an API replica dropped a policy because a peer deleted it, or because an upsert event arrived for a row that was already gone (`operation=upsert`); 5022 = `nrvq.policy.reloaded`, the embedded engine re-read a policy from Postgres after a `norviq:policy:invalidated` event, with the `enforcement_mode` it now enforces; **5023** = `nrvq.policy.reload_unloaded`, INFO — that event named a policy with no row, so the engine dropped it, as a cold start would; `delete()` publishes the event for this, and `was_loaded=false` means there was nothing to drop. A Postgres error is never read as a missing row: it surfaces as NRVQ-SDC-3022 and the entry is kept); plus NRVQ-REG-9034/9035 (Redis cache-connect backoff exhausted / retrying — see the DB note above) | `norviq/engine/policy_loader.py`, `norviq/api/main.py` |
-| GRP | NRVQ-GRP-11000, 11001, 11010..11017 (11017 = `nrvq.engine.graph.restored`, the lazy snapshot restore that survives a pod restart) | `norviq/engine/graph/*`, `norviq/engine/evaluator.py` |
+| GRP | NRVQ-GRP-11000, 11001, 11010..11025 (11017 = `nrvq.engine.graph.restored`, the lazy snapshot restore that survives a pod restart; **11018** = `nrvq.graph.db_write_failed`, WARNING: a snapshot save could not be written to Postgres, so its calls were merged into the cached copy instead (the builder keeps them and writes them on its next save; a removal is never cached this way); **11019** = `nrvq.graph.cache_publish_failed`, WARNING: the row committed but the cache could not be updated, so the cached key was deleted and readers go to Postgres; **11020** = `nrvq.graph.lock_busy`, WARNING: the namespace's Redis graph lock stayed taken for 5 s, so the save wrote nothing and keeps its calls for the next one; **11021** = `nrvq.graph.cache_fallback_failed`, WARNING: Postgres was down and Redis refused the cached-copy merge too, so neither copy has the calls yet (the builder still holds them); **11022** = `nrvq.graph.session_close_failed`, WARNING: the database session could not be closed after a save that committed (the save stands); **11023** = `nrvq.graph.lock_release_failed`, WARNING: the Redis graph lock could not be released, so other saves wait until its 10 s expiry; **11024** = `nrvq.graph.clock_sync_failed`, WARNING: a save could not read the shared clock (Redis TIME, or Postgres `clock_timestamp()`), so the builder keeps its last offset, or, when `reference_clock=false`, stamps with its own wall clock with no skew bound; **11025** = `nrvq.graph.cache_invalidate_failed`, WARNING: after 11019 the stale cached key could not be deleted either, so readers may be served the older copy for up to 300 s) | `norviq/engine/graph/*`, `norviq/engine/evaluator.py` |
 | AUD | NRVQ-AUD-6000..6008 | `norviq/engine/audit_emitter.py`, `norviq/engine/evaluator.py` |
 | AUD (retention) | NRVQ-AUD-6009 (`nrvq.retention.started`), 6010 (`nrvq.retention.pruned`), 6012 (`nrvq.retention.prune_failed`), 6013 (`nrvq.retention.step_failed` — one table's prune isolated-failed) | `norviq/api/audit_retention.py` (unified background retention pruner) |
 | RED | NRVQ-RED-13000..13009 (13007 = `nrvq.redteam.persist_failed`, 13008 = `suite_concurrent_rejected` (the process-wide `redteam_suite_global_concurrency` cap), 13009 = `nrvq.redteam.retention`) | `norviq/redteam/*`, `norviq/api/routers/redteam.py` |
@@ -491,7 +494,7 @@ NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-
 NRVQ-API-7131, NRVQ-API-7132, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7136, NRVQ-API-7137,
 NRVQ-API-7138, NRVQ-API-7139, NRVQ-API-7140, NRVQ-API-7141, NRVQ-API-7142, NRVQ-API-7143, NRVQ-API-7144,
 NRVQ-API-7145, NRVQ-API-7146, NRVQ-API-7147, NRVQ-API-7149, NRVQ-API-7150, NRVQ-API-7158, NRVQ-API-7159,
-NRVQ-API-7160, NRVQ-API-7460
+NRVQ-API-7160, NRVQ-API-7161, NRVQ-API-7162, NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
 NRVQ-WHK-4007, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,
@@ -509,7 +512,7 @@ NRVQ-ENG-2041, NRVQ-ENG-2042, NRVQ-ENG-2043, NRVQ-ENG-2044, NRVQ-ENG-2045, NRVQ-
 NRVQ-ENG-2048, NRVQ-ENG-2049, NRVQ-ENG-2050, NRVQ-ENG-2051, NRVQ-ENG-2052, NRVQ-ENG-2053, NRVQ-ENG-2054,
 NRVQ-ENG-2055, NRVQ-ENG-2056, NRVQ-ENG-2057, NRVQ-ENG-2058, NRVQ-ENG-2059, NRVQ-ENG-2060, NRVQ-ENG-2061,
 NRVQ-ENG-2062, NRVQ-ENG-2063, NRVQ-ENG-2064, NRVQ-ENG-2065, NRVQ-ENG-2066, NRVQ-ENG-2067, NRVQ-ENG-2068,
-NRVQ-ENG-2069, NRVQ-ENG-2070, NRVQ-ENG-2071, NRVQ-ENG-DEBUG-1, NRVQ-ENG-DEBUG-2, NRVQ-ENG-DEBUG-3, NRVQ-ENG-DEBUG-4,
+NRVQ-ENG-2069, NRVQ-ENG-2070, NRVQ-ENG-2071, NRVQ-ENG-2072, NRVQ-ENG-DEBUG-1, NRVQ-ENG-DEBUG-2, NRVQ-ENG-DEBUG-3, NRVQ-ENG-DEBUG-4,
 NRVQ-ENG-DEBUG-5, NRVQ-ENG-DEBUG-INPUT, NRVQ-ENG-DEBUG-OPA, NRVQ-ENG-DEBUG-OPA-IN, NRVQ-ENG-DEBUG-QUERY
 
 NRVQ-MCP-5000, NRVQ-MCP-5001, NRVQ-MCP-5002, NRVQ-MCP-5003, NRVQ-MCP-5004, NRVQ-MCP-5005, NRVQ-MCP-5006,
@@ -566,7 +569,8 @@ NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-
 NRVQ-AUD-6007, NRVQ-AUD-6008, NRVQ-AUD-6009, NRVQ-AUD-6010, NRVQ-AUD-6012, NRVQ-AUD-6013
 
 NRVQ-GRP-11000, NRVQ-GRP-11001, NRVQ-GRP-11010, NRVQ-GRP-11011, NRVQ-GRP-11012, NRVQ-GRP-11013, NRVQ-GRP-11014,
-NRVQ-GRP-11015, NRVQ-GRP-11016, NRVQ-GRP-11017
+NRVQ-GRP-11015, NRVQ-GRP-11016, NRVQ-GRP-11017, NRVQ-GRP-11018, NRVQ-GRP-11019, NRVQ-GRP-11020,
+NRVQ-GRP-11021, NRVQ-GRP-11022, NRVQ-GRP-11023, NRVQ-GRP-11024, NRVQ-GRP-11025
 
 NRVQ-RED-13000, NRVQ-RED-13001, NRVQ-RED-13002, NRVQ-RED-13003, NRVQ-RED-13004, NRVQ-RED-13005, NRVQ-RED-13006,
 NRVQ-RED-13007, NRVQ-RED-13008, NRVQ-RED-13009, NRVQ-RED-13010, NRVQ-RED-13011

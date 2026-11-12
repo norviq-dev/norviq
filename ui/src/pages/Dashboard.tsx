@@ -13,7 +13,8 @@ import {
   fetchRedteamLatest,
   fetchTopBlocked,
   fetchVolume,
-  type RedteamLatest
+  type RedteamLatest,
+  type VolumeBucket
 } from "../api/client";
 import { fleetEnabled, fetchFleetAuditSummary, fetchFleetAgents } from "../api/fleet";
 import { RemoteScopedPanel } from "../components/common/RemoteClusterNotice";
@@ -47,8 +48,10 @@ const barsSkeleton = (
   </div>
 );
 import { useApi } from "../hooks/useApi";
+import { trustDistribution } from "../lib/agentTrust";
 import { exportCsv } from "../lib/csv";
 import { fmtTime } from "../lib/format";
+import { verdictFromPosture } from "../lib/posture";
 import { useApp } from "../store/AppContext";
 
 type AuditStats = {
@@ -78,7 +81,7 @@ type AuditRecord = {
 
 // `synthetic` marks a probe/eval/test identity (backend /agents flag). The Overview trust donut
 // excludes them by default so it reconciles with the asset/attack graph, which hides exactly these probes.
-type Agent = { category?: string; synthetic?: boolean };
+type Agent = { category?: string; synthetic?: boolean; controls?: "live" | "unavailable"; frozen?: boolean | null };
 
 // MONITOR MODE: the two block feeds count ENFORCED blocks, and a monitored namespace produces no POLICY
 // ones. `_apply_posture` rewrites every would-block/would-escalate to `decision="audit"` with a
@@ -318,7 +321,7 @@ export function Dashboard() {
     () => fetchTopBlocked(timeRange, selectedNamespace),
     [timeRange, selectedNamespace]
   );
-  const volume = useApi<Array<{ time: string; allow: number; block: number }>>(
+  const volume = useApi<VolumeBucket[]>(
     () => fetchVolume(timeRange, selectedNamespace),
     [timeRange, selectedNamespace]
   );
@@ -375,8 +378,12 @@ export function Dashboard() {
   // blocks behind that 0, and told the operator matched rules "do NOT enforce" when they do.
   // Prefer the engine-accurate signal; fall back to the settings posture only until coverage answers.
   const namespaceMode = coverageUsable ? coverage.data?.namespace_mode : undefined;
+  // The fallback goes through lib/posture: `posture.mode === "audit"` alone also matched an audit the
+  // namespace only inherits from the cluster default, the exact case the paragraph above is about, so until
+  // coverage answered (or when it failed) the tile still said "Would-block" over real enforced blocks.
   const monitorScope =
-    selectedNamespace !== "all" && (namespaceMode ? namespaceMode === "audit" : posture.mode === "audit");
+    selectedNamespace !== "all" &&
+    (namespaceMode ? namespaceMode === "audit" : verdictFromPosture(posture, selectedNamespace) === "monitor");
   // …and the STRONGER fact: the engine's own field actually answered, and it said Monitor. The fallback
   // above is fine for a LABEL ("Would-block (24h)") — a label the operator reads together with the
   // coverage card's own "could not be read" state. It is NOT enough for a sentence that explains what the
@@ -444,6 +451,24 @@ export function Dashboard() {
   const blockRate = useHub
     ? hubTotals.rate
     : Math.round((monitorScope ? stats.data?.would_block_rate_pct : stats.data?.block_rate_pct) ?? 0);
+  // The OTHER population in the same window. The headline follows the namespace's posture NOW, but the
+  // window is history: a namespace flipped Block -> Monitor an hour ago still has the real blocks from
+  // before the flip, and one flipped Monitor -> Block still has its would-blocks. Picking one population by
+  // the current posture made the other disappear from the headline on every flip, so it is always shown
+  // as a second line when it is non-zero. /audit/stats returns both counts for every scope.
+  const otherBlocked = useHub ? 0 : (monitorScope ? stats.data?.blocked : stats.data?.would_blocked) ?? 0;
+  const otherRate = useHub
+    ? 0
+    : Math.round((monitorScope ? stats.data?.block_rate_pct : stats.data?.would_block_rate_pct) ?? 0);
+  const blockedTrend = monitorScope
+    ? otherBlocked > 0
+      ? `Monitor now · also ${otherBlocked.toLocaleString()} enforced block${otherBlocked === 1 ? "" : "s"} in this window`
+      : "Monitor mode — not blocked live"
+    : otherBlocked > 0
+    ? `also ${otherBlocked.toLocaleString()} would-block${otherBlocked === 1 ? "" : "s"} (logged, not blocked) in this window`
+    : undefined;
+  const blockRateTrend =
+    otherBlocked > 0 ? (monitorScope ? `also ${otherRate}% enforced blocks` : `also ${otherRate}% would-block (logged, not blocked)`) : undefined;
   // Engine (OPA-eval) faults — fail-closed, NOT policy decisions. Surfaced as a distinct signal.
   const engineErrors = stats.data?.engine_errors ?? 0;
   // First paint — no data resolved yet. Show skeletons instead of flashing 0/0/0 + a half-drawn donut.
@@ -462,15 +487,15 @@ export function Dashboard() {
   const trust = useMemo(() => {
     // Trust IS available per cluster from the hub (FleetAgent.trust_category), so the donut stays accurate
     // when scoped to a remote cluster; locally it's derived from the served cluster's agents.
-    const cats = useHub
-      ? (Array.isArray(hubAgents.data) ? hubAgents.data : []).map((a) => a.trust_category ?? "")
-      // Exclude synthetic/probe identities so the donut counts the SAME real identities the
-      // asset/attack graph shows (it default-hides these probes). Reconciles the two Overview surfaces.
-      : (Array.isArray(agents.data) ? agents.data : []).filter((a) => !a.synthetic).map((a) => a.category ?? "");
-    return ["high", "medium", "low", "frozen"].map((name) => ({
-      name,
-      value: cats.filter((c) => c.toLowerCase() === name).length
-    }));
+    // The same slices as the Agent Monitor's donut (lib/agentTrust.ts): an agent whose freeze could not be
+    // read is its own "freeze unknown" slice, never one of the four bands.
+    return trustDistribution(
+      useHub
+        ? (Array.isArray(hubAgents.data) ? hubAgents.data : []).map((a) => ({ category: a.trust_category ?? "" }))
+        // Exclude synthetic/probe identities so the donut counts the SAME real identities the
+        // asset/attack graph shows (it default-hides these probes). Reconciles the two Overview surfaces.
+        : (Array.isArray(agents.data) ? agents.data : []).filter((a) => !a.synthetic)
+    );
   }, [useHub, hubAgents.data, agents.data]);
 
   // Posture = overall real policy coverage %; category bars = real per-category coverage scores.
@@ -635,9 +660,15 @@ export function Dashboard() {
                 label={monitorScope ? `Would-block (${timeRange})` : `Blocked (${timeRange})`}
                 value={blockedToday}
                 color="#ff3b5c"
-                trend={monitorScope ? "Monitor mode — not blocked live" : undefined}
+                trend={blockedTrend}
               />
-              <KPICard testid="kpi-blockrate" label={monitorScope ? `Would-block Rate % (${timeRange})` : `Block Rate % (${timeRange})`} value={blockRate} color="#ffb020" />
+              <KPICard
+                testid="kpi-blockrate"
+                label={monitorScope ? `Would-block Rate % (${timeRange})` : `Block Rate % (${timeRange})`}
+                value={blockRate}
+                color="#ffb020"
+                trend={blockRateTrend}
+              />
               {/* Latency isn't kept per-cluster at the hub — show "—" rather than the served cluster's number. */}
               {useHub ? (
                 <div className="panel kpi" style={{ background: "var(--bg-surface)", boxShadow: "var(--shadow-card)" }}>

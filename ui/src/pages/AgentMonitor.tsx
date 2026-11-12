@@ -2,21 +2,32 @@
 // behavior signals and recommendations, plus a per-agent drill-down (tool usage by risk tier, trust
 // history, and freeze/unfreeze controls). Namespace-scoped.
 
-import { ArrowLeft, RefreshCw, RotateCcw, Snowflake, Sun } from "lucide-react";
+import { ArrowLeft, RefreshCw, RotateCcw, Snowflake, Sun, Unlock } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { apiGet, apiSend, fetchAgentToolUsage, fetchAgentTrustHistory } from "../api/client";
+import {
+  apiGet,
+  fetchAgent,
+  fetchAgentToolUsage,
+  fetchAgentTrustHistory,
+  freezeAgent,
+  liftAgentControls,
+  resetAgentTrustHistory,
+  type AgentTrust
+} from "../api/client";
 import { CategoryBars } from "../components/charts/CategoryBars";
 import { VolumeChart } from "../components/charts/VolumeChart";
 import { DataTable, type Column } from "../components/common/DataTable";
 import { DonutChart } from "../components/common/DonutChart";
 import { KitButton } from "../components/common/KitButton";
+import { Modal } from "../components/common/Modal";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { timeAgo } from "../lib/d3-helpers";
 import { StatTile } from "../components/common/StatTile";
-import { TrustBadge, trustCategory } from "../components/common/TrustBadge";
-import { useApi, invalidateApiCache } from "../hooks/useApi";
+import { TrustBadge } from "../components/common/TrustBadge";
+import { useApi } from "../hooks/useApi";
+import { controlsUnavailable, FREEZE_UNKNOWN, invalidateTrustCaches, isFrozen, trustDistribution } from "../lib/agentTrust";
 import { useApp } from "../store/AppContext";
 
 // Tool risk-tier → bar colour (matches the graph RISK palette). Used to colour the Tool Usage
@@ -32,8 +43,20 @@ type AgentRow = {
   spiffe_id: string;
   agent_class?: string;
   namespace?: string;
-  score: number;
+  /** `null` for an agent whose freeze was lifted and that has not called since (category `unscored`). */
+  score: number | null;
   category: string;
+  /**
+   * The admin freeze, as the engine enforces it (read live by the API on every request). The Unfreeze
+   * control keys on this, not on the category or a score of 0: those came from a trust snapshot, which
+   * dropped a freeze about 30 s after it was set and brought a lifted one back. `null` when the API could not
+   * read the trust store (`controls: "unavailable"`): not known, and never to be shown as "not frozen".
+   */
+  frozen?: boolean | null;
+  /** A durable, tighten-only cap: the engine uses min(computed, cap). `null` when there is none, or unknown. */
+  trust_cap?: number | null;
+  /** "live" when the freeze and cap were read from the store the engine enforces, "unavailable" when not. */
+  controls?: "live" | "unavailable";
   /**
    * A probe / eval / red-team identity rather than a real agent.
    *
@@ -200,6 +223,16 @@ function TrustHistory({
   );
 }
 
+const fmtScore = (v: unknown) => (v == null || Number.isNaN(Number(v)) ? "—" : Number(v).toFixed(2));
+
+// The trust fields a re-read of one agent replaces. violation_count is not among them: GET /agents/{id}
+// serves it from the 30 s snapshot, where it is always 0, while the list carries the registry's real count.
+const TRUST_FIELDS = ["score", "category", "signals", "dominant_signal", "recommendation", "frozen", "trust_cap", "controls"] as const;
+
+/** A score the trust store held at `cap` (the calculator stores round(min(computed, cap), 4)). */
+const heldByCap = (score: number | null | undefined, cap: number | null | undefined) =>
+  typeof score === "number" && typeof cap === "number" && score >= cap - 1e-4;
+
 export function AgentMonitor() {
   const { namespace, timeRange } = useApp();
   const [selected, setSelected] = useState<AgentRow | null>(null);
@@ -252,41 +285,94 @@ export function AgentMonitor() {
     [scoped, showSynthetic]
   );
 
-  const trust = useMemo(
-    () =>
-      ["high", "medium", "low", "frozen"].map((name) => ({
-        name,
-        value: rows.filter((a) => (a.category ?? "").toLowerCase() === name).length
-      })),
-    [rows]
-  );
+  const trust = useMemo(() => trustDistribution(rows), [rows]);
+  // Agents whose freeze could not be read. They are not counted as frozen or as not frozen.
+  const freezeUnknown = useMemo(() => rows.filter(controlsUnavailable).length, [rows]);
 
-  const updateTrust = async (id: string, score: number) => {
-    setActionError(null);
+  // A successful trust action that still has something to say (what a reset cleared, or a lift whose
+  // re-read failed). Not an alert: the action itself succeeded.
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+
+  /** Patch one agent everywhere it is shown: the FULL fleet (agents.data — not `rows`, which is a strict
+   *  subset under a ?class= deep-link, and setData replaces the whole list) and the open detail. */
+  const patchAgent = (id: string, patch: Partial<AgentRow>) => {
+    agents.setData((agents.data ?? []).map((a) => (a.spiffe_id === id ? { ...a, ...patch } : a)));
+    // setData only updates React state; the module caches (60s TTL) still hold the old row, here and on the
+    // Overview's trust donut, so a remount within the window would serve it. Bust every one that shows trust.
+    invalidateTrustCaches();
+    setSelected((cur) => (cur && cur.spiffe_id === id ? { ...cur, ...patch } : cur));
+  };
+
+  /** Re-read one agent's trust after a lift: its score is whatever the engine now computes, which the
+   *  console cannot know in advance (the old code painted 0.8 here, the value of the cap it had just set). */
+  const reread = async (id: string, fallback: Partial<AgentRow>, done: string) => {
     try {
-      await apiSend(`/api/v1/agents/${encodeURIComponent(id)}/trust`, "PUT", { score });
-      // Read-modify-write the FULL fleet (agents.data), not `rows` — which is a strict subset
-      // when a ?class= deep-link filter is active. setData below fully REPLACES agents.data, so building
-      // `next` from the filtered `rows` would drop every other agent until the 60s refetch (clearing the
-      // filter would then show only the one class and the StatTiles would undercount). The
-      // (a.spiffe_id === id) predicate still mutates only the frozen/reset agent.
-      const next = (agents.data ?? []).map((a) =>
-        a.spiffe_id === id
-          ? { ...a, score, category: score === 0 ? "frozen" : trustCategory(score) }
-          : a
-      );
-      agents.setData(next);
-      // setData only updates React state — the module cache (60s TTL) still holds the pre-freeze
-      // score, so an unmount/remount within the window served the stale list (freeze looked reverted). Bust it.
-      invalidateApiCache("agent-monitor:");
-      if (selected?.spiffe_id === id) {
-        setSelected({ ...selected, score, category: score === 0 ? "frozen" : trustCategory(score) });
-      }
+      const fresh: AgentTrust = await fetchAgent(id);
+      const patch: Partial<AgentRow> = {};
+      for (const k of TRUST_FIELDS) if (k in fresh) (patch as Record<string, unknown>)[k] = fresh[k];
+      patchAgent(id, patch);
     } catch (e) {
-      // Surface the failure instead of swallowing it (backend requires admin — apiSend throws on
-      // a 403 !ok — plus network/5xx). Without this the Freeze/Reset buttons look like dead controls.
-      setActionError((e as Error).message || "Trust update failed");
+      patchAgent(id, fallback);
+      setActionNotice(`${done} Could not re-read its trust (${(e as Error).message || "request failed"}); Refresh to see it.`);
     }
+  };
+
+  const run = async (action: () => Promise<void>, failure: string) => {
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      await action();
+    } catch (e) {
+      // Surface the failure instead of swallowing it (backend requires admin — apiSend throws on a 403 —
+      // plus network/5xx). Without this the trust buttons look like dead controls.
+      setActionError((e as Error).message || failure);
+    }
+  };
+
+  // The agent and action waiting on the operator's confirm. Freeze blocks every call the agent makes, and the
+  // history reset cannot be undone: neither runs on one click.
+  const [confirming, setConfirming] = useState<{ action: "freeze" | "reset"; row: AgentRow } | null>(null);
+
+  const freeze = (row: AgentRow) =>
+    run(async () => {
+      await freezeAgent(row.spiffe_id);
+      // A freeze is fully known: the engine scores a frozen agent 0 and a freeze clears any cap.
+      patchAgent(row.spiffe_id, {
+        frozen: true, trust_cap: null, controls: "live", score: 0, category: "frozen", recommendation: "freeze"
+      });
+    }, "Freeze failed");
+
+  /** Unfreeze, or remove a cap: one request, PUT score 1.0, which clears both and adds nothing. */
+  const lift = (row: AgentRow, done: string) =>
+    run(async () => {
+      // If the re-read fails: a score taken under a freeze, or held at the cap just removed, is not the score
+      // the engine will use now (the API drops both the same way). Any other score stays.
+      const stale = isFrozen(row) || heldByCap(row.score, row.trust_cap);
+      await liftAgentControls(row.spiffe_id);
+      await reread(
+        row.spiffe_id,
+        stale
+          ? { frozen: false, trust_cap: null, controls: "live", score: null, category: "unscored", recommendation: "" }
+          : { frozen: false, trust_cap: null, controls: "live" },
+        done
+      );
+    }, "Trust update failed");
+
+  const resetHistory = (row: AgentRow) =>
+    run(async () => {
+      const r = await resetAgentTrustHistory(row.spiffe_id);
+      const kept = r.frozen ? " The freeze stays in place." : r.trust_cap != null ? ` The cap at ${r.trust_cap.toFixed(2)} stays in place.` : "";
+      setActionNotice(
+        `Behavior record reset: ${r.history_entries_cleared} decision${r.history_entries_cleared === 1 ? "" : "s"} ` +
+          `cleared. Its trust is recomputed from its next call.${kept}`
+      );
+    }, "Behavior record reset failed");
+
+  const confirmAction = () => {
+    if (!confirming) return;
+    const { action, row } = confirming;
+    setConfirming(null);
+    void (action === "freeze" ? freeze(row) : resetHistory(row));
   };
 
   // Real per-agent insights from audit_log, fetched when an agent is selected. Honor the header's
@@ -363,12 +449,22 @@ export function AgentMonitor() {
     {
       key: "score",
       title: "Trust Score",
-      render: (v) => <span className="mono">{Number(v).toFixed(2)}</span>
+      render: (v) => <span className="mono">{fmtScore(v)}</span>
     },
     {
       key: "category",
       title: "Tier",
-      render: (v) => <TrustBadge category={String(v)} pulse={String(v).toLowerCase() === "low"} />
+      // The cap is shown beside the band: it is a durable control, and it was invisible.
+      render: (v, r) => (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <TrustBadge category={String(v)} pulse={String(v).toLowerCase() === "low"} />
+          {r.trust_cap != null && (
+            <span className="mono muted" style={{ fontSize: 11 }} data-testid="agent-row-cap">
+              cap {Number(r.trust_cap).toFixed(2)}
+            </span>
+          )}
+        </span>
+      )
     },
     // "Behavior" column removed: it unconditionally rendered "Normal" for every agent (a not-yet-built
     // Phase-3 feature) sitting next to real Trust/Violations telemetry, reading as fabricated live data.
@@ -447,8 +543,13 @@ export function AgentMonitor() {
             />
             <StatTile
               label="Frozen"
-              value={agentsUnreadable ? "—" : rows.filter((a) => a.category === "frozen").length}
+              value={agentsUnreadable ? "—" : rows.filter(isFrozen).length}
               color="var(--text-muted)"
+              sub={
+                !agentsUnreadable && freezeUnknown > 0
+                  ? `${FREEZE_UNKNOWN} for ${freezeUnknown}: the trust store could not be read`
+                  : undefined
+              }
             />
             <StatTile
               label="Low Trust"
@@ -562,9 +663,38 @@ export function AgentMonitor() {
                 <span className="k">Current trust</span>
                 <span>
                   <TrustBadge category={selected.category} />{" "}
-                  <span className="mono">{selected.score.toFixed(2)}</span>
+                  <span className="mono">{fmtScore(selected.score)}</span>
+                  {(selected.category ?? "").toLowerCase() === "unscored" && (
+                    <span className="muted" style={{ fontSize: 12 }} data-testid="agent-trust-unscored">
+                      {" "}
+                      (not known until its next call: the last score was taken under a freeze or a cap that has
+                      since been lifted)
+                    </span>
+                  )}
                 </span>
               </div>
+              {controlsUnavailable(selected) && (
+                <div
+                  role="status"
+                  data-testid="agent-controls-unavailable"
+                  style={{ margin: "8px 0", fontSize: 12.5, lineHeight: 1.6, color: "var(--warning, #f5a623)" }}
+                >
+                  Freeze state unknown: the trust store could not be read, so this console cannot say whether
+                  the agent is frozen or capped. While the engine cannot read the store either, it treats the
+                  agent as frozen and blocks every call. Refresh once the store is back.
+                </div>
+              )}
+              {selected.trust_cap != null && !isFrozen(selected) && (
+                <div className="kv" data-testid="agent-trust-cap">
+                  <span className="k">Trust cap</span>
+                  <span>
+                    <span className="mono">capped at {Number(selected.trust_cap).toFixed(2)}</span>{" "}
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      (the engine uses the lower of this and the computed score)
+                    </span>
+                  </span>
+                </div>
+              )}
               <div className="kv">
                 <span className="k">Violations</span>
                 <span>{selected.violation_count ?? 0}</span>
@@ -589,36 +719,65 @@ export function AgentMonitor() {
                 <KitButton variant="ghost" icon={ArrowLeft} onClick={() => setSelected(null)}>
                   Back to all agents
                 </KitButton>
-                {selected.category === "frozen" || selected.score === 0 ? (
-                  // A frozen agent's one meaningful action is to UNFREEZE (restore trust) — resetting the score
-                  // of a frozen agent is a no-op-looking dead end, so swap the Freeze control for an explicit
-                  // Unfreeze rather than leaving the operator with only "Reset Trust" to guess at.
+                {controlsUnavailable(selected) ? (
+                  // The state is not known, so neither Unfreeze nor Remove Cap is offered. Freeze stays: the
+                  // kill switch is applied live even when the registry cannot be written.
+                  <KitButton
+                    variant="destructive"
+                    icon={Snowflake}
+                    onClick={() => setConfirming({ action: "freeze", row: selected })}
+                  >
+                    Freeze Agent
+                  </KitButton>
+                ) : isFrozen(selected) ? (
+                  // A frozen agent's one meaningful action is to UNFREEZE. It sends score 1.0, which lifts the
+                  // freeze and adds nothing: the old 0.8 installed a durable, invisible cap at 0.8.
                   <KitButton
                     variant="primary"
                     icon={Sun}
-                    onClick={() => updateTrust(selected.spiffe_id, 0.8)}
+                    onClick={() => void lift(selected, "Unfrozen.")}
                   >
                     Unfreeze Agent
                   </KitButton>
                 ) : (
                   <>
+                    {selected.trust_cap != null && (
+                      <KitButton
+                        variant="secondary"
+                        icon={Unlock}
+                        onClick={() => void lift(selected, "Cap removed.")}
+                      >
+                        Remove Cap
+                      </KitButton>
+                    )}
+                    {/* POST /trust/reset: clears the behavioural history the score is computed from. The old
+                        "Reset Trust" sent PUT 0.8, which reset nothing and capped the agent at 0.8. */}
                     <KitButton
                       variant="primary"
                       icon={RotateCcw}
-                      onClick={() => updateTrust(selected.spiffe_id, 0.8)}
+                      onClick={() => setConfirming({ action: "reset", row: selected })}
                     >
-                      Reset Trust
+                      Reset Behavior Record
                     </KitButton>
                     <KitButton
                       variant="destructive"
                       icon={Snowflake}
-                      onClick={() => updateTrust(selected.spiffe_id, 0)}
+                      onClick={() => setConfirming({ action: "freeze", row: selected })}
                     >
                       Freeze Agent
                     </KitButton>
                   </>
                 )}
               </div>
+              {actionNotice && (
+                <div
+                  role="status"
+                  data-testid="agent-action-notice"
+                  style={{ marginTop: 12, fontSize: 12.5, color: "var(--text-secondary)", wordBreak: "break-word" }}
+                >
+                  {actionNotice}
+                </div>
+              )}
               {actionError && (
                 // Failed freeze/reset feedback — the control surfaces 403/network/5xx errors near the buttons.
                 <div
@@ -632,6 +791,45 @@ export function AgentMonitor() {
           </div>
         )}
       </div>
+      {confirming && (
+        <Modal
+          danger
+          data-testid="agent-trust-confirm"
+          onClose={() => setConfirming(null)}
+          title={confirming.action === "freeze" ? "Freeze this agent?" : "Reset this agent's behavior record?"}
+          actions={
+            <>
+              <KitButton variant="ghost" onClick={() => setConfirming(null)}>
+                Cancel
+              </KitButton>
+              <KitButton
+                variant="destructive"
+                icon={confirming.action === "freeze" ? Snowflake : RotateCcw}
+                data-testid="agent-trust-confirm-submit"
+                onClick={confirmAction}
+              >
+                {confirming.action === "freeze" ? "Freeze" : "Reset record"}
+              </KitButton>
+            </>
+          }
+        >
+          <div className="mono" style={{ fontSize: 12, wordBreak: "break-all", marginBottom: 10 }}>
+            {confirming.row.spiffe_id}
+          </div>
+          {confirming.action === "freeze" ? (
+            <p style={{ fontSize: 13, lineHeight: 1.5, margin: 0 }}>
+              Every tool call this agent makes is blocked until it is unfrozen. Namespace monitor mode does not soften a
+              freeze. Freezing also removes any trust cap.
+            </p>
+          ) : (
+            <p style={{ fontSize: 13, lineHeight: 1.5, margin: 0 }}>
+              Deletes its recent decision history and learned profile (known tools, baselines), so its trust is
+              recomputed from its next call. This cannot be undone. A freeze or a trust cap stays in place, and the
+              violation count and audit log are kept.
+            </p>
+          )}
+        </Modal>
+      )}
     </div>
   );
 }

@@ -764,3 +764,35 @@ def test_destructive_sql_through_a_run_qualified_read_is_refused_twice_over(
     assert (decision, rule_id) == ("block", "deny_sql_injection"), (
         f"{tool_name} {params} was not refused by {policy_name}"
     )
+
+
+# --- which names let the payload decide the verb -----------------------------------------------------
+#
+# The dry runs replay audit rows that kept no argument values. A predicate on `derived.verb` is then a
+# predicate on the arguments too, for exactly the names where `classify_tool` reads the payload.
+# `verb_reads_payload` states that set from the name alone, so it is held to `classify_tool` itself:
+# a name it calls name-only must classify the same under every payload, and a name it flags must have
+# some payload that moves the verb.
+
+_PAYLOADS = (None, {}, {"q": "drop table orders"}, {"q": "update t set a = 1"}, {"q": "select 1"},
+             {"url": "https://example.com"}, {"to": "someone@example.com"})
+
+
+@pytest.mark.parametrize("name", [
+    "acme_widget", "run_query", "execute_query", "run_update", "search_kb", "send_email",
+    "delete_record", "open_breaker", "run_report", "run", "query", "export_data", "get_customer",
+    "widget_sync",
+])
+def test_verb_reads_payload_agrees_with_classify_tool(name: str) -> None:
+    from norviq.engine.capability import verb_reads_payload
+
+    verbs = {classify_tool(name, payload)[0] for payload in _PAYLOADS}
+    assert verb_reads_payload(name) is (len(verbs) > 1), (name, verbs)
+
+
+def test_an_unresolved_name_takes_its_verb_from_the_payload() -> None:
+    from norviq.engine.capability import verb_reads_payload
+
+    assert verb_reads_payload("acme_widget") is True
+    assert verb_reads_payload("run_query") is True
+    assert verb_reads_payload("search_kb") is False

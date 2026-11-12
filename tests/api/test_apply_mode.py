@@ -64,6 +64,11 @@ def test_apply_rejected_when_dry_run_only():
     resp = _client("dry_run_only").post("/api/v1/policies/default/finance-agent/apply", json=_BODY, headers=_admin())
     assert resp.status_code == 409
     assert "dry-run-only" in resp.json()["detail"]
+    # The console shows this detail verbatim. Dry-run-only freezes policy APPLIES (change control), not
+    # enforcement, and the control that lifts it is change control -> Live on Target Settings. "re-enable
+    # enforcement in Settings" named the wrong control on a screen that no longer holds it.
+    assert "change control to Live in Target Settings" in resp.json()["detail"]
+    assert "re-enable enforcement" not in resp.json()["detail"]
 
 
 def test_apply_allowed_when_enforce():

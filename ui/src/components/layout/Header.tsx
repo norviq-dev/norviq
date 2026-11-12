@@ -25,6 +25,8 @@ import {
 } from "../../api/client";
 import { fleetEnabled } from "../../api/fleet";
 import { useApi } from "../../hooks/useApi";
+import { controlsUnavailable, onTrustCachesInvalidated } from "../../lib/agentTrust";
+import { verdictFromSettings } from "../../lib/posture";
 import { TimeRange, useApp } from "@/store/AppContext";
 
 type Dropdown = "cluster" | "inbox" | null;
@@ -38,17 +40,29 @@ type InboxPayload = {
   errors: string[];
 };
 type ToolResult = { tool_name?: string; decision?: string | null; timestamp?: string };
-type AgentResult = { spiffe_id?: string; agent_class?: string; score?: number; trust_score?: number };
+// `trust_score` is null for an agent whose freeze or cap was lifted and that has not called since; trustLabel
+// says "unknown". `frozen` and `trust_cap` are the admin controls from /api/v1/search (routers/search.py), read
+// the way /agents reads them; `controls: "unavailable"` (frozen null) when the trust store could not be read.
+type AgentResult = {
+  spiffe_id?: string;
+  agent_class?: string;
+  score?: number | null;
+  trust_score?: number | null;
+  frozen?: boolean | null;
+  trust_cap?: number | null;
+  controls?: "live" | "unavailable";
+};
 /** The /agents fields the bell's alert counts need. `synthetic` and `category` are both emitted by
  *  agents.py `_agent_row` (on the hot AND the cold-registry path); `synthetic` is missing from client.ts's
  *  `SearchAgent`, which is why tsc never flagged the bell reading past it — declared here so this component
  *  reads the same two fields every other consumer of /agents does. (Flagged to the client.ts owner.) */
 type InboxAgentRow = {
   spiffe_id?: string;
-  score?: number;
+  score?: number | null;
   trust_score?: number;
   category?: string;
   synthetic?: boolean;
+  controls?: "live" | "unavailable";
 };
 // CONTRACT B: the server deliberately sends NO mode for a policy hit (routers/search.py: the loader's
 // in-memory entry has no enforcement_mode and it refuses to fabricate one). So the field is optional AND
@@ -73,10 +87,16 @@ function failureText(error: unknown): string {
   return detail;
 }
 
-/** "trust 0.87" for a scored agent, "trust unknown" for one the registry has never scored. */
+/** "trust 0.87" for a scored agent, "trust unknown" for one the registry has never scored, "frozen" for a frozen
+ *  one (it used to print the pre-freeze score), "· capped" when an admin cap holds the score down, and "freeze
+ *  state unknown" when the trust store could not be read (the engine then blocks the agent's calls). */
 function trustLabel(agent: AgentResult): string {
+  if (controlsUnavailable(agent)) return "freeze state unknown";
+  if (agent.frozen) return "frozen";
   const score = typeof agent.score === "number" ? agent.score : agent.trust_score;
-  return typeof score === "number" && Number.isFinite(score) ? `trust ${score.toFixed(2)}` : "trust unknown";
+  if (typeof score !== "number" || !Number.isFinite(score)) return "trust unknown";
+  const capped = typeof agent.trust_cap === "number" && score >= agent.trust_cap ? " · capped" : "";
+  return `trust ${score.toFixed(2)}${capped}`;
 }
 
 // `cancel` exists for unmount. Without it the search effect's cleanup could abort an in-flight request
@@ -287,6 +307,14 @@ export function Header({
           errors.push(
             `Low-trust agents: ${untiered} of ${alerting.length} agents carried no trust category — the counts below are a floor.`
           );
+        // The trust store could not be read for these. They are neither frozen nor not frozen, and the engine
+        // blocks every call it cannot read the store for, so counting them as "not frozen" would be the same
+        // inversion.
+        const unknownFreeze = alerting.filter(controlsUnavailable).length;
+        if (unknownFreeze > 0)
+          errors.push(
+            `Frozen agents: the trust store could not be read for ${unknownFreeze} of ${alerting.length} agents, so their freeze state is unknown — the counts below are a floor.`
+          );
       }
 
       const payload: InboxPayload = { blockedCount, lowTrustCount, frozenCount, checkedAt: new Date(), errors };
@@ -305,6 +333,18 @@ export function Header({
       if (inboxRequestRef.current === requestId) setInboxLoading(false);
     }
   }, [isRemote, selectedNamespace]);
+
+  // A freeze, an unfreeze or a cap change (Agent Monitor) makes the frozen and low-trust counts stale. Drop the
+  // remembered check and the counts on the badge; the next open of the bell checks again. They used to stay
+  // for up to a minute after the change.
+  useEffect(
+    () =>
+      onTrustCachesInvalidated(() => {
+        inboxCacheRef.current = null;
+        setInboxData(null);
+      }),
+    []
+  );
 
   // The bell describes the SELECTED scope, but loadInbox only ever runs on a click — so after a scope
   // switch the previous namespace's counts stayed on the badge on every page (a "7" from `payments` read
@@ -356,7 +396,21 @@ export function Header({
   // purpose — "don't imply monitor across the fleet" — which is not an answer about any namespace), and
   // never under a remote label. The cacheKey is the Overview's key VERBATIM so both share one entry.
   const settingsSaysMonitor = postureForScope && posture.mode === "audit";
-  const canConfirmEngineMode = !isRemote && settingsSaysMonitor && selectedNamespace !== "all";
+  // The answer lib/posture gives every other page, when the API says where the "audit" came from
+  // (`enforcement_mode_source`): the namespace's own Monitor softens, an inherited one does not. Without it
+  // this chip kept "Monitor mode" while the Catalog, Compliance and the Builder said the namespace enforces,
+  // and stayed that way whenever the coverage read below failed. The coverage read is now only for an API
+  // that predates the field.
+  const sourceVerdict =
+    settingsSaysMonitor && posture.modeSource
+      ? verdictFromSettings(
+          { namespace: posture.namespace, enforcement_mode: "audit", enforcement_mode_source: posture.modeSource },
+          selectedNamespace
+        )
+      : "unknown";
+  const modeFromSource: "audit" | "block" | null =
+    sourceVerdict === "monitor" ? "audit" : sourceVerdict === "enforcing" ? "block" : null;
+  const canConfirmEngineMode = !isRemote && settingsSaysMonitor && selectedNamespace !== "all" && modeFromSource === null;
   const engineCoverage = useApi(
     () => (canConfirmEngineMode ? fetchCoverageByCategory(selectedNamespace) : Promise.resolve(null)),
     [canConfirmEngineMode, selectedNamespace],
@@ -372,7 +426,13 @@ export function Header({
       ? engineCoverage.data.namespace_mode
       : undefined;
   const engineMonitorMode: "audit" | "block" | null =
-    engineMonitorModeRaw === "audit" ? "audit" : engineMonitorModeRaw === "block" ? "block" : null;
+    !isRemote && modeFromSource
+      ? modeFromSource
+      : engineMonitorModeRaw === "audit"
+        ? "audit"
+        : engineMonitorModeRaw === "block"
+          ? "block"
+          : null;
   const monitorChipLabel = engineMonitorMode === "block" ? "Monitor: cluster default" : "Monitor mode";
   const monitorChipTitle =
     engineMonitorMode === "audit"
@@ -778,7 +838,7 @@ export function Header({
               type="button"
               className="posture-chip"
               data-testid="posture-chip-frozen"
-              title="Policy edits are FROZEN for this scope (change control) — live policy still enforces. Click to review in Target Settings."
+              title="Policy edits are FROZEN for this scope (change control) — the live policy keeps running unchanged. Click to review in Target Settings."
               onClick={() => navigate("/policies/targets")}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999,

@@ -142,7 +142,7 @@ The `weight` field on the API response is always `1.0`: `GraphEdge` defaults it 
 `accesses` edges are written once and never updated (`asset_graph.py:192-193` returns early if the edge
 exists), so their `access_type` says nothing about the operation. The real operation is resolved at read
 time from the capability registry and attached as `properties.verb`
-(`graphs.py:367-368`) — see [§8](#8-source-capability-and-defend).
+(`_attach_source_capability` in `graphs.py`) — see [§8](#8-source-capability-and-defend).
 
 ### Decision history is joined, not stored
 
@@ -181,22 +181,54 @@ Two consequences worth knowing:
 
 `GraphStore` (`norviq/engine/graph/store.py`) writes both a cache copy and a database row on every save:
 
-- **Redis**: key `graph:<namespace>`, TTL **300 s** (`store.py:47`).
+- **Redis**: key `graph:<namespace>`, TTL **300 s** (`_CACHE_TTL_S`).
 - **PostgreSQL**: a new row in `asset_graph` — `namespace`, `node_count`, `edge_count`, `graph_json`
-  (JSONB), `built_at` (`norviq/api/db/models.py:222-232`).
+  (JSONB), `built_at` (`AssetGraph` in `norviq/api/db/models.py`).
 
-A row is written **per evaluated tool call**, because `_safe_record_graph` saves after each record. Every
-reader takes only the newest row per namespace (`DISTINCT ON (namespace) … ORDER BY namespace, built_at
+Each API replica keeps its own in-memory builder per namespace, so a save is a merge, not an overwrite.
+Under a per-namespace lock (an asyncio lock in the process and a Postgres advisory lock across replicas)
+the store reads the newest row, folds it into the caller's builder and writes the union
+(`AssetGraphBuilder.merge_persisted`): call counts from every replica add up, other properties come
+from whichever copy was active most recently, and nodes or edges only one replica recorded are kept.
+Saving the whole builder as the new row, as earlier releases did, let the last replica to write erase
+what the others had recorded.
+
+The cache is written only after the row commits, and only while that row is still the newest one, so
+the cached copy never shows a save or a removal that did not commit. If the cache cannot be written,
+its key is deleted and readers go to Postgres. If Postgres cannot be reached, a save merges its calls
+into the cached copy instead, without dropping what is already cached, and the replica writes them to
+Postgres on its next save that succeeds. The cached copy is what the `/api/v1/graph/*` analysis routes
+and a restarting replica's restore read; `GET /api/v1/asset-graph` reads Postgres and fails while it is
+down. A removal is never cached this way: it fails, and
+`DELETE /api/v1/asset-graph/node` answers `503` saying the node was not removed.
+
+Without Postgres the cached copy is the only one, and replicas serialize their read-merge-write with a
+Redis lock, `lock:graph:<namespace>` (`SET NX PX` with a random token, 10 s expiry, released only by its
+holder). A save that cannot take it within 5 s writes nothing and keeps its calls for the next save. The
+cached copy still expires after 300 s without writes; each replica's builder keeps its graph across that.
+
+"Most recently active" and tombstones compare times stamped on different pods. They are stamped on the
+database clock (Redis `TIME` without a database), measured on each save, so a pod whose own clock is
+off does not win every comparison or remove calls made after its removal. A stamp later than the
+present (a pod that has not saved yet, or an earlier release) is pulled back to the present at the next
+merge. A save that cannot read that clock still saves, and logs `nrvq.graph.clock_sync_failed`
+(NRVQ-GRP-11024); with `reference_clock=false` the builder has never read it, so its stamps are its own
+wall clock and are not bounded. Every snapshot records its `tombstones`, even when there are none; a row
+without the key was written by a pod on the previous release, so the store takes the removals from the newest row that
+records them instead of reading the old row as "nothing removed".
+
+`_safe_record_graph` saves after each record. A save that finds another save of the same builder still
+waiting for the lock returns at once, because the waiting one will carry its call, so a burst writes a
+few rows rather than one per call. Every reader takes only the newest row per namespace (`DISTINCT ON (namespace) … ORDER BY namespace, built_at
 DESC`, `graphs.py:80-83`), so the older rows are history for restore and debugging, and they are what the
 retention sweep prunes ([§13](#13-retention-and-pruning)).
 
 Snapshots are also what survives a restart. On the first record for a namespace after process start,
 `_restore_graph` loads the persisted snapshot into the live in-memory builder
-(`evaluator.py:1422-1438`). Without it, a pod restart would begin from an empty graph and the next save
-would overwrite the accumulated snapshot with a single call — the graph would silently lose everything
-built before the restart.
+(`OPAEvaluator._restore_graph` in `norviq/engine/evaluator.py`), so a restarted pod starts from the
+shared graph rather than an empty one. Two first calls racing through the restore keep one builder.
 
-Saving also invalidates the per-namespace analysis cache (`store.py:39-42`), which is what keeps the
+Saving also invalidates the per-namespace analysis cache (`GraphStore._invalidate_analysis`), which is what keeps the
 cached analyses in [§5.3](#53-the-graph-analysis-family) consistent with the graph they were computed
 from.
 
@@ -214,8 +246,12 @@ Deregistering an agent (`DELETE /api/v1/agents/{spiffe_id}`) prunes the same way
 (`norviq/api/routers/agents.py`, `deregister_agent`). It is refused with `409` while the agent is frozen or
 under a trust cap, because the registry row it deletes is the durable copy of that control. Both go through one implementation
 (`norviq/api/graph_maintenance.py`) so the two cannot drift into different notions of "removed", and
-both report whether a node was *actually* removed rather than assuming success. The removal operates on
-the live builder and re-saves, so every graph surface reflects it immediately.
+both report whether a node was *actually* removed rather than assuming success. The removal is made
+against the persisted graph merged with the serving replica's builder, so a node only another replica
+recorded can still be removed, and it writes a tombstone into the snapshot. Every replica's next save
+drops its own copy of the node unless that copy was active after the removal: a tool called again later
+comes back with only the new calls. Tombstones are kept for 30 days. Every graph surface reflects the
+removal immediately.
 
 ---
 
@@ -257,7 +293,7 @@ part of its own blast radius (`threats.py:367-380`). Each asset is flagged `s=1`
 | `GET /api/v1/graph/analysis` | the full report |
 
 Results are memoized per `(namespace, graph-version, analysis, params)` where the version is a content
-hash of the snapshot (`store.py:18-20`), so they invalidate automatically when the graph changes.
+hash of the snapshot (`compute_graph_version` in `store.py`), so they invalidate automatically when the graph changes.
 
 Be aware of two things before you build on these. **No console surface consumes them** — the Asset
 Graph page reads `/api/v1/asset-graph` and the Attack Graph page reads `/api/v1/threats/attack-paths`;
@@ -312,14 +348,26 @@ Per hop, `_build_path` (`threats.py:280-294`) reads the joined counts and resolv
 | `mixed` | `block > 0` and `allow > 0` |
 | `allow` | otherwise |
 
+A `tool → data` hop has no audit rows of its own: no call names a data node. It carries the counts of
+the call into its tool on the same chain (that origin's calls only), and the step names the tool in
+`via`. Without this every two-hop chain read "No end-to-end traffic yet" however many calls had run.
+
+Those counts are per tool, not per table. Audit rows name the tool and never the data node, so a tool
+that reaches three tables puts the same calls on all three hops, and one table's traffic makes all three
+paths `exploitable`. The step says "calls into <tool>, counted per tool, not per table", and an
+`exploitable` verdict on such a path adds that the calls do not show the target itself was touched.
+
 The chain status then follows (`threats.py:386-398`):
 
 | Status | Meaning | Verdict text |
 |---|---|---|
 | `blocked` | some hop is a hard block with no allows | "Policy blocks the chokepoint … — path neutralized." |
-| `blocked` (Monitor) | some hop is a Monitor would-block with no allows | "Monitor mode: … would be blocked (logged, not enforced) — switch to Block to enforce." |
-| `exploitable` | **every** hop has allowed traffic | "Every hop has allowed traffic — … is reachable end-to-end." |
-| `unsimulated` | at least one hop has no allowed traffic and nothing blocked it | "No end-to-end traffic yet — simulate to confirm reachability." |
+| `would_block` | some hop is a Monitor would-block with no allows: a policy matched, the calls ran | "Monitor mode: a policy would block …, but this namespace logs instead of enforcing, so these calls ran. Switch the namespace to Block to enforce." |
+| `exploitable` | **every** hop has traffic that ran (allowed, or allowed alongside blocks) | "Every hop has allowed traffic — … is reachable end-to-end." When the data hop borrowed its tool's counts, it adds "Calls are counted per tool, not per table: audit rows do not name the data node, …". |
+| `unsimulated` | at least one hop has no traffic and nothing blocked it | "No end-to-end traffic yet — simulate to confirm reachability." |
+
+`would_block` is not `blocked`. Nothing was stopped, so it is not counted on the Blocked tile and has
+its own amber tile and chip.
 
 This is history, not a policy evaluation: nothing is called, and a policy you applied five minutes ago
 does not change a status derived from yesterday's traffic. That lag is exactly what `governed_by`
@@ -351,7 +399,7 @@ back to the target's name, `threats.py:364-365`), this reduces on a real estate 
 | any other tool | 0.4 | `0.39` | **medium** |
 
 So the severity chips are a two-valued signal today, and the **Critical** / **Low** severity filters
-match nothing. Rank by status first (`exploitable` before `unsimulated` before `blocked`) and use blast
+match nothing. Rank by status first (`exploitable`, then `would_block`, then `unsimulated`, then `blocked`) and use blast
 radius and the chokepoint's verb for the finer ordering; the server already sorts that way
 (`_STATUS_ORDER`, then severity, then `-blast`, `threats.py:549-552`).
 
@@ -360,10 +408,14 @@ radius and the chokepoint's verb for the finer ordering; the server already sort
 - **Chokepoint** is the last tool node on the chain (`threats.py:287-288`). It is the single name a
   policy has to constrain to neutralize the chain, which is why the intent builder and the "Defend"
   action both target it.
-- **MITRE** is a best-effort ATLAS descriptor from the chokepoint's name — an exact table of 14 tools,
-  then a verb-prefix fallback (`mitre_for_tool`, `norviq/api/threat_intent.py:847-863`). Read tools map
-  to the tactic string `Reconnaissance · read/search — no specific ATLAS technique` rather than a
-  fabricated technique id.
+- **MITRE** is an ATLAS descriptor for the chokepoint, read from the same mapping Compliance and Red
+  Team use (`mitre_for_tool`, `norviq/api/threat_intent.py`). The chokepoint's name picks the baseline
+  rule that guards it (`rule_for_tool`, `norviq/api/framework_mapping.py`: destructive names are
+  `llm06_excessive_agency`, egress names `llm02_data_leakage`, and so on), and the descriptor is the
+  first technique `policies/mitre_mapping.json` lists that rule under, so `delete_record` reads
+  `AML.T0053 · LLM Plugin Compromise` here, on the attack graph and in Red Team alike. A tool no
+  baseline rule guards by name, such as a plain read, shows `Unmapped · no ATLAS technique maps this
+  tool` rather than a made-up technique id.
 - **Fix** is a one-line recommendation derived from the chokepoint's verb (`recommended_fix`,
   `threat_intent.py:812-822`): egress tools get "deny external egress", mutating verbs get "constrain to
   read-only", reads get "scope to the agent's namespace", everything else gets "restrict to the declared
@@ -432,7 +484,7 @@ write audit rows or graph edges. Simulate does — see [§9](#9-simulate).)
 ## 8. Source capability and Defend
 
 For data nodes whose URI resolves to a known source type, the asset-graph response attaches a
-capability posture (`_attach_source_capability`, `graphs.py:306-399`). Source types come from
+capability posture (`_attach_source_capability` in `graphs.py`). Source types come from
 `source_type_of` — the part before `://` or the first `/` — against a registry of `elasticsearch`,
 `postgresql`, `smtp`, `webhook`, `s3`, `filesystem` plus aliases (`postgres`, `es`, `opensearch`,
 `mail`, `gcs`, `minio`, …) in `norviq/engine/capability/source_registry.py:183-201`.
@@ -443,17 +495,19 @@ three signals:
 | Signal | Derived from |
 |---|---|
 | **granted** | an `accesses` edge exists from a tool with that verb (declared — see [§1.3](#13-the-tooldata-map-is-the-load-bearing-caveat)) |
-| **observed** | the tool's incoming `calls` edges have `allow + block + escalate > 0` (observed) |
-| **defended** | those `calls` edges have `block + escalate > 0` — a rule acted on it at least once (observed) |
+| **observed** | the tool's incoming `calls` edges have `allow + block + escalate + would_block > 0` (observed) |
+| **defended** | those `calls` edges have `block + escalate > 0` — a rule enforced on it at least once (observed) |
+| **monitored** | those `calls` edges have `would_block > 0` — calls were logged as would-block and ran (Monitor or a policy in audit mode) |
 
 Note the attribution: the signal lives on the **agent→tool** edge, because that is the edge that carries
-decision history, and it is mapped onto the source through the `accesses` edge (`graphs.py:329-368`).
+decision history, and it is mapped onto the source through the `accesses` edge (`_attach_source_capability`).
 
-The resulting statuses (`CapabilityStatus`, `source_registry.py:51-58`):
+The resulting statuses (`CapabilityStatus` in `source_registry.py`):
 
 | Status | Meaning | What it should prompt |
 |---|---|---|
 | `undefended` | observed in traffic, no policy has ever acted on it | Author a rule. This is the live gap. |
+| `monitored` | observed, and calls were logged as would-block, but none was stopped | Enforce the policy or the namespace. A would-block is not a defence: the calls ran. The inspector offers no Defend button here: the calls were already matched, and what is missing is enforcement. |
 | `dormant_grant` | reachable but never exercised | Least-privilege cleanup — remove the grant or scope it before it is used. |
 | `defended` | observed and a policy acted on it | Nothing; keep it that way. |
 | `latent` | the source exposes it, nothing grants or observes it | Informational. |
@@ -493,11 +547,12 @@ What it does (`ui/src/pages/AttackGraph.tsx:279-326`):
 | Result | Condition | Label |
 |---|---|---|
 | Enforced block | any hop returns `block` whose `rule_id` is **not** `no_policy_loaded` | "Blocked by an authored policy" |
-| Monitor would-block | any hop returns `audit` | "Would be blocked — this namespace is in Monitor mode (evaluated, not enforced)" |
+| Monitor would-block | any hop returns `audit` | "A policy would block this, but the namespace is in Monitor mode, so the call would run (evaluated, not enforced)." |
 | No-policy deny only | a hop returns `block` with `rule_id = "no_policy_loaded"` (only with `no_policy_decision=deny`; it ships `allow`) | "Blocked only by the fail-closed default — no policy is loaded for this namespace. Author a policy to control it intentionally." |
 | Gap | everything allowed | "Simulation found a policy gap — no policy covers this path" |
 
-Only the first two count as *covered*. The no-policy deny (opt-in via `no_policy_decision=deny`) is
+Only an enforced block sets the path to `blocked`. A Monitor would-block sets it to `would_block`: a
+policy matched, and the call would run. The no-policy deny (opt-in via `no_policy_decision=deny`) is
 deliberately not reported as a block by policy — it is the absence of a policy, and treating it as
 coverage is how a namespace ends up looking governed when nobody authored anything.
 
@@ -620,7 +675,7 @@ rather than after a restart. `DELETE /api/v1/threats/tool-verbs` demotes it back
 |---|---|---|---|
 | In-memory nodes per namespace | `5000` | `settings.graph_max_nodes` (`norviq/config.py:424`) | LRU eviction by last-touched tick once the cap is exceeded (`asset_graph.py:268-280`) |
 | Snapshot rows kept per namespace | `10` | `config.retention.graphSnapshotKeepPerNamespace` (`norviq/config.py:258`) | Hourly sweep deletes older rows; `0` keeps all |
-| Redis snapshot copy | `300 s` | `store.py:47` | Falls back to the newest DB row on miss |
+| Redis snapshot copy | `300 s` | `store.py` `_CACHE_TTL_S` | Falls back to the newest DB row on miss |
 | Agent registry entries | `90 d` after `last_seen` | `config.retention.agentRegistryRetentionDays` | Stops decommissioned agents lingering as phantom "awaiting" nodes |
 | Retention sweep interval | `3600 s` | `settings.audit_retention_prune_interval_s` (`norviq/config.py:251`) — **no Helm key**, see below | One loop sweeps every retention-managed table |
 
@@ -689,9 +744,14 @@ the "blocked only" filter both count enforced blocks only, so the two always agr
 ### Attack Graph (`/threats/graph`)
 
 Three columns inside one panel — ranked path list, kill-chain canvas, inspector — over a clickable stat
-strip (Critical paths, High, Chokepoints, Max blast radius, Exploitable, Blocked). The strip's
+strip (Critical paths, High, Chokepoints, Max blast radius, Exploitable, Would block, Blocked). The strip's
 `Chokepoints` uses the server's definition (`path.tool`), the same one the inspector chips. Selection and
 filters are reflected in the URL (`?path,ns,cls,status,sev,range`), so a triage view is shareable.
+A path id is a hash of (namespace, origin, chokepoint, target, hop count), so it changes when any of
+those does, and the 0.2.8 change that added the chokepoint changed every id. A `?path=` link whose id
+is not in the loaded view says "This path no longer exists or was renamed" instead of opening another
+path, and keeps the id in the URL. Drafts do not store path ids: `path_ids` on an intent-draft request
+is accepted and not persisted.
 
 Canvas key: agent / tool / data node colors, a red diamond for a sensitive blast-radius satellite, and
 per-hop edge colors — green allowed, amber partial, **amber dashed** Monitor would-block, **red dashed**
@@ -706,7 +766,7 @@ blocked. A hop also carries its resolved operation and, for an unclassified tool
 | `EXPLOITABLE` chain | every hop has allowed traffic in the window | Open the inspector, read the chokepoint and the recommended fix, then **Define `<class>`'s intended behaviour** to generate a default-deny draft. |
 | `EXPLOITABLE` **with** a teal shield note | a policy is applied but status is derived from pre-apply traffic | **Simulate** to confirm the defense holds now. Do not author a second policy. |
 | `NOT SIMULATED` chain | topology exists, no end-to-end allowed traffic | **Simulate**. If it comes back "policy gap", author before that traffic arrives. |
-| `BLOCKED` with the Monitor verdict | a policy covers the chokepoint but the namespace only logs | Switch the namespace to Block mode. This is a coverage decision, not a policy gap. |
+| `WOULD BLOCK` chain | a policy matches the chokepoint but the namespace only logs, so the calls ran | Switch the namespace to Block mode. This is a coverage decision, not a policy gap. |
 | Simulate → "Blocked only by the fail-closed default" | no policy is loaded and `no_policy_decision` is set to `deny` | Author an explicit policy. The no-policy deny is a safety net, not a control you can evidence. |
 | Simulate → "policy gap" | no rule addresses the chain | Draft from the what-if, or define the class's intended behaviour. |
 | Capability finding `UNDEFENDED` | a verb is observed on a source and nothing has ever acted on it | **Defend** → review the draft in Policies → apply. |

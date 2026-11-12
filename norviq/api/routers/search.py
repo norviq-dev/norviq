@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AgentRegistryEntry, AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.routers.agents import served_agent_rows
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -63,10 +64,16 @@ async def _search_tools(session: AsyncSession, q: str, namespace: str | None) ->
     ]
 
 
-async def _search_agents(session: AsyncSession, q: str, namespace: str | None) -> list[dict]:
-    """Registered agents whose spiffe_id or agent_class contains `q` (namespace-scoped)."""
+async def _search_agents(request: Request, session: AsyncSession, q: str, namespace: str | None) -> list[dict]:
+    """Registered agents whose spiffe_id or agent_class contains `q` (namespace-scoped).
+
+    The trust, freeze and cap shown are the ones `GET /agents` serves (`served_agent_rows`): the warm snapshot,
+    then the controls read from the store the engine enforces. This used to apply the registry's durable copy
+    of the freeze and cap instead, so a search could disagree with the Agent Monitor, and during a store outage
+    it read "not frozen" for an agent the engine was blocking."""
     stmt = select(
-        AgentRegistryEntry.spiffe_id, AgentRegistryEntry.agent_class, AgentRegistryEntry.trust_score
+        AgentRegistryEntry.spiffe_id, AgentRegistryEntry.namespace, AgentRegistryEntry.agent_class,
+        AgentRegistryEntry.trust_score, AgentRegistryEntry.trust_category, AgentRegistryEntry.last_seen,
     ).where(
         AgentRegistryEntry.spiffe_id.icontains(q, autoescape=True)
         | AgentRegistryEntry.agent_class.icontains(q, autoescape=True)
@@ -74,10 +81,18 @@ async def _search_agents(session: AsyncSession, q: str, namespace: str | None) -
     if namespace:
         stmt = stmt.where(AgentRegistryEntry.namespace == namespace)  # isolation: the COLUMN
     stmt = stmt.order_by(AgentRegistryEntry.last_seen.desc()).limit(_LIMIT)
-    rows = (await session.execute(stmt)).all()
+    registry_rows = [
+        {"spiffe_id": r.spiffe_id, "namespace": r.namespace, "agent_class": r.agent_class,
+         "last_seen": r.last_seen.isoformat() if r.last_seen else None,
+         "score": r.trust_score, "category": (r.trust_category or "").lower(),
+         "signals": {}, "dominant_signal": "", "recommendation": ""}
+        for r in (await session.execute(stmt)).all()
+    ]
     return [
-        {"spiffe_id": r.spiffe_id, "agent_class": r.agent_class, "trust_score": r.trust_score}
-        for r in rows
+        {"spiffe_id": row["spiffe_id"], "agent_class": row["agent_class"], "trust_score": row["score"],
+         "category": row["category"], "frozen": row["frozen"], "trust_cap": row["trust_cap"],
+         "controls": row["controls"]}
+        for row in await served_agent_rows(request, registry_rows)
     ]
 
 
@@ -115,7 +130,7 @@ async def search(
     """Scoped global search across audited tools, registered agents and loaded policies (⌘K)."""
     ns = read_namespace(user, namespace)  # None => every namespace (admin); own ns for a tenant; 403 floor
     tools = await _search_tools(session, q, ns)
-    agents = await _search_agents(session, q, ns)
+    agents = await _search_agents(request, session, q, ns)
     policies = _search_policies(request, q, ns)
     log.info(
         "nrvq.api.search.served",

@@ -29,6 +29,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from norviq.api.framework_mapping import techniques_for_tool
 from norviq.engine.confusables import skeleton
 from norviq.engine.empty_literals import EMPTY_OBJECT, braces
 
@@ -524,7 +525,8 @@ rate_within { input.call_depth <= 8 }""")
 # Positive-security INTENT policy for agent class "{_rego_comment(agent_class)}" — GENERATED, DRY-RUN DRAFT.
 # DEFAULT-DENY: a call is BLOCKED unless it is this class AND the tool is in the intended allowlist AND
 # every enabled refinement toggle holds. The allowlist is matched evasion-normalized (lower + skeleton).
-# TIGHTEN-ONLY at baseline priority (most-restrictive tie-break) — only ADDS denials, never weakens a block.
+# Against the baseline floors it only ADDS denials: a floor's block applies whatever this policy allows.
+# It is NOT tighten-only against a namespace- or workload-tier policy: the higher priority decides.
 # Allowlist ({len(names)} tools): {", ".join(_rego_comment(n) for n in names) or "(empty — denies everything for the class)"}
 # Refinements: {", ".join(enabled) or "(none)"}{learned_note}
 
@@ -912,42 +914,23 @@ def recommended_fix(chokepoint_tool: str) -> str:
     return f"Restrict '{chokepoint_tool}' to the declared intent for this class (default-deny)."
 
 
-# --- MITRE mapping (extends engine.attack_graph.MITRE_BY_TOOL_TYPE with human labels) ----------------
-_MITRE: dict[str, tuple[str, str]] = {
-    "delete_record": ("AML.T0048", "External Harms · Data Destruction"),
-    "drop_table": ("AML.T0048", "External Harms · Data Destruction"),
-    "truncate_table": ("AML.T0048", "External Harms · Data Destruction"),
-    "execute_sql": ("AML.T0049", "Discovery · Exfiltration via Query"),
-    "run_query": ("AML.T0049", "Discovery · Exfiltration via Query"),
-    "send_email": ("AML.T0040", "Exfiltration · ML Inference / Egress"),
-    "send_sms": ("AML.T0040", "Exfiltration · Egress"),
-    "http_post": ("AML.T0040", "Exfiltration · Egress"),
-    "webhook": ("AML.T0057", "Exfiltration · LLM Data Leakage"),
-    "upload": ("AML.T0025", "Exfiltration · Data from Local System"),
-    "export_data": ("AML.T0025", "Exfiltration · Data from Local System"),
-    "issue_refund": ("AML.T0051", "Impact · Financial Fraud"),
-    "transfer_funds": ("AML.T0051", "Impact · Financial Fraud"),
-    # A read/search tool is reconnaissance/discovery — there is no single ATLAS TECHNIQUE that fits, so we
-    # label the TACTIC honestly rather than emit a fabricated "AML.T0000" (not a real ATLAS id) that the
-    # console rendered as if it were a real technique.
-    "search_kb": ("Reconnaissance", "read/search — no specific ATLAS technique"),
-}
+# --- MITRE mapping ----------------------------------------------------------------------------------
+# What a path shows when the table has no technique for its chokepoint tool. It names the condition
+# rather than a technique, and its first word is what the path list shows in the id column.
+NO_TECHNIQUE_LABEL = "Unmapped · no ATLAS technique maps this tool"
 
 
 def mitre_for_tool(tool_name: str) -> str:
-    """A "T#### · Label" MITRE ATLAS descriptor for a chokepoint tool (best-effort by name/verb)."""
-    tool = (tool_name or "").lower()
-    if tool in _MITRE:
-        code, label = _MITRE[tool]
-        return f"{code} · {label}"
-    verb = tool.split("_")[0]
-    if verb in ("send", "http", "webhook", "upload", "export", "publish"):
-        return "AML.T0040 · Exfiltration · Egress"
-    if verb in ("delete", "drop", "truncate", "purge"):
-        return "AML.T0048 · External Harms · Data Destruction"
-    if verb in ("execute", "run", "query"):
-        return "AML.T0049 · Discovery · Exfiltration via Query"
-    if verb in READ_VERBS:
-        # Honest tactic label, not a fabricated technique id (see the search_kb note above).
-        return "Reconnaissance · read/search — no specific ATLAS technique"
-    return "AML.T0051 · Impact · Excessive Agency"
+    """A "<technique id> · <name>" ATLAS descriptor for a chokepoint tool, from the one mapping.
+
+    The tool's name picks the baseline rule that guards it and the technique is the first one the
+    ATLAS table lists that rule under, so a path and a Red Team attack on the same tool name the same
+    technique. This kept a table of its own: destructive tools under AML.T0048 External Harms, egress
+    under AML.T0040 (ML Model Inference API Access), refunds under AML.T0051 labelled "Financial
+    Fraud", and every unknown tool under AML.T0051 too.
+    """
+    techniques = techniques_for_tool(tool_name)
+    if not techniques:
+        return NO_TECHNIQUE_LABEL
+    tid, name = techniques[0]
+    return f"{tid} · {name}"

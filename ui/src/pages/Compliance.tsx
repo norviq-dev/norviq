@@ -31,12 +31,16 @@ import {
 import { getToken } from "../auth/session";
 import { useApi } from "../hooks/useApi";
 import { useApp } from "../store/AppContext";
+import { rulesPresentWord, useEnforcementVerdict, type EnforcementVerdict } from "../lib/posture";
 import { FrameworkEmblem } from "../components/compliance/FrameworkEmblem";
 import { useToast } from "../components/common/Toast";
 
 // ---- canonical decision / status colors (NO blue anywhere) --------------------------------------
 const ACCENT = "var(--accent)"; // teal #2ddab8
 const ENFORCED = "#00e5a0"; // green
+// Rules present where the namespace does not enforce (Monitor) or its posture is unread. Not green, because
+// green says "enforced"; not amber, because amber is a gap.
+const PRESENT = "#8fb3ab";
 const GAP = "#ffb020"; // amber
 const OOS_TEXT = "#9a9aa2"; // neutral grey (label)
 const OOS_TRACK = "#33333a"; // neutral grey (bar/track)
@@ -50,10 +54,37 @@ type Range = "1h" | "6h" | "24h" | "7d" | "30d";
 type StatusFilter = "all" | "gap" | "enforced" | "oos";
 
 const ST = {
-  enforced: { label: "ENFORCED", color: ENFORCED, bg: "#00e5a015", border: "#00e5a033", dot: ENFORCED },
   gap: { label: "GAP", color: GAP, bg: "#ffb02015", border: "#ffb02033", dot: GAP },
   out_of_scope: { label: "OUT OF SCOPE", color: OOS_TEXT, bg: "#26262a", border: OOS_TRACK, dot: OOS_DOT }
 } as const;
+
+// The API's `enforced` status is RULES PRESENT (mitre.py `basis`). It used to render as a green "ENFORCED" chip,
+// an "Enforced" group and an "N enforced" bar in every namespace, including a Monitor one where the engine logs
+// each match and blocks nothing: the claim the pill had already stopped making. The word and colour now come
+// from the namespace posture, and "proven" is added only for a technique with block or escalate evidence.
+function presentColor(verdict: EnforcementVerdict): string {
+  return verdict === "enforcing" ? ENFORCED : PRESENT;
+}
+
+function techProven(t: MitreTechnique): boolean {
+  return t.proven ?? (t.blocked ?? 0) > 0;
+}
+
+type Chip = { label: string; color: string; bg: string; border: string; dot: string };
+
+function statusChip(t: MitreTechnique, verdict: EnforcementVerdict): Chip {
+  if (t.status === "gap") return ST.gap;
+  if (t.status === "out_of_scope") return ST.out_of_scope;
+  const c = presentColor(verdict);
+  const word = rulesPresentWord(verdict).toUpperCase();
+  return { label: techProven(t) ? `${word} · PROVEN` : word, color: c, bg: `${c}15`, border: `${c}33`, dot: c };
+}
+
+/** "Enforced" / "Rules present · monitor" / "Rules present": the group, legend and filter word for a posture. */
+function presentHeading(verdict: EnforcementVerdict): string {
+  const w = rulesPresentWord(verdict);
+  return w.charAt(0).toUpperCase() + w.slice(1);
+}
 
 // ---- LIVE frameworks — both fetch real coverage via fetchMitreCoverage(ns, range, id). -----------
 // title/tagline/blurb are static framing copy; every NUMBER on the card comes from the API response
@@ -71,7 +102,7 @@ const LIVE_FRAMEWORKS: Array<{
     tagline: "Runtime attack techniques · strong fit",
     subtitle: "Adversarial Threat Landscape for AI Systems · framework",
     blurb:
-      "Adversarial Threat Landscape for AI Systems. Norviq enforces the ATLAS techniques that manifest as agent tool-calls, evidenced by live policy decisions."
+      "Adversarial Threat Landscape for AI Systems. Norviq maps the ATLAS techniques that manifest as agent tool-calls to policy rules, and counts the live decisions those rules make."
   },
   {
     id: "owasp",
@@ -79,7 +110,7 @@ const LIVE_FRAMEWORKS: Array<{
     tagline: "Agent-runtime LLM risks · best fit",
     subtitle: "OWASP Top 10 for LLM Applications (2025) · framework",
     blurb:
-      "The OWASP Top 10 for LLM Applications. Norviq enforces the LLM risks that manifest as agent tool-calls (prompt injection, excessive agency, insecure output handling), evidenced by live policy decisions."
+      "The OWASP Top 10 for LLM Applications. Norviq maps the LLM risks that manifest as agent tool-calls (prompt injection, excessive agency, insecure output handling) to policy rules, and counts the live decisions those rules make."
   }
 ];
 
@@ -106,6 +137,66 @@ function frameworkName(fw: ComplianceFramework, data: MitreCoverage | null): str
 }
 
 // ------------------------------------------------------------------------------------------------
+// The framework pill and the evidence sentence. Both used to be literals: an "ENFORCED" pill and "Every
+// enforced technique is backed by a live policy and block evidence", on every card and every detail
+// hero, in a Monitor namespace with no blocks at all. `enforced` is rules present (mitre.py `basis`),
+// so the pill states two measured things instead: what the namespace does with a match (its posture)
+// and how many enforced techniques have block or escalate evidence in the window (`proven`).
+// ------------------------------------------------------------------------------------------------
+function provenText(data: MitreCoverage | null): string | null {
+  if (!data) return null;
+  if (data.degraded) return "evidence unreadable";
+  if (data.proven == null) return null;
+  return `${data.proven}/${data.enforced ?? 0} proven`;
+}
+
+function PosturePill({ verdict, data, namespace }: { verdict: EnforcementVerdict; data: MitreCoverage | null; namespace: string }) {
+  const proven = provenText(data);
+  const enforced = data?.enforced ?? 0;
+  const allProven = !data?.degraded && data?.proven != null && enforced > 0 && data.proven === enforced;
+  const head = verdict === "monitor" ? "Monitor · not blocking" : verdict === "enforcing" ? "Enforcing" : "Rules present";
+  const label = proven ? `${head} · ${proven}` : head;
+  const tone =
+    verdict === "monitor"
+      ? { background: "#2a230d", color: "#f6c667" }
+      : verdict === "enforcing" && allProven
+      ? { background: "#0d2a1c", color: "#6ee7b7" }
+      : { background: "#1e1e22", color: "#cdd0d6" };
+  const title =
+    verdict === "monitor"
+      ? `${namespace} is in Monitor mode: these rules are loaded and evaluated, matches are logged as would-block, and nothing is blocked.`
+      : verdict === "enforcing"
+      ? `${namespace} enforces: a rule that matches blocks or escalates the call. "Proven" counts enforced techniques whose rules acted on real traffic in this window.`
+      : namespace === "all"
+      ? "All namespaces: each namespace has its own enforcement posture, so this pill makes no enforcement claim. Pick a namespace to see it."
+      : `The enforcement posture of ${namespace} could not be read, so this pill makes no enforcement claim.`;
+  return (
+    <span
+      data-testid="compliance-posture-pill"
+      data-verdict={verdict}
+      title={title}
+      style={{ flex: "none", fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", padding: "3px 9px", borderRadius: 999, textTransform: "uppercase", ...tone }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function evidenceSentence(verdict: EnforcementVerdict, data: MitreCoverage | null, namespace: string, range: Range): string {
+  const enforced = data?.enforced ?? 0;
+  const base = `Each covered technique has a mapped rule loaded`;
+  if (data?.degraded) return `${base}; block evidence for this ${RANGE_LABEL[range]} window could not be read.`;
+  const proven =
+    data?.proven != null
+      ? `; ${data.proven} of ${enforced} ha${enforced === 1 ? "s" : "ve"} block or escalate evidence in this ${RANGE_LABEL[range]} window.`
+      : ".";
+  if (verdict === "monitor") {
+    return `${base}${proven} ${namespace} is in Monitor mode, so these rules log would-blocks and block nothing.`;
+  }
+  return `${base}${proven}`;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Donut ring geometry (enforced green + gap amber over the enforceable subset), mirrors the mockup.
 // ------------------------------------------------------------------------------------------------
 function ringDash(coveragePct: number): { green: string; greenOff: number; amber: string; amberOff: number } {
@@ -118,13 +209,13 @@ function ringDash(coveragePct: number): { green: string; greenOff: number; amber
   };
 }
 
-function Donut({ size, coveragePct }: { size: number; coveragePct: number }) {
+function Donut({ size, coveragePct, verdict }: { size: number; coveragePct: number; verdict: EnforcementVerdict }) {
   const r = ringDash(coveragePct);
   const label = `${Math.round(coveragePct)}%`;
   return (
-    <svg width={size} height={size} viewBox="0 0 42 42" role="img" aria-label={`${label} of enforceable enforced`}>
+    <svg width={size} height={size} viewBox="0 0 42 42" role="img" aria-label={`${label} of enforceable techniques ${rulesPresentWord(verdict)}`}>
       <circle cx="21" cy="21" r="15.9" fill="none" stroke="#1c1c1f" strokeWidth="5" />
-      <circle cx="21" cy="21" r="15.9" fill="none" stroke={ENFORCED} strokeWidth="5" strokeDasharray={r.green} strokeDashoffset={r.greenOff} transform="rotate(-90 21 21)" strokeLinecap="round" />
+      <circle cx="21" cy="21" r="15.9" fill="none" stroke={presentColor(verdict)} strokeWidth="5" strokeDasharray={r.green} strokeDashoffset={r.greenOff} transform="rotate(-90 21 21)" strokeLinecap="round" />
       <circle cx="21" cy="21" r="15.9" fill="none" stroke={GAP} strokeWidth="5" strokeDasharray={r.amber} strokeDashoffset={r.amberOff} transform="rotate(-90 21 21)" />
       <text x="21" y="24.4" textAnchor="middle" fontSize="9.5" fontWeight={800} fill="#ededf0" style={{ fontFamily: "var(--font-sans)" }}>
         {label}
@@ -157,10 +248,6 @@ async function downloadEvidencePack(
   a.click();
   a.remove();
   URL.revokeObjectURL(objectUrl);
-}
-
-function techStatus(t: MitreTechnique): keyof typeof ST {
-  return t.status; // "enforced" | "gap" | "out_of_scope" — from the API, never inferred client-side
 }
 
 // Efficacy overlay. Three states, because there are three: a run exists (the REAL proven-blocking %), no run
@@ -230,6 +317,7 @@ export function Compliance() {
   const navigate = useNavigate();
   const { push } = useToast();
   const { namespace, timeRange } = useApp();
+  const verdict = useEnforcementVerdict(namespace);
 
   const [view, setView] = useState<"overview" | "detail">("overview");
   const [tab, setTab] = useState<"frameworks" | "custom">("frameworks");
@@ -497,6 +585,8 @@ export function Compliance() {
           covByFw={covByFw}
           loading={overviewLoading}
           range={range}
+          verdict={verdict}
+          namespace={namespace}
           onOpen={(fw) => openDetail(fw, "all")}
           onGaps={(fw) => openDetail(fw, "gap")}
           onExport={onExport}
@@ -508,6 +598,7 @@ export function Compliance() {
           loading={detailLoading}
           range={range}
           namespace={namespace}
+          verdict={verdict}
           techniques={techniques}
           selected={selected}
           setSelectedId={setSelectedId}
@@ -552,6 +643,8 @@ function OverviewView({
   covByFw,
   loading,
   range,
+  verdict,
+  namespace,
   onOpen,
   onGaps,
   onExport
@@ -563,6 +656,8 @@ function OverviewView({
   covByFw: Record<ComplianceFramework, CoverageApi>;
   loading: boolean;
   range: Range;
+  verdict: EnforcementVerdict;
+  namespace: string;
   onOpen: (fw: ComplianceFramework) => void;
   onGaps: (fw: ComplianceFramework) => void;
   onExport: (fw: ComplianceFramework) => void;
@@ -595,7 +690,8 @@ function OverviewView({
             Norviq is a policy-enforcement point for agent tool-calls — it covers the framework controls about{" "}
             <b style={{ color: "#cfe8e3" }}>what an agent may do at runtime</b>. Model-lifecycle controls (poisoning,
             theft, supply-chain) and governance process are <b style={{ color: "#cfe8e3" }}>out of scope</b> and shown as
-            such, never as failures. Coverage % is of the enforceable subset, evidenced by live policy decisions.
+            such, never as failures. Coverage % is of the enforceable subset and counts techniques with a mapped rule
+            loaded; whether those rules acted is counted separately, from live policy decisions.
           </div>
         )}
       </div>
@@ -644,6 +740,8 @@ function OverviewView({
                   meta={meta}
                   data={covByFw[meta.id].data}
                   range={range}
+                  verdict={verdict}
+                  namespace={namespace}
                   onOpen={() => onOpen(meta.id)}
                   onGaps={() => onGaps(meta.id)}
                   onExport={() => onExport(meta.id)}
@@ -689,7 +787,7 @@ function OverviewView({
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, padding: "90px 20px", textAlign: "center" }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Custom frameworks — coming soon</div>
           <div style={{ fontSize: 12.5, color: MUTED, maxWidth: 400, lineHeight: 1.6 }}>
-            Map your own control set to Norviq's enforcing policies and generate a live evidence pack. Available once the
+            Map your own control set to Norviq's policies and generate a live evidence pack. Available once the
             first frameworks ship.
           </div>
         </div>
@@ -702,6 +800,8 @@ function FrameworkOverviewCard({
   meta,
   data,
   range,
+  verdict,
+  namespace,
   onOpen,
   onGaps,
   onExport
@@ -709,6 +809,8 @@ function FrameworkOverviewCard({
   meta: (typeof LIVE_FRAMEWORKS)[number];
   data: MitreCoverage | null;
   range: Range;
+  verdict: EnforcementVerdict;
+  namespace: string;
   onOpen: () => void;
   onGaps: () => void;
   onExport: () => void;
@@ -745,8 +847,8 @@ function FrameworkOverviewCard({
               <div style={{ fontSize: 10.5, fontWeight: 700, color: ACCENT }}>{meta.tagline}</div>
               <div style={{ fontSize: 17, fontWeight: 700, marginTop: 1 }}>{name}</div>
             </div>
-            <span style={{ marginLeft: "auto", flex: "none", fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", padding: "3px 9px", borderRadius: 999, background: "#0d2a1c", color: "#6ee7b7" }}>
-              ENFORCED
+            <span style={{ marginLeft: "auto", display: "inline-flex" }}>
+              <PosturePill verdict={verdict} data={data} namespace={namespace} />
             </span>
           </div>
           <div style={{ fontSize: 12.5, color: MUTED, lineHeight: 1.55, margin: "12px 0 14px", maxWidth: 560 }}>
@@ -754,12 +856,12 @@ function FrameworkOverviewCard({
             {enforceable === 1 ? "" : "s"} — the {oos} out-of-scope technique{oos === 1 ? "" : "s"} are not counted.
           </div>
           <div style={{ display: "flex", height: 7, borderRadius: 999, background: "#1c1c1f", overflow: "hidden", marginBottom: 8, maxWidth: 560 }}>
-            <span style={{ display: "block", height: "100%", width: `${Math.round((enforced / total) * 100)}%`, background: ENFORCED }} />
+            <span style={{ display: "block", height: "100%", width: `${Math.round((enforced / total) * 100)}%`, background: presentColor(verdict) }} />
             <span style={{ display: "block", height: "100%", width: `${Math.round((gap / total) * 100)}%`, background: GAP }} />
             <span style={{ display: "block", height: "100%", width: `${Math.round((oos / total) * 100)}%`, background: OOS_TRACK }} />
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 11.5, color: MUTED }}>
-            <span><b style={{ color: ENFORCED }}>{enforced}</b> enforced</span>
+            <span data-testid="compliance-card-present"><b style={{ color: presentColor(verdict) }}>{enforced}</b> {rulesPresentWord(verdict)}</span>
             <span><b style={{ color: GAP }}>{gap}</b> gap</span>
             <span><b style={{ color: OOS_TEXT }}>{oos}</b> out-of-scope</span>
             <span style={{ color: FAINT }}>·</span>
@@ -771,7 +873,7 @@ function FrameworkOverviewCard({
 
         <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 14, flex: "none", minWidth: 200 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <Donut size={76} coveragePct={pct} />
+            <Donut size={76} coveragePct={pct} verdict={verdict} />
             <button
               type="button"
               onClick={onGaps}
@@ -816,6 +918,7 @@ function DetailView(props: {
   loading: boolean;
   range: Range;
   namespace: string;
+  verdict: EnforcementVerdict;
   techniques: MitreTechnique[];
   selected: MitreTechnique | null;
   setSelectedId: (id: string | null) => void;
@@ -847,6 +950,8 @@ function DetailView(props: {
     data,
     loading,
     range,
+    namespace,
+    verdict,
     techniques,
     selected,
     setSelectedId,
@@ -908,7 +1013,7 @@ function DetailView(props: {
     if (gapList.length) groups.push({ label: "Gaps · worst first", techs: gapList });
   } else {
     if (gapList.length) groups.push({ label: "Gaps · worst first", techs: gapList });
-    if (enfList.length) groups.push({ label: "Enforced", techs: enfList });
+    if (enfList.length) groups.push({ label: presentHeading(verdict), techs: enfList });
     if (oosList.length) groups.push({ label: "Out of scope · not a runtime control", oos: true, techs: oosList });
   }
   const treeEmpty = groups.every((g) => g.techs.length === 0);
@@ -925,7 +1030,7 @@ function DetailView(props: {
   const filterSegs: Array<{ key: StatusFilter; label: string }> = [
     { key: "all", label: `All ${total}` },
     { key: "gap", label: `Gaps ${gap}` },
-    { key: "enforced", label: `Enforced ${enforced}` },
+    { key: "enforced", label: `${presentHeading(verdict)} ${enforced}` },
     { key: "oos", label: `OOS ${oos}` }
   ];
 
@@ -1004,18 +1109,16 @@ function DetailView(props: {
               shows the current window (RANGE_LABEL[range]) so the detail still reads it. */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12, flex: "none" }}>
             <span style={{ fontSize: 10.5, color: MUTED }}>range · <b style={{ color: ACCENT }}>{RANGE_LABEL[range]}</b></span>
-            <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", padding: "4px 10px", borderRadius: 999, background: "#0d2a1c", color: "#6ee7b7" }}>
-              ENFORCED
-            </span>
+            <PosturePill verdict={verdict} data={data} namespace={namespace} />
           </div>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 16, flex: "none" }}>
-          <Donut size={98} coveragePct={pct} />
+          <Donut size={98} coveragePct={pct} verdict={verdict} />
           <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11.5, color: MUTED }}>
-            <span style={{ display: "flex", alignItems: "center", gap: 7 }}>
-              <span style={{ width: 10, height: 10, borderRadius: 3, background: ENFORCED }} />
-              Enforced · {enforced}
+            <span data-testid="compliance-detail-present" style={{ display: "flex", alignItems: "center", gap: 7 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 3, background: presentColor(verdict) }} />
+              {presentHeading(verdict)} · {enforced}
             </span>
             <button
               type="button"
@@ -1034,9 +1137,9 @@ function DetailView(props: {
 
         <div style={{ flex: 1, minWidth: 260, fontSize: 12.5, color: MUTED, lineHeight: 1.6 }}>
           Coverage is measured over the {enforceable} enforceable technique{enforceable === 1 ? "" : "s"} (those that
-          appear as agent tool-calls) — {enforced} enforced, {gap} gap{gap === 1 ? "" : "s"}. The {oos} out-of-scope
-          technique{oos === 1 ? "" : "s"} sit outside a runtime PEP and are not counted as failures. Every enforced
-          technique is backed by a live policy and block evidence.
+          appear as agent tool-calls) — {enforced} {rulesPresentWord(verdict)}, {gap} gap{gap === 1 ? "" : "s"}. The {oos} out-of-scope
+          technique{oos === 1 ? "" : "s"} sit outside a runtime PEP and are not counted as failures.{" "}
+          <span data-testid="compliance-evidence-sentence">{evidenceSentence(verdict, data, namespace, range)}</span>
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: "none" }}>
@@ -1136,7 +1239,7 @@ function DetailView(props: {
                         ) : (
                           <span style={{ width: 13, flex: "none" }} />
                         )}
-                        <span style={{ width: 9, height: 9, borderRadius: "50%", flex: "none", background: ST[techStatus(t)].dot }} />
+                        <span style={{ width: 9, height: 9, borderRadius: "50%", flex: "none", background: statusChip(t, verdict).dot }} />
                         <span style={{ flex: 1, minWidth: 0 }}>{t.name}</span>
                         {t.status === "gap" && t.priority && (
                           <span style={{ flex: "none", fontSize: 8.5, fontWeight: 800, letterSpacing: "0.04em", color: prioColor(t.priority), border: `1px solid ${prioColor(t.priority)}`, borderRadius: 4, padding: "1px 5px" }}>
@@ -1245,6 +1348,7 @@ function DetailView(props: {
           {selected ? (
             <TechniqueDetail
               t={selected}
+              verdict={verdict}
               range={range}
               drafted={!!drafted[selected.technique_id]}
               onGenerate={onGenerate}
@@ -1262,6 +1366,7 @@ function DetailView(props: {
 
 function TechniqueDetail({
   t,
+  verdict,
   range,
   drafted,
   onGenerate,
@@ -1269,13 +1374,14 @@ function TechniqueDetail({
   onOpenClass
 }: {
   t: MitreTechnique;
+  verdict: EnforcementVerdict;
   range: Range;
   drafted: boolean;
   onGenerate: (t: MitreTechnique) => void;
   onOpenRule: (ruleId: string) => void;
   onOpenClass: (cls: string) => void;
 }) {
-  const st = ST[techStatus(t)];
+  const st = statusChip(t, verdict);
   const isOos = t.status === "out_of_scope";
   const isGap = t.status === "gap";
   const isEnforceable = t.status !== "out_of_scope";
@@ -1293,7 +1399,7 @@ function TechniqueDetail({
               {t.priority === "high" ? "HIGH PRIORITY" : t.priority === "medium" ? "MED PRIORITY" : "LOW PRIORITY"}
             </span>
           )}
-          <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.04em", padding: "3px 10px", borderRadius: 999, background: st.bg, color: st.color, border: `1px solid ${st.border}` }}>
+          <span data-testid="technique-status-chip" style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.04em", padding: "3px 10px", borderRadius: 999, background: st.bg, color: st.color, border: `1px solid ${st.border}` }}>
             {st.label}
           </span>
         </div>
@@ -1303,10 +1409,15 @@ function TechniqueDetail({
       </div>
       {t.description && <div style={{ fontSize: 13, color: "#a2a2aa", lineHeight: 1.6 }}>{t.description}</div>}
 
-      {/* "also satisfies" note (from the API `also` field). */}
+      {/* Cross-reference note (from the API `also` field). A control with no mapped rule has no
+          enforcing rule to share, so it says what it is: the same risk in the other framework.
+          tests/api/test_redteam_compliance_mapping.py holds the tables to that: a rule-less entry
+          only points at a rule-less one. */}
       {t.also && (
-        <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "rgba(45,218,184,0.06)", border: "1px solid #143a35", borderRadius: 9, fontSize: 11.5, color: "#9fc4bd" }}>
-          Same enforcing rule also satisfies <b style={{ color: "#cfe8e3" }}>{t.also}</b>
+        <div data-testid="technique-also" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "rgba(45,218,184,0.06)", border: "1px solid #143a35", borderRadius: 9, fontSize: 11.5, color: "#9fc4bd" }}>
+          {(t.policies ?? []).length > 0
+            ? <>Same rule also satisfies <b style={{ color: "#cfe8e3" }}>{t.also}</b></>
+            : <>Same risk as <b style={{ color: "#cfe8e3" }}>{t.also}</b> · no rule maps either</>}
         </div>
       )}
 
@@ -1324,7 +1435,7 @@ function TechniqueDetail({
         <>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "18px 0 9px" }}>
             <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: "0.05em", textTransform: "uppercase", color: FAINT }}>
-              Enforcing policies &amp; live evidence
+              Mapped policies &amp; live evidence
             </div>
             {evidence.length > 0 && <span style={{ fontSize: 10.5, color: FAINT }}>click a row to open in Audit Log</span>}
           </div>
@@ -1360,7 +1471,7 @@ function TechniqueDetail({
             </div>
           ) : (
             <div style={{ padding: "12px 14px", background: "#17171a", border: "1px solid #2a2a2e", borderRadius: 9, fontSize: 12.5, color: "#a2a2aa", lineHeight: 1.55 }}>
-              No enforcing policy maps to this control yet for these agent classes.
+              No loaded policy rule maps to this control yet for these agent classes.
             </div>
           )}
 
@@ -1410,7 +1521,7 @@ function TechniqueDetail({
                       cursor: drafted ? "default" : "pointer"
                     }}
                   >
-                    {drafted ? "✓ Draft created · pending in Policies" : "Generate enforcing policy"}
+                    {drafted ? "✓ Draft created · pending in Policies" : "Generate policy draft"}
                   </button>
                   <div style={{ fontSize: 11.5, color: MUTED, marginTop: 9, lineHeight: 1.5 }}>
                     Creates a <b style={{ color: "#d6d6da" }}>tighten-only dry-run draft</b> in Policies that denies this

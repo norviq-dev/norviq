@@ -43,6 +43,10 @@ class ThreatStep(BaseModel):
     inferred_verb: str | None = None
     inferred_count: int = 0
     observed_calls: int = 0
+    # Set on a tool -> data hop, naming the tool whose calls the counts above are. That edge is
+    # structural and has no audit rows of its own, so it carries the counts of the call into the tool
+    # on the same chain. None on a hop whose counts are its own.
+    via: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -77,7 +81,9 @@ class ThreatPath(BaseModel):
     hops: int
     trust: float | None = None
     blast: int
-    status: str  # exploitable | blocked | unsimulated
+    # exploitable | would_block | unsimulated | blocked. "would_block" = a hop ran only because the
+    # namespace is in Monitor: a policy matched every call on it, the calls executed, nothing was blocked.
+    status: str
     tool: str  # chokepoint tool
     reach: list[ReachAsset] = []
     steps: list[ThreatStep] = []

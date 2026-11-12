@@ -43,6 +43,7 @@ from norviq.api.main import create_app
 from norviq.api.routers.agents import get_admin_db, warm_agent_overrides
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
+from norviq.sdk.core.trust import TrustScore
 
 
 def _env(name: str) -> str:
@@ -213,6 +214,166 @@ async def test_a_freeze_upsert_keeps_the_existing_rows_identity_and_counters(env
     assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
     row = await _row(spiffe)
     assert (row["frozen"], row["trust_cap"]) == (False, None)
+
+
+# --- the agent reads show the freeze and the cap the engine enforces -----------------------------------------
+
+
+async def _agent_reads(client, spiffe: str) -> list[dict]:
+    """The agent's row from GET /agents (its namespace) and from GET /agents/{id}."""
+    listed = await client.get("/api/v1/agents?namespace=ctl-test", headers=_hdr())
+    detail = await client.get(f"/api/v1/agents/{spiffe}", headers=_hdr())
+    assert listed.status_code == 200 and detail.status_code == 200, (listed.text, detail.text)
+    return [next(r for r in listed.json() if r["spiffe_id"] == spiffe), detail.json()]
+
+
+async def test_a_freeze_is_still_read_as_frozen_once_its_display_row_expires(env) -> None:
+    """Reproduced on 0.2.7: frozen in agent_registry and agent_frozen:<id>, and 30 s later both agent reads
+    said "medium 0.455" from the registry snapshot, which predates the freeze."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "frozen-read")
+    async with _session() as session:
+        await upsert_agent_registry(session, spiffe_id=spiffe, namespace="ctl-test", agent_class="frozen-read",
+                                    trust_score=0.455, trust_category="Medium")
+        await session.commit()
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    await cache._client().delete(f"trust:{spiffe}")  # the display row's 30 s TTL, run out
+    for row in await _agent_reads(client, spiffe):
+        assert (row["frozen"], row["score"], row["category"]) == (True, 0.0, "frozen")
+
+
+async def test_a_lifted_freeze_is_not_read_back_from_a_frozen_snapshot(env) -> None:
+    """A call made while frozen writes 0.0/Frozen into agent_registry (the evaluator's write-through). Lifting the
+    freeze sets only frozen/trust_cap, so the snapshot still said Frozen and the agent read frozen again."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "lifted-read")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    async with _session() as session:
+        await upsert_agent_registry(session, spiffe_id=spiffe, namespace="ctl-test", agent_class="lifted-read",
+                                    trust_score=0.0, trust_category="Frozen", violation=True)
+        await session.commit()
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+    await cache._client().delete(f"trust:{spiffe}")
+    for row in await _agent_reads(client, spiffe):
+        assert (row["frozen"], row["trust_cap"], row["score"], row["category"]) == (False, None, None, "unscored")
+
+
+async def test_unfreeze_drops_the_freezes_display_row_and_reads_the_last_computed_score(env) -> None:
+    """The freeze writes a 30 s frozen display row. The lift used to leave it, so an agent unfrozen a moment
+    ago still read frozen, then "unscored", until it expired. The lift drops it (the fenced script, on real
+    Redis), and the reads show the registry's last computed score. A snapshot that is not frozen stays."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "unfreeze-display")
+    async with _session() as session:
+        await upsert_agent_registry(session, spiffe_id=spiffe, namespace="ctl-test", agent_class="unfreeze-display",
+                                    trust_score=0.455, trust_category="Medium")
+        await session.commit()
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    assert await cache._client().exists(f"trust:{spiffe}") == 1  # the freeze's display row
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+    assert await cache._client().exists(f"trust:{spiffe}") == 0
+    for row in await _agent_reads(client, spiffe):
+        assert (row["frozen"], row["trust_cap"], row["score"], row["category"]) == (False, None, 0.455, "medium")
+
+    warm = _agent(ids, "cap-keeps-snapshot")
+    snapshot = TrustScore(score=0.62, category="Medium").model_dump_json()
+    await cache._client().set(f"trust:{warm}", snapshot, ex=60)
+    assert (await client.put(f"/api/v1/agents/{warm}/trust", json={"score": 0.5}, headers=_hdr())).status_code == 200
+    assert await cache._client().get(f"trust:{warm}") == snapshot
+
+
+async def test_a_cap_is_read_as_a_cap_and_never_as_the_agents_score(env) -> None:
+    _, client, _, ids = env
+    spiffe = _agent(ids, "cap-read")
+    async with _session() as session:
+        await upsert_agent_registry(session, spiffe_id=spiffe, namespace="ctl-test", agent_class="cap-read",
+                                    trust_score=0.455, trust_category="Medium")
+        await session.commit()
+    resp = await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.8}, headers=_hdr())
+    assert resp.status_code == 200 and resp.json() == {"spiffe_id": spiffe, "frozen": False, "trust_cap": 0.8}
+    for row in await _agent_reads(client, spiffe):
+        assert (row["frozen"], row["trust_cap"], row["score"], row["category"]) == (False, 0.8, 0.455, "medium")
+
+
+async def _evaluated_under_the_cap(cache, spiffe: str, score: float, category: str) -> None:
+    """What one evaluation leaves behind: the registry write-through and the 30 s trust:<id> row."""
+    async with _session() as session:
+        await upsert_agent_registry(session, spiffe_id=spiffe, namespace="ctl-test", agent_class="x",
+                                    trust_score=score, trust_category=category)
+        await session.commit()
+    await cache._client().set(f"trust:{spiffe}", TrustScore(score=score, category=category).model_dump_json(), ex=60)
+
+
+async def _category(spiffe: str) -> str:
+    async with _session() as session:
+        return (await session.execute(text("SELECT trust_category FROM agent_registry WHERE spiffe_id = :s"),
+                                      {"s": spiffe})).scalar_one()
+
+
+async def test_remove_cap_does_not_leave_the_score_the_cap_held_down_on_display(env) -> None:
+    """Reproduced before the fix: capped at 0.30, an evaluation stored 0.30/Low in agent_registry and trust:<id>.
+    Remove Cap cleared only the cap, so both reads said "low 0.30, no cap" until the agent's next call: a score
+    the engine would no longer use, without the cap that produced it. The lift now drops the store's snapshot
+    and marks the registry's "Unscored" (real Redis script, real Postgres), and the reads say the score is not
+    known yet."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "cap-removed")
+    await _evaluated_under_the_cap(cache, spiffe, 0.9, "High")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.3}, headers=_hdr())).status_code == 200
+    await _evaluated_under_the_cap(cache, spiffe, 0.3, "Low")
+    for row in await _agent_reads(client, spiffe):
+        assert (row["trust_cap"], row["score"], row["category"]) == (0.3, 0.3, "low")
+
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+    assert await cache._client().exists(f"trust:{spiffe}") == 0
+    assert await _category(spiffe) == "Unscored"
+    for row in await _agent_reads(client, spiffe):
+        assert (row["frozen"], row["trust_cap"], row["score"], row["category"]) == (False, None, None, "unscored")
+
+    # The agent's next call writes a computed score again, and that is what is shown.
+    await _evaluated_under_the_cap(cache, spiffe, 0.88, "High")
+    for row in await _agent_reads(client, spiffe):
+        assert (row["trust_cap"], row["score"], row["category"]) == (None, 0.88, "high")
+
+
+async def test_a_raised_cap_or_a_freeze_also_drops_the_score_the_old_cap_held_down(env) -> None:
+    _, client, cache, ids = env
+    raised = _agent(ids, "cap-raised")
+    assert (await client.put(f"/api/v1/agents/{raised}/trust", json={"score": 0.3}, headers=_hdr())).status_code == 200
+    await _evaluated_under_the_cap(cache, raised, 0.3, "Low")
+    assert (await client.put(f"/api/v1/agents/{raised}/trust", json={"score": 0.6}, headers=_hdr())).status_code == 200
+    assert await cache._client().exists(f"trust:{raised}") == 0
+    for row in await _agent_reads(client, raised):
+        assert (row["trust_cap"], row["score"], row["category"]) == (0.6, None, "unscored")
+
+    # A freeze clears the cap. Once it is lifted the capped score must not come back.
+    frozen = _agent(ids, "cap-then-freeze")
+    assert (await client.put(f"/api/v1/agents/{frozen}/trust", json={"score": 0.3}, headers=_hdr())).status_code == 200
+    await _evaluated_under_the_cap(cache, frozen, 0.3, "Low")
+    assert (await client.put(f"/api/v1/agents/{frozen}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
+    assert (await client.put(f"/api/v1/agents/{frozen}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+    for row in await _agent_reads(client, frozen):
+        assert (row["frozen"], row["trust_cap"], row["score"], row["category"]) == (False, None, None, "unscored")
+
+
+async def test_a_cap_that_never_held_the_score_down_leaves_it_on_display(env) -> None:
+    """The control: a snapshot below the cap is a score the engine computed, and a lift or a lower cap keeps it."""
+    _, client, cache, ids = env
+    spiffe = _agent(ids, "cap-above")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.8}, headers=_hdr())).status_code == 200
+    await _evaluated_under_the_cap(cache, spiffe, 0.455, "Medium")
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 1.0}, headers=_hdr())).status_code == 200
+    assert await cache._client().exists(f"trust:{spiffe}") == 1
+    assert await _category(spiffe) == "Medium"
+    for row in await _agent_reads(client, spiffe):
+        assert (row["trust_cap"], row["score"], row["category"]) == (None, 0.455, "medium")
+
+    lowered = _agent(ids, "cap-lowered")
+    assert (await client.put(f"/api/v1/agents/{lowered}/trust", json={"score": 0.5}, headers=_hdr())).status_code == 200
+    await _evaluated_under_the_cap(cache, lowered, 0.5, "Medium")
+    assert (await client.put(f"/api/v1/agents/{lowered}/trust", json={"score": 0.3}, headers=_hdr())).status_code == 200
+    assert await cache._client().exists(f"trust:{lowered}") == 1
+    assert await _category(lowered) == "Medium"
 
 
 class _BrokenDb:
@@ -1597,9 +1758,15 @@ async def test_a_tightening_with_the_store_down_and_its_commit_unconfirmed_says_
 
 async def test_the_fenced_write_keeps_the_displayed_score_and_the_owner_key_on_a_ttl(env) -> None:
     _, client, cache, ids = env
+    # A freeze is the one admin write that sets a displayed score (0, frozen: the score the engine uses). It used
+    # to be checked with a cap of 0.4, which also wrote one: the cap value shown as the agent's trust. A cap now
+    # writes none, so the TTL is checked on the freeze, and the cap is checked to leave the display alone.
     spiffe = _agent(ids, "ttl")
-    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_hdr())).status_code == 200
+    assert (await client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0}, headers=_hdr())).status_code == 200
     assert 0 < await cache._client().ttl(f"trust:{spiffe}") <= settings.redis_ttl_trust_s * 2
+    capped = _agent(ids, "ttl-cap")
+    assert (await client.put(f"/api/v1/agents/{capped}/trust", json={"score": 0.4}, headers=_hdr())).status_code == 200
+    assert await cache._client().exists(f"trust:{capped}") == 0
     from norviq.api.routers.agents import _owner_ttl_ms
 
     assert 30_000 <= _owner_ttl_ms()

@@ -53,6 +53,7 @@ import {
   type BuilderError
 } from "../../lib/builderCompile";
 import { schemaPaths, type SchemaPath } from "../../lib/toolSchema";
+import { TIGHTEN_ONLY_DEFAULTS } from "../../lib/builderGraph";
 import type {
   BuilderAllowlistRefinements,
   BuilderParamConstraint,
@@ -72,6 +73,7 @@ import type {
 } from "../../lib/builderGraph";
 import { CAPABILITY_SOURCE_ORDER, CAPABILITY_SOURCES, verbsForSource, type CapabilityVerb } from "../../lib/capabilitySources";
 import { ApplyResultPanel, type ApplyResult } from "../common/ApplyResultPanel";
+import { policyVerdict, useEnforcementVerdict } from "../../lib/posture";
 import { KitButton } from "../common/KitButton";
 
 /**
@@ -1518,8 +1520,12 @@ export function BuilderSheet({
     seedGraph?.scope.kind === "class" ? seedGraph.scope.agentClass : ""
   );
   const [rules, setRules] = useState<BuilderRule[]>(() => seedGraph?.rules ?? []);
-  const [defaults, setDefaults] = useState<BuilderDefaults>(
-    () => seedGraph?.defaults ?? { decision: "allow", reason: "No builder rule matched" }
+  // An ALLOWLIST seed's `defaults` are not a rules-mode choice anyone made: allowlist mode compiles its
+  // own deny and never reads them. They become live only if the operator switches to Tighten-only
+  // rules, and there a carried-over `block` silently makes the policy deny-by-default. So a rules-mode
+  // seed keeps its defaults, and any other seed starts rules mode at the tighten-only default.
+  const [defaults, setDefaults] = useState<BuilderDefaults>(() =>
+    seedGraph && (seedGraph.mode ?? "rules") === "rules" ? seedGraph.defaults : { ...TIGHTEN_ONLY_DEFAULTS }
   );
   const [ruleIdTouched, setRuleIdTouched] = useState<Record<string, boolean>>({});
   const [knownClasses, setKnownClasses] = useState<string[]>([]);
@@ -1899,6 +1905,9 @@ export function BuilderSheet({
   const [unmeasuredAcknowledged, setUnmeasuredAcknowledged] = useState(false);
   const [saving, setSaving] = useState(false);
   const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
+  // What saving will do in the TARGET namespace. In Monitor the engine logs every match as a would-block,
+  // so "Save & enforce" with no note told the operator a policy would block when nothing would.
+  const targetVerdict = useEnforcementVerdict(targetNamespace.trim());
 
   // Per-INSTANCE rule-id sequence — a useRef (not module-level state) so two mounted BuilderSheets
   // (or a remount of the same one) each get their own counter starting fresh at 0, and never share or
@@ -2041,6 +2050,20 @@ export function BuilderSheet({
     }
     return out;
   }, [dryRunResult]);
+  /** Per-tool counts of replayed calls the server could not judge (refused only on the tool's argument
+   *  grant with every refinement met, no argument values recorded), from its sample. A grant with any of
+   *  these has not been shown to deny nothing. */
+  const unevaluatedByTool = useMemo<Map<string, number>>(() => {
+    const out = new Map<string, number>();
+    for (const s of dryRunResult?.cannot_evaluate_samples ?? []) {
+      const name = (s.tool_name ?? "").toLowerCase();
+      if (name) out.set(name, (out.get(name) ?? 0) + 1);
+    }
+    return out;
+  }, [dryRunResult]);
+  const cannotEvaluate = dryRunResult?.cannot_evaluate ?? 0;
+  /** More set aside than named: any tool may be among the unnamed ones. */
+  const unevaluatedSampleCapped = cannotEvaluate > (dryRunResult?.cannot_evaluate_samples?.length ?? 0);
   // Declared before the traffic derivations below because they all depend on it: a run against an
   // EARLIER rego is not a measurement of the policy currently on screen.
   const dryRunStale = dryRunRego !== null && dryRunRego !== compiled.rego;
@@ -2092,6 +2115,8 @@ export function BuilderSheet({
     // be the mirror image of the same defect — an unknown hiding a measurement.
     if (n > 0) return n;
     if (replayUnmeasured || flipSampleIncomplete) return null;
+    // Calls to this tool the replay could not judge are not calls it found harmless.
+    if ((unevaluatedByTool.get(toolKey) ?? 0) > 0 || unevaluatedSampleCapped) return null;
     return 0;
   };
   /** Why a row is silent, or why its number is a floor rather than a total — in the SAME words for the
@@ -2108,6 +2133,11 @@ export function BuilderSheet({
       return replayCountReported
         ? "The dry-run replayed no recent calls, so this grant's effect on real traffic is unmeasured — not zero."
         : "The dry-run did not report how many calls it replayed, so this grant's effect on real traffic is unmeasured — not zero.";
+    const unjudged = unevaluatedByTool.get(toolKey) ?? 0;
+    if (unjudged > 0)
+      return `${unjudged}${unevaluatedSampleCapped ? " or more" : ""} replayed call${unjudged === 1 ? "" : "s"} to this tool could not be evaluated: recorded without argument values, so this grant's constraints cannot be checked against them.`;
+    if (!flipSampleIncomplete && unevaluatedSampleCapped)
+      return "Some replayed calls could not be evaluated (no argument values recorded), and they may include this tool's — this grant may still deny replayed calls.";
     if (!flipSampleIncomplete) return null;
     if (flipSampleCapped) {
       if (flipSampleSize === 0 && !flipTotalReported)
@@ -2213,6 +2243,19 @@ export function BuilderSheet({
     ? "audit"
     : "block";
 
+  // What Save does, in the words the target namespace and the saved mode allow. "Save & enforce" used to be
+  // the label whenever the namespace was not confirmed Monitor: an unread posture, and a policy of audit-only
+  // rules (saved in mode "audit", which the evaluator never lets block), both promised enforcement.
+  const saveVerdict = policyVerdict(targetVerdict, primaryEnforcementMode, null);
+  const saveLabel =
+    saveVerdict === "monitor"
+      ? "Save (Monitor)"
+      : saveVerdict === "policy_audit"
+        ? "Save (audit only)"
+        : saveVerdict === "enforcing"
+          ? "Save & enforce"
+          : "Save";
+
   const runDryRun = async () => {
     if (!canDryRun) return;
     setDryRunLoading(true);
@@ -2269,7 +2312,7 @@ export function BuilderSheet({
         kind: "local",
         title: `Created ${ns}/${key}${ver ? ` · v${ver}` : ""}`,
         ok: true,
-        outcome: `Policy authored via the Visual Policy Builder for ${SCOPE_TIER_LABEL[tier].toLowerCase()} "${scopeIdentifier(scope)}" (loader key "${key}") in namespace "${ns}" and loaded into this cluster's policy engine — enforcing "${primaryEnforcementMode}". Effective on the next matching tool call.`,
+        outcome: `Policy authored via the Visual Policy Builder for ${SCOPE_TIER_LABEL[tier].toLowerCase()} "${scopeIdentifier(scope)}" (loader key "${key}") in namespace "${ns}" and loaded into this cluster's policy engine in mode "${primaryEnforcementMode}". Evaluated on the next matching tool call.`,
         manifest: { namespace: ns, agent_class: key, enforcement_mode: primaryEnforcementMode, rego: compiled.rego },
         expectedVersion: ver,
         expectedMode: primaryEnforcementMode
@@ -2657,6 +2700,32 @@ export function BuilderSheet({
                     onChange={(e) => setDefaults({ ...defaults, reason: e.target.value })}
                   />
                 </div>
+                {/* A block default is not tighten-only. With an allow default the engine collects this
+                    policy as an overlay, so an unmatched call keeps what every other layer decides; a
+                    block default denies it outright and the policy resolves by priority, which is what
+                    the Allowlist mode is for. Stated here, beside the control that causes it, because the
+                    mode card above says the opposite. */}
+                {defaults.decision === "block" && (
+                  <div
+                    data-testid="builder-defaults-not-tighten-only"
+                    role="status"
+                    style={{
+                      marginTop: -8,
+                      marginBottom: 16,
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      border: "1px solid #FFB02030",
+                      background: "#FFB02015",
+                      fontSize: 12,
+                      lineHeight: 1.5,
+                      color: "var(--text-secondary)"
+                    }}
+                  >
+                    <strong style={{ color: "var(--escalate)" }}>This is no longer tighten-only.</strong> With the
+                    default set to block, every call no rule matches is blocked, not left at its current outcome.
+                    Set the default to allow to only add blocks, or use {MODE_LABEL.allowlist} to deny by default.
+                  </div>
+                )}
               </>
             )}
 
@@ -3210,7 +3279,7 @@ export function BuilderSheet({
                       {(allowlistGrantFacts[openGrantTool] ?? []).some((f) => f.type === "not") && (
                         <ScopeSection
                           label="Negated"
-                          hint="Authored elsewhere and carried in. Compiles and enforces; not editable here."
+                          hint="Authored elsewhere and carried in. Compiles into the policy; not editable here."
                         />
                       )}
                       {(allowlistGrantFacts[openGrantTool] ?? []).map((f, i) => {
@@ -3249,7 +3318,7 @@ export function BuilderSheet({
                                 {describeFact(f.inner)}
                               </span>
                               <span style={{ display: "block", fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>
-                                Negated. Compiles and enforces. Not editable here — remove it and
+                                Negated. Compiles into the policy. Not editable here — remove it and
                                 re-author, or edit the policy source.
                               </span>
                             </span>
@@ -3416,7 +3485,7 @@ export function BuilderSheet({
             <div className="vpb-step" data-testid="builder-step-3" data-step-state={step3State} style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
               <div className="vpb-step-header">
                 <span className="vpb-step-badge">3</span>
-                <span className="vpb-step-title">Check & enforce</span>
+                <span className="vpb-step-title">Check & save</span>
                 <span className="vpb-step-chip" data-testid="builder-step-3-chip" data-done={saved}>
                   {saved ? "✓ Done" : "Needs input"}
                 </span>
@@ -3443,6 +3512,12 @@ export function BuilderSheet({
                   <div className="mono" style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
                     creates {targetNamespace.trim() || "—"} / {scopeIdentifier(scope).trim() ? loaderKeyFor(scope) : "—"}
                   </div>
+                  {targetVerdict === "monitor" && (
+                    <div data-testid="builder-monitor-note" style={{ fontSize: 11.5, color: "var(--escalate)", marginTop: 4 }}>
+                      Namespace <span className="mono">{targetNamespace.trim()}</span> is in Monitor mode: once saved,
+                      this policy is evaluated and its matches are logged as would-block. Live traffic is not blocked.
+                    </div>
+                  )}
                 </div>
 
                 {/* Sticky: this row holds Run dry-run / Save & enforce and sits BELOW the rego editor in this
@@ -3481,7 +3556,7 @@ export function BuilderSheet({
                         checked={unmeasuredAcknowledged}
                         onChange={(e) => setUnmeasuredAcknowledged(e.target.checked)}
                       />
-                      Enforce untested — no real call was replayed against this policy.
+                      Save untested — no real call was replayed against this policy.
                     </label>
                   )}
                   <InlineDisabledReason reason={saveBlockedReason}>
@@ -3492,7 +3567,7 @@ export function BuilderSheet({
                       data-testid="builder-save-btn"
                       onClick={saveAndEnforce}
                     >
-                      {saving ? "Saving..." : "Save & enforce"}
+                      {saving ? "Saving..." : saveLabel}
                     </KitButton>
                   </InlineDisabledReason>
                   <KitButton variant="ghost" onClick={requestClose}>
@@ -3541,7 +3616,56 @@ export function BuilderSheet({
                     <strong style={{ color: !flipTotalReported ? "var(--escalate)" : flipTotal > 0 ? "var(--escalate)" : "var(--allow)" }}>
                       {flipTotalReported ? `${flipTotal} newly blocked` : "newly-blocked count not reported"}
                     </strong>
+                    {cannotEvaluate > 0 && (
+                      <>
+                        {" "}
+                        ·{" "}
+                        <strong data-testid="builder-dryrun-cannot-evaluate" style={{ color: "var(--escalate)" }}>
+                          {cannotEvaluate} cannot evaluate (no argument values)
+                        </strong>
+                      </>
+                    )}
                   </div>
+                  {cannotEvaluate > 0 && (
+                    <div data-testid="builder-dryrun-cannot-evaluate-detail" style={{ fontSize: 11.5, marginTop: 4, color: "var(--text-secondary)" }}>
+                      Refused only on the tool&apos;s argument grant, with every refinement met, and recorded without
+                      argument values, so the replay cannot tell whether the real call met the grant. Not counted as
+                      newly blocked.
+                      {(dryRunResult.cannot_evaluate_samples?.length ?? 0) > 0 && (
+                        <>
+                          {" "}
+                          Tools:{" "}
+                          {[...unevaluatedByTool.entries()].map(([tool, n], i) => (
+                            <span key={tool} className="mono">
+                              {i > 0 && ", "}
+                              {tool} × {n}
+                            </span>
+                          ))}
+                          {unevaluatedSampleCapped ? " (sample)" : ""}.
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {/* The server's own caveat about what the replay could see. It was typed and never shown,
+                      so an argument-narrowing dry-run read as a measured result. */}
+                  {dryRunResult.advisory ? (
+                    <div
+                      data-testid="builder-dryrun-advisory"
+                      role="status"
+                      style={{
+                        marginTop: 6,
+                        padding: "7px 9px",
+                        borderRadius: 8,
+                        border: "1px solid #FFB02030",
+                        background: "#FFB02015",
+                        fontSize: 11.5,
+                        lineHeight: 1.5,
+                        color: "var(--text-secondary)"
+                      }}
+                    >
+                      {dryRunResult.advisory}
+                    </div>
+                  ) : null}
                   {(dryRunResult.newly_blocked_samples?.length ?? 0) > 0 && (
                     <>
                     {/* The chips are a SAMPLE — the server names at most 8 flips whatever the count

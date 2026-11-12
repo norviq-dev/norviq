@@ -11,6 +11,9 @@ way to enforce, one of which nobody reviews.
 
 from __future__ import annotations
 
+import shutil
+
+import pytest
 from fastapi.testclient import TestClient
 
 from norviq.api.auth import get_current_user
@@ -67,8 +70,11 @@ def _client(session: _FakeSession | None = None, user: dict | None = None) -> Te
 class _Row:
     """An audit row shaped the way the endpoint reads one."""
 
-    def __init__(self, tool_name, namespace="agents", payload=None, framework="sidecar", agent_class="support-bot"):
+    def __init__(self, tool_name, namespace="agents", payload=None, framework="sidecar", agent_class="support-bot",
+                 decision="allow", rule_id=""):
         self.tool_name = tool_name
+        self.decision = decision
+        self.rule_id = rule_id
         self.namespace = namespace
         self.payload = payload
         self.agent_class = agent_class
@@ -137,6 +143,49 @@ def test_propose_never_grants_a_tool_only_the_red_team_called() -> None:
     ).json()
     assert _allowlisted_tools(body["intent"]) == ["generate_report"]
     assert body["sampled"] == 8  # not 11
+
+
+def test_propose_never_grants_a_tool_whose_every_call_was_refused() -> None:
+    """A proposal is an allow list. A tool the engine blocked, or would have blocked under monitor,
+    on every recorded call is not a tool the class needs: something already said no to it. It used
+    to come back as a grant with no hint, so saving the proposal loosened the class policy."""
+    rows = [_Row("get_order") for _ in range(4)]
+    rows += [_Row("execute_sql", decision="audit", rule_id="monitor_would_block:llm06_excessive_agency")
+             for _ in range(3)]
+    rows += [_Row("run_shell", decision="block", rule_id="deny_shell_execution") for _ in range(2)]
+    rows += [_Row("delete_record", decision="audit", rule_id="policy_audit_would_block:strict_default_block")]
+    resp = _client(_FakeSession(rows)).post("/api/v1/intents/propose", json={"ns": "agents", "cls": "support-bot"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert _allowlisted_tools(body["intent"]) == ["get_order"]
+    assert body["sampled"] == 10
+    assert body["proposed_from"] == 4
+    assert {e["tool_name"]: (e["blocked"], e["would_block"]) for e in body["excluded_tools"]} == {
+        "delete_record": (0, 1), "execute_sql": (0, 3), "run_shell": (2, 0)}
+
+
+def test_propose_keeps_a_tool_that_was_also_allowed_and_reports_its_refusals() -> None:
+    """A tool with real allowed traffic stays proposable, but the refusals are carried with it so the
+    console can say so. An `audit` row WITHOUT a would-block prefix is a plain allow-and-log."""
+    rows = [_Row("query_db") for _ in range(2)]
+    rows += [_Row("query_db", decision="audit", rule_id="audit_everything")]
+    rows += [_Row("query_db", decision="escalate", rule_id="needs_review")]
+    rows += [_Row("query_db", decision="block", rule_id="deny_sql_injection")]
+    body = _client(_FakeSession(rows)).post(
+        "/api/v1/intents/propose", json={"ns": "agents", "cls": "support-bot"}).json()
+    assert _allowlisted_tools(body["intent"]) == ["query_db"]
+    assert body["excluded_tools"] == []
+    assert body["observed_decisions"] == {
+        "query_db": {"calls": 5, "allowed": 3, "blocked": 2, "would_block": 0}}
+
+
+def test_propose_refuses_when_every_recorded_call_was_refused() -> None:
+    """Nothing allowed means nothing to build an allow list from. Proposing anyway would either grant
+    the refused tools or emit an intent with no rules."""
+    rows = [_Row("run_shell", decision="block", rule_id="deny_shell_execution") for _ in range(3)]
+    resp = _client(_FakeSession(rows)).post("/api/v1/intents/propose", json={"ns": "agents", "cls": "support-bot"})
+    assert resp.status_code == 422
+    assert "blocked or would-blocked" in resp.json()["detail"]
 
 
 def test_propose_ignores_synthetic_probe_identities() -> None:
@@ -903,7 +952,8 @@ def test_dry_run_reports_the_ceiling_the_replay_itself_imposes(monkeypatch) -> N
     assert out["params_detail"] == "keys"
     assert out["replayed_without_values"] == 2
     assert out["observed_params"]["send_email"]["keys"] == ["to"]
-    assert any("over-report" in note for note in out["params_notes"])
+    # The note used to say the dry run "will over-report blocking"; it now names where those calls go.
+    assert any("cannot evaluate" in note for note in out["params_notes"])
 
 
 def test_dry_run_over_value_bearing_rows_reports_no_replay_ceiling(monkeypatch) -> None:
@@ -919,7 +969,69 @@ def test_dry_run_over_value_bearing_rows_reports_no_replay_ceiling(monkeypatch) 
     out = resp.json()
     assert out["params_detail"] == "masked"
     assert out["replayed_without_values"] == 0
-    assert not any("over-report" in note for note in out["params_notes"])
+    assert out["cannot_evaluate"] == 0
+    assert not any("cannot evaluate" in note for note in out["params_notes"])
+
+
+def _real_opa(monkeypatch) -> None:
+    """Evaluate through the opa binary and return the WHOLE package document, as the OPA server's data
+    API does for the router. That document carries `_failed`, every rule's false clauses."""
+    import json
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    class _Client:
+        async def stop(self) -> None:
+            return None
+
+    async def _evaluator(_scope: str):
+        async def evaluate(rego: str, payload: dict) -> dict:
+            package = next(line.split()[1] for line in rego.splitlines() if line.startswith("package "))
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "intent.rego"
+                path.write_text(rego, encoding="utf-8")
+                proc = subprocess.run(["opa", "eval", "--v0-compatible", "-d", str(path), "-I", f"data.{package}"],
+                                      input=json.dumps(payload), capture_output=True, text=True, check=True)
+            return json.loads(proc.stdout)["result"][0]["expressions"][0]["value"]
+
+        async def load(_rego: str) -> None:
+            return None
+
+        async def unload() -> None:
+            return None
+
+        return evaluate, load, unload, _Client()
+
+    monkeypatch.setattr(intents_router, "_opa_evaluator", _evaluator)
+
+
+@pytest.mark.skipif(shutil.which("opa") is None, reason="opa binary required")
+def test_dry_run_counts_a_refusal_the_audit_log_cannot_judge_apart_from_a_block(monkeypatch) -> None:
+    """`notify-customer` needs `to` to match an address at acme.com. A key-only row has the NAME `to`
+    and no value, so the replay cannot tell whether the real call matched: `cannot_evaluate`, not a
+    block, and the rule is not reported as matching nothing. A row with the value recorded, and a row
+    that recorded an empty argument list, are judged for real."""
+    _real_opa(monkeypatch)
+    rows = [
+        _keys_row("send_email", ["to"]),
+        _keys_row("send_email", ["to"]),
+        _Row("send_email", payload={"masked_params": {"to": "x@attacker.example"}}),
+        _keys_row("send_email", []),
+    ]
+    resp = _client(_FakeSession(rows)).post(
+        "/api/v1/intents/dry-run", json={"ns": "agents", "cls": "support-bot", "intent": _GOOD_INTENT})
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["total"] == 4
+    assert out["cannot_evaluate"] == 2
+    assert out["would_block"] == 2
+    assert out["unevaluated"] == {"notify-customer": 2}
+    assert out["unused_rules"] == []
+    assert [c["tool_name"] for c in out["unevaluable"]] == ["send_email", "send_email"]
+    # The note says what is set aside: argument predicates, and a verb the arguments decide.
+    assert any("nor a verb predicate on a tool whose verb comes from its arguments" in n
+               for n in out["params_notes"])
 
 
 # --- the router must not offer a way to enforce ---------------------------------------------------

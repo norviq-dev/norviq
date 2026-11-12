@@ -15,6 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, require_admin, require_admin_or_service, require_target_cluster, scoped_namespace
 from norviq.api.db.models import AuditLogEntry, Policy
 from norviq.api.db.session import get_session
+from norviq.api.replay_values import (  # same "no argument values" test as /intents
+    audit_row_lacks_values,
+    builder_grant_waits_on_values,
+)
 from norviq.api.routers.settings_router import assert_apply_allowed  # shared dry-run-only gate
 from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # exclude probe/test traffic from dry-run replay
 from norviq.api.threat_intent import (  # accumulate remediation controls in the single overlay
@@ -1179,6 +1183,51 @@ async def _validate_rego(evaluator, body: PolicyCreate) -> tuple[bool, list[str]
 
 _DRYRUN_REPLAY_CAP = 500  # bound the replay so a busy namespace can't make dry-run unbounded
 
+# The rule id the Visual Builder's allowlist gives a call it refuses because the tool's per-tool grant
+# failed ("allowed for this class, but these arguments fall outside what it is scoped to do"); a tool
+# outside the allowlist is `intent_default_deny` instead. It is where the search for a refusal the
+# replay cannot judge STARTS, never the evidence on its own. The builder emits it whether or not a
+# refinement failed too (`{ denied; in_allowlist; not constraints_ok }`), a grant may hold facts that read
+# no argument, and hand-written rego may emit the same id for anything. `_refused_only_on_argument_values`
+# decides.
+_ARGUMENT_SCOPED_RULE_IDS = frozenset({"intent_constraint_violation"})
+
+# Appended to the candidate for one probe evaluation, never saved: the builder's `constraints_ok` gate
+# is a rule with several bodies, so one more body that always holds makes every per-tool grant read as
+# met. The candidate then allows the call exactly when the allowlist membership, the scope guard and
+# every enabled refinement hold.
+_GRANTS_ASSUMED_MET = (
+    "\n\n# Dry-run probe, never saved: every per-tool grant assumed met.\nconstraints_ok { true }\n"
+)
+
+
+async def _refused_only_on_argument_values(evaluator, key: str, ns: str, agent_class: str, opa_input: dict,
+                                           rego: str) -> bool:
+    """Whether a value-less record's builder-allowlist refusal is down to argument values alone.
+
+    Two conditions, both required:
+
+    * every line of the tool's grant reads argument values (`builder_grant_waits_on_values`, from the
+      graph embedded in the module), so the grant's failure says nothing about the real call;
+    * the candidate ALLOWS the call once every grant is assumed met, so no refinement (read-only,
+      no-egress, scope, rate) and no scope guard refused it as well. The builder labels a call that
+      fails a refinement AND its grant `intent_constraint_violation`, and those calls were being set
+      aside although the refinement refuses them whatever their arguments.
+
+    Anything it cannot establish, including a probe the evaluator fails on, answers False: the call
+    stays a block.
+    """
+    tool = str(opa_input.get("tool_name", ""))
+    normalized = str(opa_input.get("tool_name_normalized") or tool)
+    if not builder_grant_waits_on_values(rego, tool, normalized):
+        return False
+    try:
+        probe = await evaluator._evaluate_opa(f"{key}:grants-met", ns, agent_class, opa_input,
+                                              rego + _GRANTS_ASSUMED_MET)
+    except Exception:
+        return False
+    return str(probe.get("decision", "")) == "allow"
+
 
 def _engine_trust_category(score: float) -> str:
     """The tier the ENGINE would assign, so dry-run and enforcement cannot disagree.
@@ -1242,7 +1291,7 @@ def _opa_input_from_record(rec: AuditLogEntry, evaluator=None) -> dict:
             session_id=rec.session_id or "dry-run",
             mcp=payload.get("mcp") or {},
             # The record knows the depth the call was made at. Replaying every row at 0 measured any
-            # candidate touching input.call_depth — the OWASP-LLM08 chain-depth shape — against a
+            # candidate touching input.call_depth — the chain-depth shape — against a
             # constant and reported "safe to deploy".
             call_depth=int(payload.get("call_depth") or 0),
         )
@@ -1308,6 +1357,10 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
 
     dry_key = f"dryrun:{ns}:{body.agent_class or '__all__'}"
     would_block = would_allow = would_escalate = newly_blocked = newly_allowed = 0
+    # Records the candidate refused only on argument values the record never kept — see
+    # _refused_only_on_argument_values. Kept out of every count below, which they used to inflate.
+    cannot_evaluate = 0
+    cannot_evaluate_samples: list[dict] = []
     # `replayed` counts records the candidate rego was ACTUALLY evaluated against — never the fetched
     # row count. A skipped row was not measured, and reporting it as measured is what turns "we replayed
     # nothing" into the all-clear "No currently-allowed traffic would be newly blocked — safe to deploy."
@@ -1321,7 +1374,8 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
             synthetic_skipped += 1
             continue
         try:
-            dec = await evaluator._evaluate_opa(dry_key, ns, rec.agent_class, _opa_input_from_record(rec, evaluator), body.rego_source)
+            opa_input = _opa_input_from_record(rec, evaluator)
+            dec = await evaluator._evaluate_opa(dry_key, ns, rec.agent_class, opa_input, body.rego_source)
         except Exception:
             # A single bad record never sinks the whole simulation — but it is not a record that came
             # back clean either, so it is COUNTED and reported rather than averaged into the denominator.
@@ -1330,6 +1384,19 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
         replayed += 1
         now = str(dec.get("decision", "allow"))
         was = str(rec.decision or "allow")
+        rule_id = str(dec.get("rule_id", ""))
+        if now in ("block", "escalate") and rule_id in _ARGUMENT_SCOPED_RULE_IDS:
+            payload = rec.payload if isinstance(rec.payload, dict) else {}
+            params = payload.get("masked_params") or payload.get("tool_params") or {}
+            if audit_row_lacks_values(params if isinstance(params, dict) else {}, payload) and (
+                await _refused_only_on_argument_values(evaluator, dry_key, ns, rec.agent_class, opa_input,
+                                                       body.rego_source)
+            ):
+                cannot_evaluate += 1
+                if len(cannot_evaluate_samples) < 8:
+                    cannot_evaluate_samples.append({"tool_name": rec.tool_name, "was": was, "now": now,
+                                                    "rule_id": rule_id})
+                continue
         if now == "block":
             would_block += 1
         elif now == "escalate":
@@ -1367,6 +1434,10 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
         "newly_blocked": newly_blocked,
         "newly_allowed": newly_allowed,
         "newly_blocked_samples": flip_samples,
+        # Replayed, but not judged: refused only on argument values the record did not keep. Part of
+        # `total_records_checked`, and in none of the counts above.
+        "cannot_evaluate": cannot_evaluate,
+        "cannot_evaluate_samples": cannot_evaluate_samples,
         "block_rate_pct": round((would_block / checked * 100) if checked else 0, 2),
         "truncated": truncated,
         "replay_cap": _DRYRUN_REPLAY_CAP,
@@ -1406,7 +1477,10 @@ def _dryrun_advisory(checked: int, eval_errors: int) -> str:
         return (
             "Replayed records carry empty tool_params because audit_capture_masked_params is off "
             "(the default). Tool-name and scope rules are exercised correctly; a rule matching on "
-            "CONTENT cannot fire here. Enable audit_capture_masked_params for a content-matching "
+            "CONTENT cannot fire here. A call a Visual Builder allowlist refused only on its per-tool "
+            "argument grant, with every refinement met, is counted as 'cannot evaluate', not as newly "
+            "blocked. Any other refusal is counted as it replays, so a rule that requires an argument "
+            "value may over-report blocks. Enable audit_capture_masked_params for a content-matching "
             "dry-run."
         )
     if eval_errors:
@@ -1451,6 +1525,7 @@ async def dry_run_policy(
             "valid": False, "errors": errors, "sample_decision": sample_decision,
             "total_records_checked": 0, "would_block": 0, "would_allow": 0, "would_escalate": 0,
             "newly_blocked": 0, "newly_allowed": 0, "newly_blocked_samples": [], "block_rate_pct": 0,
+            "cannot_evaluate": 0, "cannot_evaluate_samples": [],
             "scope": {"namespace": body.namespace or "default", "agent_class": body.agent_class or None},
             "time_range": "last 24 hours",
             "recommendation": "Invalid rego — fix errors before deploying",
@@ -1470,6 +1545,9 @@ async def dry_run_policy(
             if errored
             else "No recent real traffic for this scope — cannot simulate impact; deploy with care."
         )
+    elif newly == 0 and replay.get("cannot_evaluate", 0):
+        # Not "safe to deploy": the calls it could not judge are exactly the ones whose flips are unknown.
+        recommendation = "No call the replay could evaluate would be newly blocked."
     elif newly == 0:
         recommendation = "No currently-allowed traffic would be newly blocked — safe to deploy."
     else:
@@ -1482,9 +1560,17 @@ async def dry_run_policy(
             f" Simulation is PARTIAL — the evaluator failed on {errored} further "
             f"record{'' if errored == 1 else 's'}, whose impact is unknown."
         )
+    unjudged = replay.get("cannot_evaluate", 0)
+    if unjudged and checked:
+        # Never let these ride on the all-clear: the flips among them are unknown, not absent.
+        recommendation += (
+            f" {unjudged} further call{'' if unjudged == 1 else 's'} could not be evaluated: refused only on "
+            "per-tool argument constraints, and recorded without argument values."
+        )
     log.info("nrvq.api.policy.dry_run", valid=valid, checked=checked, fetched=replay.get("records_fetched"),
              synthetic_skipped=replay.get("synthetic_skipped"), eval_errors=errored, would_block=replay["would_block"],
-             newly_blocked=newly, ns=body.namespace, cls=body.agent_class, code="NRVQ-API-7014")
+             newly_blocked=newly, cannot_evaluate=unjudged, ns=body.namespace, cls=body.agent_class,
+             code="NRVQ-API-7014")
     return {
         "valid": True,
         "errors": errors,

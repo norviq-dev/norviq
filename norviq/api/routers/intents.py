@@ -35,8 +35,9 @@ from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import AuditLogEntry, IntentDraft
 from norviq.api.db.session import get_session
 from norviq.api.routers.graphs import _resolve_namespaces
+from norviq.api.replay_values import audit_row_lacks_values
 from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # proposals derive from REAL traffic only
-from norviq.engine.evaluator import OPAEvaluator
+from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES, OPAEvaluator
 from norviq.engine.intent import IntentError, compile_intent, dry_run, propose_intent
 
 # The one regex that decides whether `param_paths.<path>` is an addressable field. IMPORTED rather
@@ -437,9 +438,10 @@ def _params_notes(evidence: _ParamEvidence, added: dict, bounded: bool) -> list[
     if evidence.calls_without_values:
         notes.append(
             f"{evidence.calls_without_values} of the sampled call(s) carry no recorded argument "
-            "VALUES, so a dry run over them cannot satisfy any argument-level predicate and will "
-            "over-report blocking. Turn on masked parameter capture before reading a dry-run "
-            "argument refusal as a real one."
+            "VALUES, so a dry run over them cannot satisfy any argument-level predicate, nor a verb "
+            "predicate on a tool whose verb comes from its arguments. A call refused only on such "
+            "predicates is counted as 'cannot evaluate (no argument values)', not as a block. Turn on "
+            "masked parameter capture to evaluate those calls."
         )
     return notes
 
@@ -494,10 +496,49 @@ def _policy_input(tool_name: str, tool_params: dict, agent_class: str, namespace
     }
 
 
+# What the engine actually did with a recorded call. A proposal is an ALLOW list, so a call the engine
+# refused is not evidence that the class needs the tool: it is evidence that something already said no.
+_OBSERVED_ALLOWED = "allowed"
+_OBSERVED_BLOCKED = "blocked"
+_OBSERVED_WOULD_BLOCK = "would_block"
+
+
+def _observed_decision(decision: object, rule_id: object) -> str:
+    """allowed / blocked / would_block for one audit row.
+
+    `escalate` counts as blocked: the call was held for a human, not granted, so turning it into an
+    outright allow loosens exactly as much. A would-block is an `audit` row carrying one of the engine's
+    softening prefixes, the same shared tuple /audit/stats and coverage read, so the three surfaces
+    cannot disagree about which rows were would-blocks.
+    """
+    d = str(decision or "")
+    if d in ("block", "escalate"):
+        return _OBSERVED_BLOCKED
+    if d == "audit" and str(rule_id or "").startswith(WOULD_BLOCK_RULE_PREFIXES):
+        return _OBSERVED_WOULD_BLOCK
+    return _OBSERVED_ALLOWED
+
+
+def _observed_by_tool(calls: list[dict], outcomes: list[str]) -> dict[str, dict]:
+    """tool -> {calls, allowed, blocked, would_block}, for the tools with at least one refused call."""
+    counts: dict[str, dict] = {}
+    for call, outcome in zip(calls, outcomes):
+        name = str(call.get("tool_name", ""))
+        entry = counts.setdefault(name, {"calls": 0, _OBSERVED_ALLOWED: 0, _OBSERVED_BLOCKED: 0,
+                                         _OBSERVED_WOULD_BLOCK: 0})
+        entry["calls"] += 1
+        entry[outcome] += 1
+    return {name: c for name, c in sorted(counts.items()) if c["calls"] != c[_OBSERVED_ALLOWED]}
+
+
 async def _recorded_calls(
-    session: AsyncSession, namespaces: list[str] | None, agent_class: str, limit: int
+    session: AsyncSession, namespaces: list[str] | None, agent_class: str, limit: int,
+    outcomes: list[str] | None = None, values_missing: list[bool] | None = None,
 ) -> tuple[list[dict], _ParamEvidence]:
     """Recent audit rows for a class, as policy input documents, plus what they show about arguments.
+
+    `outcomes`, when given, receives one `_observed_decision` per returned call, in the same order.
+    `values_missing`, when given, receives one `audit_row_lacks_values` per returned call, in the same order.
 
     Returns (calls, evidence). The honest ceiling this docstring has always described is now a
     THREE-state one, because two of those states used to be spelled the same way:
@@ -553,6 +594,10 @@ async def _recorded_calls(
         server = str((mcp or {}).get("server", "")) if isinstance(mcp, dict) else ""
         document = _policy_input(row.tool_name, params, agent_class, row.namespace, server)
         calls.append(document)
+        if outcomes is not None:
+            outcomes.append(_observed_decision(getattr(row, "decision", None), getattr(row, "rule_id", None)))
+        if values_missing is not None:
+            values_missing.append(audit_row_lacks_values(params, payload))
 
         # `param_keys` is written independently of masked capture, so a row may carry either, both or
         # neither. Whether it is PRESENT — not whether it is non-empty — is what separates "captured,
@@ -705,10 +750,15 @@ async def propose_endpoint(
     if body.cls in _RESERVED_CLASSES:
         raise HTTPException(status_code=422, detail=f"'{body.cls}' is a managed scope, not an agent class.")
     namespaces = _resolve_namespaces(user, body.ns)
-    calls, evidence = await _recorded_calls(session, namespaces, body.cls, body.limit)
+    outcomes: list[str] = []
+    calls, evidence = await _recorded_calls(session, namespaces, body.cls, body.limit, outcomes=outcomes)
     if body.calls:
         ns = (namespaces or [""])[0]
-        calls.extend(_sample_calls(body.calls, body.cls, ns, evidence))
+        supplied = _sample_calls(body.calls, body.cls, ns, evidence)
+        calls.extend(supplied)
+        # A supplied call is the operator's own statement of what the class does, not a recorded
+        # decision, so it counts as allowed.
+        outcomes.extend([_OBSERVED_ALLOWED] * len(supplied))
         # Unchanged: supplying calls has always set this true. `params_detail` and `observed_params`
         # are the fields that stay honest when the supplied calls carry no arguments.
         evidence.params_available = True
@@ -724,15 +774,42 @@ async def propose_endpoint(
                 "first, or supply calls"
             ),
         )
-    intent = propose_intent(body.name, body.cls, calls)
+    # A PROPOSAL IS AN ALLOW LIST, so it is built only from calls the engine let through. A blocked or
+    # would-blocked call used to feed it like any other, and a tool the namespace had refused every
+    # time came back as a grant ("this grants the tool outright") with nothing on screen saying it had
+    # ever been refused. Saving that loosens the class policy; the floor still blocks it today, which
+    # is the only reason it was not a bypass. Refused calls stay in `sampled` and in the dry run.
+    admissible = [call for call, outcome in zip(calls, outcomes) if outcome == _OBSERVED_ALLOWED]
+    refused = _observed_by_tool(calls, outcomes)
+    if not admissible:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"every recorded call for class '{body.cls}' was blocked or would-blocked, so there is "
+                "no allowed traffic to propose an allow list from"
+            ),
+        )
+    intent = propose_intent(body.name, body.cls, admissible)
     added, bounded = _add_existence_predicates(intent, evidence)
+    excluded = [
+        {"tool_name": name, **counts}
+        for name, counts in refused.items() if counts[_OBSERVED_ALLOWED] == 0
+    ]
     log.info("nrvq.api.intent.proposed", cls=body.cls, rules=len(intent["call"]),
-             sampled=len(calls), params_available=evidence.params_available,
+             sampled=len(calls), proposed_from=len(admissible), excluded_tools=len(excluded),
+             params_available=evidence.params_available,
              params_detail=evidence.detail, existence_predicates=sum(len(v) for v in added.values()),
              code="NRVQ-API-7110")
     return {
         "intent": intent,
         "sampled": len(calls),
+        # How many of the sampled calls the rules were derived from: the allowed ones.
+        "proposed_from": len(admissible),
+        # Tools whose every recorded call was refused. Left out of the proposal; the console lists them.
+        "excluded_tools": excluded,
+        # Every tool with at least one refused call, granted or not, with its counts. A granted tool
+        # here was ALSO allowed at least once, and the console says how often it was refused.
+        "observed_decisions": refused,
         "params_available": evidence.params_available,
         "params_detail": evidence.detail,
         # tool -> what its traffic showed about arguments. The console renders this against the rule
@@ -765,10 +842,15 @@ async def dry_run_endpoint(
     except IntentError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    calls, evidence = await _recorded_calls(session, namespaces, body.cls, body.limit)
+    values_missing: list[bool] = []
+    calls, evidence = await _recorded_calls(session, namespaces, body.cls, body.limit,
+                                            values_missing=values_missing)
     if body.calls:
         ns = (namespaces or [""])[0]
-        calls.extend(_sample_calls(body.calls, body.cls, ns, evidence))
+        supplied = _sample_calls(body.calls, body.cls, ns, evidence)
+        calls.extend(supplied)
+        # A supplied call is replayed with exactly the arguments it was given.
+        values_missing.extend([False] * len(supplied))
         evidence.params_available = True
     if not calls:
         # Same wording as /propose above, for the same reason: the replay corpus is real traffic only.
@@ -800,7 +882,7 @@ async def dry_run_endpoint(
             cursor["i"] += 1
             return result
 
-        report = dry_run(compiled, calls, evaluator=_replay)
+        report = dry_run(compiled, calls, evaluator=_replay, values_missing=values_missing)
     finally:
         try:
             await unload()
@@ -808,17 +890,18 @@ async def dry_run_endpoint(
             await client.stop()
 
     log.info("nrvq.api.intent.dry_run", cls=body.cls, total=report.total,
-             would_block=report.would_block, params_detail=evidence.detail, code="NRVQ-API-7111")
+             would_block=report.would_block, cannot_evaluate=report.cannot_evaluate,
+             params_detail=evidence.detail, code="NRVQ-API-7111")
     out = report.as_dict()
     out["params_available"] = evidence.params_available
     out["params_detail"] = evidence.detail
     out["observed_params"] = evidence.observed()
     # THE REPLAY'S OWN CEILING, reported as a count rather than folded into `would_block`. A row that
     # recorded argument NAMES and no values reconstructs to an input document with no `param_paths`,
-    # so every argument-level predicate reads as unsatisfied and the call replays as a block. That is
-    # fail-closed and therefore the right direction — but a refusal caused by what the AUDIT LOG
-    # lacks is not a refusal the candidate policy would make in production, and the two must not be
-    # reported as the same number.
+    # so every argument-level predicate reads as unsatisfied and the call replays as a block. A
+    # refusal caused by what the AUDIT LOG lacks is not a refusal the candidate policy would make in
+    # production. This count used to be published beside a `would_block` that still included those
+    # calls; `cannot_evaluate` (from the report) now holds them instead.
     out["replayed_without_values"] = evidence.calls_without_values
     out["params_notes"] = _params_notes(evidence, {}, False)
     return out

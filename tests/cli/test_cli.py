@@ -152,12 +152,20 @@ def test_agent_list(monkeypatch) -> None:
 
 
 def test_agent_reset_trust(monkeypatch) -> None:
-    """Test 10 agent reset output."""
-    payload = {"spiffe_id": "spiffe://test", "score": 0.9, "category": "trusted"}
-    _patch_request(monkeypatch, {("PUT", _url("/api/v1/agents/spiffe://test/trust")): FakeResponse(200, payload)})
-    result = _runner().invoke(cli, ["agent", "reset-trust", "spiffe://test", "--score", "0.9"])
-    assert result.exit_code == 0
-    assert "Trust reset: spiffe://test -> 0.9 (trusted)" in result.output
+    """reset-trust says which control the endpoint put in force. It used to print the score it sent as
+    the agent's trust ("-> 0.8 (high)"), while 0.8 was a cap and the agent's trust was whatever it earned."""
+    url = ("PUT", _url("/api/v1/agents/spiffe://test/trust"))
+    cases = (
+        ("0.9", {"spiffe_id": "spiffe://test", "frozen": False, "trust_cap": 0.9}, "Trust capped at 0.9: spiffe://test"),
+        ("1.0", {"spiffe_id": "spiffe://test", "frozen": False, "trust_cap": None}, "Freeze and cap lifted: spiffe://test"),
+        ("0", {"spiffe_id": "spiffe://test", "frozen": True, "trust_cap": None}, "Agent frozen: spiffe://test"),
+    )
+    for score, payload, expected in cases:
+        _patch_request(monkeypatch, {url: FakeResponse(200, payload)})
+        result = _runner().invoke(cli, ["agent", "reset-trust", "spiffe://test", "--score", score])
+        assert result.exit_code == 0, result.output
+        assert expected in result.output
+        assert "Trust reset" not in result.output
 
 
 def test_config_show(monkeypatch) -> None:

@@ -926,17 +926,26 @@ async def test_apply_policy(real_db: None) -> None:
 
 
 def test_agents_list_and_update_trust() -> None:
-    """Update trust score and list agent."""
+    """A cap is listed as a cap, beside the score the engine uses.
+
+    This test used to pass because the cap was written into the agent's displayed score: PUT 0.61 made a
+    trust:<id> row reading 0.61, and that row is what listed the agent. The engine uses min(computed, 0.61),
+    so on an agent scoring 0.455 the console showed a score the engine never used."""
     client = _client()
     # PUT /agents/{id}/trust durably persists the freeze/cap (the trust fail-open fix), so the route
     # depends on get_session; without an override the dependency raises before the handler runs.
     _override_session(client, FakeSession([]))
     try:
         spiffe = "spiffe://example/ns/default/sa/agent-one"
+        cache = client.app.state.cache
+        cache.trust[spiffe] = TrustScore(score=0.455)  # the agent's last evaluated score
         updated = client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.61}, headers=_auth_headers())
         assert updated.status_code == 200
+        assert updated.json() == {"spiffe_id": spiffe, "frozen": False, "trust_cap": 0.61}
         listed = client.get("/api/v1/agents", headers=_auth_headers()).json()
         assert len(listed) == 1 and listed[0]["spiffe_id"] == spiffe
+        assert (listed[0]["score"], listed[0]["category"]) == (0.455, "medium")
+        assert (listed[0]["trust_cap"], listed[0]["frozen"]) == (0.61, False)
     finally:
         client.close()
 

@@ -3,7 +3,8 @@
 // Source capability model: what verbs a data SOURCE exposes, classified server-side against
 // the join of grants / observed traffic / policy coverage. See norviq/engine/capability.
 export type CapabilityVerb = "read" | "write" | "delete" | "send" | "unknown";
-export type CapabilityStatus = "undefended" | "dormant_grant" | "defended" | "latent" | "not_exposed";
+// "monitored": calls were logged as would-block and RAN (Monitor / audit mode). Not a defence.
+export type CapabilityStatus = "undefended" | "monitored" | "dormant_grant" | "defended" | "latent" | "not_exposed";
 
 export interface CapabilityFinding {
   verb: CapabilityVerb;
@@ -14,6 +15,7 @@ export interface CapabilityFinding {
   granted: boolean;
   observed: boolean;
   defended: boolean;
+  monitored?: boolean; // would-blocked calls that ran; absent on older API responses
   recommendation: string;
   // The agent-classes exercising this verb — the targets a one-click "Defend" policy applies to.
   agent_classes?: string[];
@@ -24,7 +26,7 @@ export interface SourceCapability {
   source_class: "datastore" | "egress" | "object_store" | "unknown";
   source_display: string;
   findings: CapabilityFinding[];
-  worst: CapabilityFinding | null; // highest-risk OPEN verb (undefended/dormant), null = nothing actionable
+  worst: CapabilityFinding | null; // highest-risk OPEN verb (undefended/monitored/dormant), null = nothing actionable
 }
 
 export interface AssetNode {

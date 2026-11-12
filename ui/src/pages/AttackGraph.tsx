@@ -28,7 +28,7 @@ import { ToolVerbsPanel } from "../components/attack-graph/ToolVerbsPanel";
 import { SEVERITY_COLORS } from "../components/attack-graph/constants";
 import type { PathStatus, Severity, ThreatPath } from "../components/attack-graph/types";
 
-type StatusFilter = "exploitable" | "blocked" | null;
+type StatusFilter = "exploitable" | "would_block" | "blocked" | null;
 type SevMap = Record<Severity, boolean>;
 const ALL_SEV: Severity[] = ["critical", "high", "medium", "low"];
 const RANGES = [
@@ -38,7 +38,7 @@ const RANGES = [
 ];
 
 /** Rank for worst-first triage; the server already sorts, but a what-if flip can re-order locally. */
-const RANK_STATUS: Record<PathStatus, number> = { exploitable: 0, unsimulated: 1, blocked: 2 };
+const RANK_STATUS: Record<PathStatus, number> = { exploitable: 0, would_block: 1, unsimulated: 2, blocked: 3 };
 const RANK_SEV: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
 /**
@@ -98,7 +98,7 @@ export function AttackGraph() {
   const [loadedRange, setLoadedRange] = useState<string | null>(null);
   const [agentClass, setAgentClass] = useState(searchParams.get("cls") ?? "all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>(
-    searchParams.get("status") === "exploitable" || searchParams.get("status") === "blocked"
+    ["exploitable", "would_block", "blocked"].includes(searchParams.get("status") ?? "")
       ? (searchParams.get("status") as StatusFilter)
       : null
   );
@@ -111,6 +111,11 @@ export function AttackGraph() {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
 
   const [selectedId, setSelectedId] = useState<string | null>(searchParams.get("path"));
+  // The path id a `?path=` link arrived with, kept until it resolves or the operator picks a path.
+  // Path ids changed in 0.2.8 (the chokepoint is part of the id now), so a link saved before then names
+  // a path that no longer exists under that id. Falling back to the first path showed a DIFFERENT path
+  // under the link's URL as if it were the one linked, and the URL was then rewritten to it.
+  const [linkedId, setLinkedId] = useState<string | null>(searchParams.get("path"));
   const [scope, setScope] = useState<ScopeCard | null>(null);
   const [whatIf, setWhatIf] = useState<Record<string, number>>({});
   const [sim, setSim] = useState<Record<string, PathStatus>>({});
@@ -209,16 +214,25 @@ export function AttackGraph() {
     return base.sort((a, b) => (RANK_STATUS[statusOf(a)] - RANK_STATUS[statusOf(b)]) || (RANK_SEV[a.sev] - RANK_SEV[b.sev]));
   }, [visible, statusFilter, statusOf]);
 
+  // Only once a fetch has LANDED (`loadedRange` is set with `paths`, never on a failure): before that,
+  // or after a failed fetch, "not found" would mean "could not look".
+  const missingLinkedId =
+    linkedId && loadedRange != null && !loading && !paths.some((p) => p.id === linkedId) ? linkedId : null;
+  useEffect(() => {
+    if (linkedId && paths.some((p) => p.id === linkedId)) setLinkedId(null);
+  }, [linkedId, paths]);
+
   const selected = useMemo(
-    () => listed.find((p) => p.id === selectedId) ?? listed[0] ?? null,
-    [listed, selectedId]
+    () => (missingLinkedId ? null : listed.find((p) => p.id === selectedId) ?? listed[0] ?? null),
+    [listed, selectedId, missingLinkedId]
   );
   const effSelId = selected?.id ?? null;
 
   // ── shareable URL: reflect selection + filters ──
   useEffect(() => {
     const q = new URLSearchParams();
-    if (effSelId) q.set("path", effSelId);
+    // A link that did not resolve keeps its id in the URL, so a reload or a copy still says what it pointed at.
+    if (effSelId ?? missingLinkedId) q.set("path", (effSelId ?? missingLinkedId) as string);
     if (selectedNamespace && selectedNamespace !== "all") q.set("ns", selectedNamespace);
     if (agentClass !== "all") q.set("cls", agentClass);
     if (statusFilter) q.set("status", statusFilter);
@@ -227,14 +241,16 @@ export function AttackGraph() {
     if (range !== "24h") q.set("range", range);
     setSearchParams(q, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effSelId, selectedNamespace, agentClass, statusFilter, severities, range]);
+  }, [effSelId, missingLinkedId, selectedNamespace, agentClass, statusFilter, severities, range]);
 
   // ── stats across VISIBLE paths (REAL status only — a what-if never moves these numbers) ──
   const stats = useMemo(() => {
     const crit = visible.filter((p) => p.sev === "critical").length;
     const high = visible.filter((p) => p.sev === "high").length;
     const exploitable = visible.filter((p) => statusOf(p) === "exploitable").length;
+    // Enforced blocks only. A Monitor would-block RAN, so it is counted on its own tile, never here.
     const blocked = visible.filter((p) => statusOf(p) === "blocked").length;
+    const wouldBlock = visible.filter((p) => statusOf(p) === "would_block").length;
     // How many VISIBLE paths carry a hypothetical block right now — shown as a separate
     // annotation, never merged into `blocked`.
     const whatIfCount = visible.filter((p) => isWhatIf(p)).length;
@@ -246,7 +262,7 @@ export function AttackGraph() {
     // the ordinary single-path case — it read "CHOKEPOINTS 0 tools" while the panel beside it was
     // naming one. Two definitions of one word, on two panels an operator reads together.
     const chokepoints = new Set(visible.map((p) => p.tool).filter(Boolean)).size;
-    return { crit, high, exploitable, blocked, whatIfCount, maxBlast, chokepoints };
+    return { crit, high, exploitable, wouldBlock, blocked, whatIfCount, maxBlast, chokepoints };
   }, [visible, statusOf, isWhatIf]);
 
   // ── filter helpers ──
@@ -255,7 +271,7 @@ export function AttackGraph() {
   const setOnlySeverity = (keys: Severity[]) =>
     setSeverities({ critical: keys.includes("critical"), high: keys.includes("high"), medium: keys.includes("medium"), low: keys.includes("low") });
   const toggleSeverity = (k: Severity) => setSeverities((s) => ({ ...s, [k]: !s[k] }));
-  const toggleStatusFilter = (k: "exploitable" | "blocked") => setStatusFilter((s) => (s === k ? null : k));
+  const toggleStatusFilter = (k: "exploitable" | "would_block" | "blocked") => setStatusFilter((s) => (s === k ? null : k));
   // Resets THIS page's filters only. Namespace is the GLOBAL console scope (the header selector) —
   // a page-local reset must not silently rescope every other surface back to "All namespaces".
   const resetFilters = () => {
@@ -304,16 +320,16 @@ export function AttackGraph() {
         if (res.decision === "block") { enforced = true; break; }
         if (res.decision === "audit") { wouldBlock = true; } // keep scanning for a hard block on a later hop
       }
-      // Covered = a policy addresses this path (real block OR monitor would-block). A fail-closed default or a
-      // fully-allowed path is NOT covered — the first needs a real policy, the second is a genuine gap.
-      const covered = enforced || wouldBlock;
-      setSim((s) => ({ ...s, [selected.id]: covered ? "blocked" : "exploitable" }));
+      // An enforced block is "blocked". A Monitor would-block is "would_block": a policy matched, and the
+      // call would run. It was folded into "blocked", which moved the path onto the Blocked tile. A
+      // fail-closed default or a fully-allowed path is NOT covered.
+      setSim((s) => ({ ...s, [selected.id]: enforced ? "blocked" : wouldBlock ? "would_block" : "exploitable" }));
       setSimResult((s) => ({
         ...s,
         [selected.id]: enforced
           ? { blocked: true, label: "Blocked by an authored policy" }
           : wouldBlock
-          ? { blocked: true, monitor: true, label: "Would be blocked — this namespace is in Monitor mode (evaluated, not enforced)" }
+          ? { blocked: true, monitor: true, label: "A policy would block this, but the namespace is in Monitor mode, so the call would run (evaluated, not enforced)." }
           : failClosed
           ? { blocked: false, label: "Blocked only by the fail-closed default — no policy is loaded for this namespace. Author a policy to control it intentionally." }
           : { blocked: false, label: "Simulation found a policy gap — no policy covers this path" }
@@ -463,6 +479,15 @@ export function AttackGraph() {
     { label: "Chokepoints", value: stats.chokepoints, sub: "tools", color: "#e8edf5" },
     { label: "Max blast radius", value: stats.maxBlast, sub: "assets", color: "#FFB020" },
     { label: "Exploitable", value: stats.exploitable, color: "#FF3B5C", onClick: () => toggleStatusFilter("exploitable"), active: statusFilter === "exploitable" },
+    // Monitor: a policy matched these calls and they ran anyway. Not Blocked, not hidden either.
+    {
+      label: "Would block",
+      value: stats.wouldBlock,
+      sub: stats.wouldBlock > 0 ? "monitor, ran" : undefined,
+      color: "#f5b544",
+      onClick: () => toggleStatusFilter("would_block"),
+      active: statusFilter === "would_block"
+    },
     // BLOCKED counts REAL blocks only. A live what-if preview is annotated separately (sub) so the
     // headline can never be read as enforced blocks that don't exist.
     {
@@ -628,7 +653,7 @@ export function AttackGraph() {
         </div>
 
         {/* stat strip */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", borderBottom: "1px solid var(--graph-border-soft)" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", borderBottom: "1px solid var(--graph-border-soft)" }}>
           {statCells.map((s) => (
             <div
               key={s.label}
@@ -677,7 +702,7 @@ export function AttackGraph() {
                 selectedId={selected?.id}
                 statusOf={statusOf}
                 whatIfIds={whatIfIds}
-                onSelect={(p) => { setSelectedId(p.id); setScope(null); }}
+                onSelect={(p) => { setSelectedId(p.id); setLinkedId(null); setScope(null); }}
               />
 
               {/* kill-chain canvas card — fixed viewport height; the horizontal chain fits via viewBox (no scroll). */}
@@ -745,6 +770,33 @@ export function AttackGraph() {
 
                 <AttackGraphLegend />
               </div>
+
+              {/* A `?path=` link whose id is not among the paths this view loaded. Said plainly rather than
+                  showing another path in its place. */}
+              {missingLinkedId && (
+                <div
+                  data-testid="stale-path"
+                  role="status"
+                  style={{ flex: "0 0 316px", padding: "16px 16px 14px", background: "var(--bg-graph-panel)", border: "1px solid var(--graph-border)", borderRadius: 14, fontSize: 12.5, color: "#b8c2d6", lineHeight: 1.5 }}
+                >
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#e8edf5", marginBottom: 8 }}>
+                    This path no longer exists or was renamed
+                  </div>
+                  <div>
+                    The link points to path <span className="mono" style={{ color: "#e8edf5" }}>{missingLinkedId}</span>, which is not in this view.
+                    Path ids changed in 0.2.8: the chokepoint tool is now part of the id, so links saved before then do not resolve.
+                    It may also sit outside the current namespace, class or range
+                    {totalPaths > paths.length ? `, or past the ${paths.length} paths shown` : ""}.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLinkedId(null)}
+                    style={{ marginTop: 12, height: 30, padding: "0 14px", border: "1px solid var(--graph-border, #2a2a2a)", borderRadius: 8, background: "transparent", color: "#a0a0a0", fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                  >
+                    Show the worst path instead
+                  </button>
+                </div>
+              )}
 
               {/* inspector */}
               {selected && (

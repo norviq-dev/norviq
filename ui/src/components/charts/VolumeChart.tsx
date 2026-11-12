@@ -11,6 +11,8 @@ echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, Canvas
 const AXIS_GREY = "#2A2A2A";
 const ALLOW_COLOR = "#00E5A0";
 const BLOCK_COLOR = "#FF3B5C";
+const ESCALATE_COLOR = "#FFB020";
+const WOULD_BLOCK_COLOR = "#9AA0FF";
 const baseTooltip = {
   backgroundColor: "#252525",
   borderColor: "#3a3a3a",
@@ -23,10 +25,18 @@ export const VolumeChart = memo(function VolumeChart({
   title = "Tool Call Volume",
   labels = ["Allow", "Block"]
 }: {
-  data: Array<{ time: string; allow: number; block: number }>;
+  data: Array<{ time: string; allow: number; block: number; escalate?: number; audit?: number }>;
   title?: string;
   labels?: [string, string];
 }) {
+  // Escalate and would-block (`audit`) are drawn whenever the data carries them. /audit/volume always
+  // has, and the chart drew only allow and block: a Monitor namespace, whose matches are all `audit`,
+  // charted its allowed calls alone, and an escalated call appeared nowhere.
+  const has = (k: "escalate" | "audit") => data.some((d) => typeof d[k] === "number");
+  const extra = [
+    ...(has("escalate") ? [{ key: "escalate" as const, name: "Escalate", color: ESCALATE_COLOR, dashed: false }] : []),
+    ...(has("audit") ? [{ key: "audit" as const, name: "Would-block", color: WOULD_BLOCK_COLOR, dashed: true }] : [])
+  ];
   // A single bucket has no line SEGMENT to draw and no area beneath it, so with `symbol: "none"` the
   // series renders to literally nothing — while `tooltip: {trigger: "axis"}` still reports the numbers
   // on hover. The chart reads as broken: metrics but no chart. This is not an edge case; /audit/volume
@@ -34,10 +44,10 @@ export const VolumeChart = memo(function VolumeChart({
   // lands here. Draw the point itself when it is the only thing there is to draw.
   const sparse = data.length < 2;
   const option = {
-    color: [ALLOW_COLOR, BLOCK_COLOR],
+    color: [ALLOW_COLOR, BLOCK_COLOR, ...extra.map((e) => e.color)],
     tooltip: { trigger: "axis", ...baseTooltip },
     legend: {
-      data: labels,
+      data: [...labels, ...extra.map((e) => e.name)],
       bottom: 0,
       textStyle: { color: "#a0a0a0", fontSize: 11 },
       icon: "roundRect",
@@ -82,7 +92,18 @@ export const VolumeChart = memo(function VolumeChart({
         areaStyle: { color: "#FF3B5C18" },
         lineStyle: { color: BLOCK_COLOR, width: 2 },
         itemStyle: { color: BLOCK_COLOR }
-      }
+      },
+      ...extra.map((e) => ({
+        name: e.name,
+        data: data.map((d) => d[e.key] ?? 0),
+        type: "line",
+        smooth: true,
+        symbol: sparse ? "circle" : "none",
+        symbolSize: sparse ? 7 : 0,
+        showSymbol: sparse,
+        lineStyle: { color: e.color, width: 2, type: e.dashed ? "dashed" : "solid" },
+        itemStyle: { color: e.color }
+      }))
     ]
   };
   return (
