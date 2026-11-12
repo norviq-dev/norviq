@@ -17,9 +17,10 @@ STATUS IS THREE-VALUED ON PURPOSE.
                 for the same reason Gate A reports `scan_severity: "unknown"` rather than `"none"` for
                 a definition it never scanned.
     registered  an operator said this server is expected here.
-    blocked     an operator said it is not. Refused at DISCOVERY, not at call time — see the firewall's
-                Gate A hook. For a poisoned description the description IS the payload, so refusing the
-                call afterwards is too late; the text has already reached the model's context.
+    blocked     an operator said it is not. Refused at DISCOVERY and at call time — see the firewall's
+                Gate A hook and `_refuse_blocked_server`. Discovery is the part that matters for a
+                poisoned description, because the description IS the payload; the call-time refusal
+                covers a client that listed before the block and still holds the tool names.
 
 `writable` is deliberately a separate axis. "May I reach it" and "may I write through it" are different
 questions, and a read-only knowledge base is an ordinary shape that one collapsed field cannot express.
@@ -99,11 +100,11 @@ class ServerDecision:
 
 @dataclass
 class ServerRegistry:
-    """The decisions this proxy knows about, loaded once at startup.
+    """The decisions this proxy knows about, loaded at startup and re-loaded on the refresh timer.
 
-    Read on the DISCOVERY path only, exactly like the pin store — the call path never touches it. A
-    server-level decision changes at operator speed, not per call, so a per-request lookup would buy
-    nothing and put the control plane in front of every tool invocation.
+    Read on the discovery path AND on every call, as a dict lookup in memory. The control plane is
+    never on either path: a server-level decision changes at operator speed, so the store polls for
+    it (see `ControlPlaneServerStore.start_refresh`) and requests read the last copy it loaded.
     """
 
     decisions: dict[str, ServerDecision] = field(default_factory=dict)
@@ -159,9 +160,9 @@ class ControlPlaneServerStore:
     a formality. That is the same reasoning that keeps the approved digest inside the control plane in
     `ControlPlanePinStore`, and it is why this class has a `load()` and no `flush()`.
 
-    Consulted on the DISCOVERY path only, like pins. A server-level decision changes at operator
-    speed; putting an HTTP call in front of every `tools/call` would buy nothing and would make the
-    control plane a hard dependency of every invocation.
+    Never on a request path. Discovery and every call read the in-memory registry this store
+    refreshes; putting an HTTP call in front of every `tools/call` would buy nothing and would make
+    the control plane a hard dependency of every invocation.
 
     THE HONEST LIMIT, stated because it is a fail-open. Before the first successful load the registry
     is empty, so every server reads `discovered` and nothing is withheld. A proxy that starts while
@@ -242,7 +243,7 @@ class ControlPlaneServerStore:
                 "nrvq.mcp.servers.control_plane_unreachable",
                 namespace=self.namespace, error=redact_credentials(str(exc), self._token),
                 code="NRVQ-MCP-5077",
-                detail=("no server decision is being enforced at discovery" if not self._loaded
+                detail=("no server decision is being enforced, at discovery or on calls" if not self._loaded
                         else "serving the last known decisions; a change made since is not visible"),
                 hint="Gate B is unaffected — every tool call is still evaluated against policy",
             )
@@ -268,8 +269,9 @@ class ControlPlaneServerStore:
 
         A poll, for the reason `ControlPlanePinStore.start_refresh` gives: the proxy is the party that
         must not block, and a push channel would mean the control plane holding a connection per
-        sidecar. The cost is that a BLOCK takes up to one interval to reach a running proxy — which is
-        the property that matters most here, since blocking is the urgent direction of this control.
+        sidecar. The cost is that a BLOCK takes up to one interval to reach a running proxy, for its
+        listings and its calls alike — which is the property that matters most here, since blocking is
+        the urgent direction of this control.
         """
         if interval_s <= 0 or self._refresh_task is not None:
             return

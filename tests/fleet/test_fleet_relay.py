@@ -105,3 +105,47 @@ async def test_start_is_noop_when_disabled(monkeypatch) -> None:
     await relay.start()
     assert relay._task is None  # no background task created -> single-cluster unaffected
     await relay.stop()
+
+
+class _RecordingSession(_SpokeSession):
+    def __init__(self, agents, audit):
+        super().__init__(agents, audit)
+        self.statements = []
+
+    async def execute(self, stmt):
+        self.statements.append(stmt)
+        return await super().execute(stmt)
+
+
+@pytest.mark.asyncio
+async def test_the_rollup_carries_real_agents_and_real_traffic_only() -> None:
+    """The spoke's Overview and Agents roster leave out test identities and red-team / Simulate / probe
+    calls, by the shared classifier. The rollup sent them all, so the hub counted what no spoke shows."""
+    from norviq.api import synthetic
+
+    now = datetime.now(timezone.utc)
+
+    def agent(svid, cls):
+        return SimpleNamespace(spiffe_id=svid, namespace="p", agent_class=cls, trust_score=0.8,
+                               trust_category="High", last_seen=now)
+
+    agents = [
+        agent("spiffe://norviq/ns/p/sa/default", "customer-support"),
+        agent("spiffe://norviq/ns/p/sa/policy-tester-k3x9", "customer-support"),
+        agent("spiffe://norviq/ns/p/sa/e2e-bot", "e2e-bot"),
+    ]
+    session = _RecordingSession(agents, [])
+
+    async def _gen():
+        yield session
+
+    relay = FleetRelayForwarder(session_factory=_gen, client=_FakeHub())
+    pushed_agents, _audit = await relay._aggregate()
+    assert [a["spiffe_id"] for a in pushed_agents] == ["spiffe://norviq/ns/p/sa/default"]
+
+    # The audit counts are aggregated in SQL, so the filter has to be in the statement: the shared
+    # patterns, one per column. Their behaviour on real rows is in tests/api/test_synthetic_sql_twin_behaviour.py.
+    audit_sql = str(session.statements[1].compile(compile_kwargs={"literal_binds": True}))
+    where = audit_sql.split("WHERE", 1)[1].split("GROUP BY")[0]
+    for pattern in (synthetic._FRAMEWORK_PATTERN, synthetic._CLASS_PATTERN, synthetic._SVID_PATTERN):
+        assert pattern in where

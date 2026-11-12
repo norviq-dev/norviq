@@ -78,16 +78,20 @@ async def _seeded_classes(session: AsyncSession, namespace: str) -> list[str]:
     policy-tester, wave\\de2e, …) are excluded via ``is_synthetic_identity``. Without this the suite evaluated
     AND STORED every synthetic class in the namespace (e.g. ~84 allowlist-probe-* → ~2,436 rows that the
     efficacy roll-up already discards), bloating each run's stored matrix. Scoping the writer to real classes
-    keeps a run's results meaningful and bounded (the view still paginates on top of this)."""
+    keeps a run's results meaningful and bounded (the view still paginates on top of this).
+
+    Classified per IDENTITY (class + SVID), not per class name: a Policy Tester session registers
+    `sa/policy-tester-<rand>` under the real class it tested, so a class seen only through the Tester
+    is not a seeded agent."""
     rows = await session.execute(
-        select(AgentRegistryEntry.agent_class)
+        select(AgentRegistryEntry.agent_class, AgentRegistryEntry.spiffe_id)
         .where(AgentRegistryEntry.namespace == namespace)
         .distinct()
     )
-    return sorted(
-        c for c in rows.scalars().all()
-        if c and not c.startswith("__") and not is_synthetic_identity(c)
-    )
+    return sorted({
+        c for c, sid in rows.all()
+        if c and not c.startswith("__") and not is_synthetic_identity(c, sid)
+    })
 
 
 def _reject_unknown_query_params(request: Request, accepted: set[str]) -> None:

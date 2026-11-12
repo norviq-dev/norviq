@@ -24,7 +24,8 @@ Two gates:
 * **Gate A — discovery.** ``initialize`` / ``tools/list`` responses are scanned for instructions
   hidden in tool DEFINITIONS (tool poisoning) and content-hash pinned so a server that later
   changes a definition (rug pull) is detected. Gate A runs at discovery and on
-  ``notifications/tools/list_changed`` ONLY — the per-call path does one dict lookup.
+  ``notifications/tools/list_changed`` ONLY — the per-call path does in-memory lookups only. Calls
+  also honour the operator's current server decision and tool approval, as last refreshed.
 
 Gate A is a heuristic and is evadable by construction; Gate B is the deterministic backstop. See
 DESIGN-NOTE-MCP-FIREWALL.md for the threat model and what this honestly does not catch.

@@ -80,6 +80,10 @@ N_RESOURCES_CHANGED = "notifications/resources/list_changed"
 # list-changed signal, so neither was covered by the branch above.
 N_MESSAGE = "notifications/message"
 N_PROGRESS = "notifications/progress"
+# Session lifecycle. With `ping`, the handshake and these two, the only traffic that still passes for
+# a server an operator blocked (`firewall.py` `McpFirewall._blocked_client_message`).
+N_INITIALIZED = "notifications/initialized"
+N_CANCELLED = "notifications/cancelled"
 
 # JSON-RPC 2.0 reserved error codes (spec §5.1). -32000..-32099 is the implementation-defined band;
 # Norviq uses -32001 so a policy refusal is distinguishable from a genuine protocol error.

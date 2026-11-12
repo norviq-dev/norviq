@@ -133,9 +133,19 @@ async def _deployed_classes(session: AsyncSession, namespaces: list[str] | None)
     return deployed
 
 
+#: The `framework` the Attack Graph's Simulate (preview) sends with every probe
+#: (ui/src/pages/AttackGraph.tsx). Simulate evaluates as the path's real workload identity, so its rows
+#: carry that identity's agent_id; counting them would let a preview rewrite the status it previews.
+SIMULATE_FRAMEWORK = "attack-graph"
+
+
 async def _decision_counts(session: AsyncSession, namespace: str, since: datetime) -> dict[tuple[str, str], dict]:
     """Batched per-(agent_id, tool_name) allow/block/escalate counts for one namespace's range window.
-    One query per namespace instead of one per edge (same values the per-edge lookup produced)."""
+    One query per namespace instead of one per edge (same values the per-edge lookup produced).
+
+    Simulate rows are left out. They are empty-argument previews, not traffic: counted, one allowed
+    preview on a path that real traffic was blocked on would make that path read exploitable.
+    """
     rows = (
         await session.execute(
             text(
@@ -147,10 +157,11 @@ async def _decision_counts(session: AsyncSession, namespace: str, since: datetim
                     COUNT(*) FILTER (WHERE decision = 'audit') AS would_block_count
                 FROM audit_log
                 WHERE namespace = :ns AND timestamp_utc >= :since
+                    AND COALESCE(framework, '') <> :simulate_framework
                 GROUP BY agent_id, tool_name
                 """
             ),
-            {"ns": namespace, "since": since},
+            {"ns": namespace, "since": since, "simulate_framework": SIMULATE_FRAMEWORK},
         )
     ).mappings().all()
     # 'audit' = a Monitor-mode would-block (the evaluator softens block/escalate → audit when a namespace is

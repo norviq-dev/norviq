@@ -22,6 +22,7 @@ from jwt import PyJWTError as JWTError
 from norviq.api.jwks import get_jwks_client
 from norviq.api.session_revocation import is_revoked, token_hash
 from norviq.api.sidecar_expiry import observe as observe_sidecar_expiry
+from norviq.api.synthetic import is_synthetic_framework
 from norviq.config import settings
 from norviq.telemetry.metrics import record_path_phase
 
@@ -578,6 +579,57 @@ def bind_caller_identity(user: dict, agent_identity: dict | None) -> dict:
     if effective_ns:
         identity["namespace"] = effective_ns
     return identity
+
+
+# Who may mark a call as the product's own synthetic traffic (SYNTHETIC_FRAMEWORKS in
+# norviq/api/synthetic.py). The tag is not a label: for a call carrying it the engine writes no agent
+# registry row, trust, trust history, behavioural profile or asset-graph state, it counts in its own
+# rate-limit window instead of the agent's, and every real-traffic view leaves the row out. So it has
+# to come from a caller entitled to make it, the same way `agent_class` and `spiffe_id` above come from
+# the credential and not the body.
+#
+# The legitimate producers, and how each one authenticates:
+#   * the console's Red Team runner and the graph page's path engine: in process
+#     (`evaluator.evaluate`), so they never pass through /evaluate at all;
+#   * `norviq redteam run` / `single`: an operator credential (the admin token `norviq login` mints, or
+#     an operator API key);
+#   * the graph page's Simulate: the signed-in console user's session, admin or viewer;
+#   * hand-made probes: an operator credential.
+# None of them is a workload. A sidecar, an SDK and the webhook controller authenticate as
+# role=service, and an agent's API key is a service key bound to its class and SPIFFE id. Those are
+# the credentials a workload holds for its OWN calls, and the tag must never let it take them out of
+# its trust, its rate limit or the real-traffic record.
+_SYNTHETIC_TAG_ROLES = frozenset({"admin", "viewer"})
+
+
+def may_tag_synthetic(user: dict) -> bool:
+    """True when this caller may mark a call as synthetic: an operator principal (role admin or viewer)
+    whose credential is not bound to an agent identity. A credential carrying any agent-identity claim
+    speaks for that workload, whatever its role."""
+    if str(user.get("role", "")).lower() not in _SYNTHETIC_TAG_ROLES:
+        return False
+    return not any(str(user.get(field, "") or "") for field in _BOUND_IDENTITY_FIELDS)
+
+
+def bind_framework(user: dict, framework: str | None) -> tuple[str, str]:
+    """The ``framework`` a call is recorded under, and the synthetic tag the caller claimed but may not use.
+
+    Returns ``(framework, claimed)``. A synthetic tag from a caller that ``may_tag_synthetic`` refuses
+    becomes ``""`` (the plain HTTP default), so the call is real traffic everywhere, and the tag comes
+    back as ``claimed`` for the audit record. Every other value passes through unchanged, with
+    ``claimed == ""``. Not a 403: an SDK that sets a framework string is still enforced, just counted.
+    """
+    value = framework or ""
+    if not is_synthetic_framework(value) or may_tag_synthetic(user):
+        return value, ""
+    log.warning(
+        "nrvq.auth.synthetic_tag_not_honoured",
+        sub=user.get("sub"),
+        role=str(user.get("role", "")),
+        claimed=value[:64],
+        code="NRVQ-AUTH-14030",
+    )
+    return "", value
 
 
 def read_namespace(user: dict, requested: str | None) -> str | None:

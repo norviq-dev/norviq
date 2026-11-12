@@ -225,9 +225,13 @@ def test_the_observed_query_excludes_red_team_and_synthetic_traffic() -> None:
     client.get("/api/v1/tools", headers=_hdr())
     # literal_binds, because the values that matter here ("redteam", the synthetic class prefixes) are
     # bound parameters and render as :placeholders in the default repr.
-    sql = str(session.last_execute_stmt.compile(compile_kwargs={"literal_binds": True})).lower()
-    assert "framework" in sql and "redteam" in sql
-    assert "wave" in sql  # the ^wave[0-9]+e2e probe-class regex, i.e. the full shared predicate
+    sql = str(session.last_execute_stmt.compile(compile_kwargs={"literal_binds": True}))
+    # The twin matches each column with one shared regex (norviq/api/synthetic.py); finding the
+    # framework and class patterns means it is the full shared predicate.
+    from norviq.api import synthetic
+
+    assert "audit_log.framework" in sql and synthetic._FRAMEWORK_PATTERN in sql
+    assert synthetic._CLASS_PATTERN in sql
 
 
 def test_a_scoped_tenant_sees_only_its_own_namespace() -> None:

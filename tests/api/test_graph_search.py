@@ -350,3 +350,91 @@ def test_search_agents_say_the_freeze_is_unknown_when_the_store_cannot_be_read(m
     for hit in found.values():
         assert (hit["frozen"], hit["trust_cap"], hit["trust_score"], hit["category"], hit["controls"]) == (
             None, None, None, "unknown", "unavailable")
+
+
+def _sqlite_search(user: dict, q: str, audit_rows: list[dict], registry_rows: list[dict]) -> dict:
+    """Run /search against real rows: the route's own statements, executed on SQLite tables that carry the
+    columns they read under the same names."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import Boolean, Column, DateTime, Float, Integer, MetaData, String, Table, create_engine, insert
+
+    from sqlalchemy.pool import StaticPool
+
+    # One connection, usable from the TestClient's thread.
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    meta = MetaData()
+    audit = Table(
+        "audit_log", meta, Column("id", Integer, primary_key=True),
+        Column("tool_name", String), Column("decision", String), Column("timestamp_utc", DateTime(timezone=True)),
+        Column("namespace", String), Column("framework", String), Column("agent_class", String),
+        Column("agent_id", String),
+    )
+    registry = Table(
+        "agent_registry", meta, Column("id", Integer, primary_key=True),
+        Column("spiffe_id", String), Column("namespace", String), Column("agent_class", String),
+        Column("trust_score", Float), Column("trust_category", String), Column("frozen", Boolean),
+        Column("trust_cap", Float), Column("last_seen", DateTime(timezone=True)),
+    )
+    meta.create_all(engine)
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        conn.execute(insert(audit), [
+            {"timestamp_utc": now - timedelta(minutes=i), "namespace": "p", "decision": "block", **r}
+            for i, r in enumerate(audit_rows)
+        ])
+        conn.execute(insert(registry), [
+            {"namespace": "p", "trust_score": 0.8, "trust_category": "High", "frozen": False, "trust_cap": None,
+             "last_seen": now - timedelta(minutes=i), **r}
+            for i, r in enumerate(registry_rows)
+        ])
+
+    class _Session(_FakeSession):
+        def __init__(self, conn) -> None:
+            self.conn = conn
+
+        async def execute(self, stmt):
+            return self.conn.execute(stmt)
+
+    app = create_app()
+    with engine.connect() as conn:
+        async def _session():
+            yield _Session(conn)
+
+        app.dependency_overrides[get_session] = _session
+        app.dependency_overrides[get_current_user] = lambda: user
+        app.state.loader = SimpleNamespace(_policies={})
+        app.state.cache = _Store({})  # agent hits are served as GET /agents serves them, from the store
+        resp = TestClient(app).get(f"/api/v1/search?q={q}")
+    engine.dispose()
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_search_finds_real_tools_and_agents_not_test_traffic() -> None:
+    """⌘K matched every audit row and registry row. Five red-team or Simulate calls in the last 24h, or
+    five Policy Tester sessions, took every place, and the real call or agent never showed."""
+    svid = "spiffe://norviq/ns/p/sa/default"
+    fabricated = [{"tool_name": "issue_refund", "framework": fw, "agent_class": "billing", "agent_id": svid}
+                  for fw in ("redteam", "policy-tester", "probe", "RedTeam", "red-team", " redteam\t")]
+    tester = [{"tool_name": "issue_refund", "framework": "", "agent_class": "billing",
+               "agent_id": f"spiffe://norviq/ns/p/sa/policy-tester-{i}"} for i in range(5)]
+    real = {"tool_name": "issue_refund", "framework": "sidecar", "agent_class": "billing", "agent_id": svid}
+    # The real call is the OLDEST, so the five-row limit would have filled with the others first.
+    out = _sqlite_search(_ADMIN, "refund", fabricated + tester + [real], [])
+    assert len(out["tools"]) == 1, out["tools"]
+
+    registry = [{"spiffe_id": f"spiffe://norviq/ns/p/sa/policy-tester-b{i}", "agent_class": "billing"} for i in range(5)]
+    registry += [{"spiffe_id": "spiffe://norviq/ns/p/sa/e2e-billing", "agent_class": "e2e-billing"}]
+    registry += [{"spiffe_id": svid, "agent_class": "billing"}]
+    out = _sqlite_search(_ADMIN, "billing", [], registry)
+    assert [a["spiffe_id"] for a in out["agents"]] == [svid]
+
+
+def test_search_still_lists_real_traffic_from_every_source() -> None:
+    """Control: the filter drops synthetic rows only, not everything."""
+    svid = "spiffe://norviq/ns/p/sa/default"
+    rows = [{"tool_name": "issue_refund", "framework": fw, "agent_class": "billing", "agent_id": svid}
+            for fw in ("sidecar", "mcp", "", None)]
+    assert len(_sqlite_search(_ADMIN, "refund", rows, [])["tools"]) == 4
+    assert len(_sqlite_search(_ADMIN, "billing", [], [{"spiffe_id": svid, "agent_class": "billing"}])["agents"]) == 1

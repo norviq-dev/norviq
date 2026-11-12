@@ -538,7 +538,10 @@ flow. The draft's priority mirrors the namespace baseline so an applied draft st
 
 What it does (`ui/src/pages/AttackGraph.tsx:279-326`):
 
-1. Builds an identity `spiffe://norviq/ns/<ns>/sa/<cls>`, `namespace = <ns>`, `agent_class = <cls>`.
+1. Evaluates as the path's own workload identity (`spiffe_id` on the path), with `namespace = <ns>` and
+   `agent_class = <cls>`. Only when the graph has no identity for the path does it fall back to a
+   stand-in `spiffe://norviq/ns/<ns>/sa/<cls>`, and the result says so. Simulate rows are left out of
+   the decision counts both graphs read, so a preview never changes the status it previews.
 2. Collects the chain's **tool** hops (falling back to the chokepoint or target if there are none).
 3. `POST /api/v1/evaluate` for each, with `tool_params: {}` and `framework: "attack-graph"`, stopping at
    the first hard block.
@@ -549,7 +552,8 @@ What it does (`ui/src/pages/AttackGraph.tsx:279-326`):
 | Enforced block | any hop returns `block` whose `rule_id` is **not** `no_policy_loaded` | "Blocked by an authored policy" |
 | Monitor would-block | any hop returns `audit` | "A policy would block this, but the namespace is in Monitor mode, so the call would run (evaluated, not enforced)." |
 | No-policy deny only | a hop returns `block` with `rule_id = "no_policy_loaded"` (only with `no_policy_decision=deny`; it ships `allow`) | "Blocked only by the fail-closed default — no policy is loaded for this namespace. Author a policy to control it intentionally." |
-| Gap | everything allowed | "Simulation found a policy gap — no policy covers this path" |
+| Inconclusive | everything allowed, but real traffic on the path was blocked or would-blocked | "Allowed with empty arguments, but real calls on this path were stopped N times. Simulate sent no arguments, so it cannot tell whether that rule covers this path." Would-blocks are reported as "logged as would-block N times (Monitor, they ran)", never as stops. The path keeps its real status. |
+| Allowed | everything allowed, and no real traffic was stopped | "Allowed with empty arguments: no tool-level rule stops this path. Rules that check argument values were not exercised." |
 
 Only an enforced block sets the path to `blocked`. A Monitor would-block sets it to `would_block`: a
 policy matched, and the call would run. The no-policy deny (opt-in via `no_policy_decision=deny`) is
@@ -558,14 +562,16 @@ coverage is how a namespace ends up looking governed when nobody authored anythi
 
 Three limits to hold on to:
 
-- **Simulate does not enforce, but it is not side-effect free.** `POST /api/v1/evaluate` runs the real
-  evaluator, which persists behaviour on every evaluation that completes (`evaluator.py:470`,
-  `evaluator.py:572` — the fail-closed timeout/invalid-identity paths return before it): an audit row is
-  written, trust state is updated, and `_safe_record_graph` records the call into the asset graph. Since
-  the synthetic id uses the **agent class** in the `sa/` segment while a real workload uses its
-  **service account**, simulating usually mints a *new* agent node and a new `calls` edge in the graph
-  for that namespace. Simulated rows carry `framework="attack-graph"`, which is how you filter them out
-  of the audit log.
+- **Simulate does not enforce, and it does not touch the agent's state.** `POST /api/v1/evaluate` runs
+  the real evaluator and writes an audit row tagged `framework="attack-graph"`. That tag is one of the
+  synthetic frameworks in `norviq/api/synthetic.py` (`SYNTHETIC_FRAMEWORKS`), so the engine writes no
+  trust, history, profile, agent-registry or graph state for the call, and every real-traffic count
+  (Overview, Compliance, MITRE, intent proposals, dry-run replay, the Audit Log's "Real traffic only")
+  leaves it out. The synthetic id uses the **agent class** in the `sa/` segment while a real workload
+  uses its **service account**; because nothing is registered under it, that id does not appear as an
+  agent. With "Real traffic only" off, the Audit Log shows the row with a *synthetic* marker. The tag is
+  honoured because Simulate runs as the signed-in console user (admin or viewer). A sidecar or SDK
+  credential that sends the same tag is recorded as real traffic (`norviq/api/auth.py::bind_framework`).
 - **Parameters are empty.** `tool_params: {}` means any rule that depends on argument content — a SQL
   allowlist, a destination check, a `param_paths` predicate — will not fire. Simulate proves *tool-level*
   coverage, not argument-level coverage.
@@ -616,16 +622,19 @@ Two conventions in the responses:
 Two classes of node are hidden by default, independently.
 
 **Synthetic / probe identities.** One shared classifier (`is_synthetic_identity`,
-`norviq/api/synthetic.py:63-85`) marks e2e, probe, policy-tester, smoke, canary and eval identities by an
+`norviq/api/synthetic.py:104-119`) marks e2e, probe, policy-tester, smoke, canary and eval identities by an
 anchored class-name convention — `allowlist-probe`, `e2e-`, `probe-`, `evtrace-`, `effecttest`, `smoke-`,
 `canary-`, `policy-tester-`, `wave<N>e2e…`, plus the exact names `policy-tester` / `scorer`
-(`synthetic.py:29-48`). It checks an explicit `norviq.io/synthetic=true` node property first
-(`synthetic.py:71-74`), but **nothing in the product writes that property onto a graph node** —
+(`synthetic.py:42-58`). It checks an explicit `norviq.io/synthetic=true` node property first
+(`synthetic.py:112-115`), but **nothing in the product writes that property onto a graph node** —
 `add_agent` only ever writes `agent_class`, `agent_classes`, `trust_score`, `trust_category`
 (`asset_graph.py:69-81`) — so on the graphs the name convention is the only branch that fires today.
-A red-team identity is therefore hidden only when its class matches one of those prefixes; the
-`framework='redteam'` exclusion is a separate SQL predicate for audit rows (`audit_row_is_non_real`,
-`synthetic.py:94-103`) and does not filter the graphs. Hidden agents take their edges with
+The classifier reads both the agent class and the SVID's `sa/<name>` segment, so a Policy Tester
+session (`sa/policy-tester-<rand>` under the real class being tested) is hidden too. Red-team runs and
+Simulate never reach the graphs at all: their framework tag (`redteam`, `attack-graph`) is in
+`SYNTHETIC_FRAMEWORKS`, and the engine records no graph node, edge, trust or registry row for a call
+carrying one. The audit rows they write are excluded from real-traffic counts by the same module
+(`audit_row_is_non_real`). Hidden agents take their edges with
 them, and any tool/data node left orphaned is dropped too so no lone dots linger
 (`graphs.py:281-303`). The response reports `synthetic_hidden`, which drives the *"N test/probe agents
 hidden — Show"* chip. `?include_synthetic=true` brings them back. The Attack Graph applies the same
@@ -765,10 +774,10 @@ blocked. A hop also carries its resolved operation and, for an unclassified tool
 |---|---|---|
 | `EXPLOITABLE` chain | every hop has allowed traffic in the window | Open the inspector, read the chokepoint and the recommended fix, then **Define `<class>`'s intended behaviour** to generate a default-deny draft. |
 | `EXPLOITABLE` **with** a teal shield note | a policy is applied but status is derived from pre-apply traffic | **Simulate** to confirm the defense holds now. Do not author a second policy. |
-| `NOT SIMULATED` chain | topology exists, no end-to-end allowed traffic | **Simulate**. If it comes back "policy gap", author before that traffic arrives. |
+| `NOT SIMULATED` chain | topology exists, no end-to-end allowed traffic | **Simulate**. If every hop is allowed with empty arguments, author before that traffic arrives. |
 | `WOULD BLOCK` chain | a policy matches the chokepoint but the namespace only logs, so the calls ran | Switch the namespace to Block mode. This is a coverage decision, not a policy gap. |
 | Simulate → "Blocked only by the fail-closed default" | no policy is loaded and `no_policy_decision` is set to `deny` | Author an explicit policy. The no-policy deny is a safety net, not a control you can evidence. |
-| Simulate → "policy gap" | no rule addresses the chain | Draft from the what-if, or define the class's intended behaviour. |
+| Simulate → "Allowed with empty arguments" | no tool-level rule addresses the chain | Draft from the what-if, or define the class's intended behaviour. |
 | Capability finding `UNDEFENDED` | a verb is observed on a source and nothing has ever acted on it | **Defend** → review the draft in Policies → apply. |
 | Capability finding `DORMANT_GRANT` | reachable, never exercised | Remove or scope the grant now, while nothing depends on it. |
 | Hop showing `observing · <verb> n/m` | the tool's verb is unproven | Review the evidence in the tool-verbs panel and **promote** it, so verb-gated policies stop seeing `unknown`. |
@@ -792,8 +801,8 @@ Everything below is a property of the shipped code, not a caveat about your depl
    ([§14](#14-reading-the-console)).
 5. `POST /api/v1/attack-paths/compute` writes a table no console surface reads, and its per-step policy
    verdicts are unusable ([§7](#7-the-precomputed-attack_paths-table)).
-6. Simulate writes audit rows and can add an agent node/edge to the graph; it evaluates with empty
-   `tool_params` ([§9](#9-simulate)).
+6. Simulate evaluates with empty `tool_params` ([§9](#9-simulate)). An allowed hop can still count
+   toward the per-identity rate-limit window of the SVID it evaluates as.
 7. `delegates` edges are modelled but never written, so agent→agent delegation does not appear on either
    graph ([§3](#3-edges)).
 8. `attack_paths` rows are not retention-managed ([§13](#13-retention-and-pruning)).

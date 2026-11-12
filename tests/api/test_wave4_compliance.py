@@ -243,8 +243,9 @@ class _ActivityStubSession:
         sql = str(stmt)
         # _activity_by_rule also selects framework (to drop redteam/synthetic events),
         # so distinguish the two queries by "framework" — only the activity query references it.
-        if "framework" in sql:  # _activity_by_rule → (rule_id, decision, agent_class, framework, count)
-            rows = [(rid, "block", self._cls, "", n) for rid, n in self._blocked.items()]
+        if "framework" in sql:  # _activity_by_rule → (rule_id, decision, agent_class, framework, count, agent_id)
+            sid = f"spiffe://norviq/ns/default/sa/{self._cls}"
+            rows = [(rid, "block", self._cls, "", n, sid) for rid, n in self._blocked.items()]
         else:  # _blocked_by_rule_class → (rule_id, agent_class, count)
             rows = [(rid, self._cls, n) for rid, n in self._blocked.items()]
         return _Rows(rows)
@@ -617,11 +618,11 @@ class _MixedActivitySession:
 
     async def execute(self, stmt, *a, **k):
         sql = str(stmt)
-        if "framework" in sql:  # _activity_by_rule → (rule_id, decision, agent_class, framework, count)
+        if "framework" in sql:  # _activity_by_rule → (rule_id, decision, agent_class, framework, count, agent_id)
             rows = [
-                (self._rid, "block", "customer-support", "", 5),   # REAL → counts
-                (self._rid, "block", "evtrace-1", "", 4),          # synthetic identity → excluded
-                (self._rid, "block", "billing-bot", "redteam", 3), # red-team framework → excluded
+                (self._rid, "block", "customer-support", "", 5, "spiffe://norviq/ns/d/sa/customer-support"),  # REAL → counts
+                (self._rid, "block", "evtrace-1", "", 4, "spiffe://norviq/ns/d/sa/evtrace-1"),          # synthetic identity → excluded
+                (self._rid, "block", "billing-bot", "redteam", 3, "spiffe://norviq/ns/d/sa/billing-bot"),  # red-team framework → excluded
             ]
         else:  # _blocked_by_rule_class
             rows = [(self._rid, "customer-support", 5)]

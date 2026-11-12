@@ -565,8 +565,13 @@ export function Header({
           )}
         </>
       ) : (
-        <div style={{ padding: 12, color: "#A0A0A0", fontSize: 13 }}>
+        <div style={{ padding: 12, color: "#A0A0A0", fontSize: 13 }} data-testid="search-empty">
           No results for '{searchText.trim()}'
+          {/* routers/search.py searches real traffic and real agents only, as the Audit Log's default
+              view and the Agents roster do. Say so, or a tool seen only in a red-team run reads as unseen. */}
+          <div style={{ color: "var(--text-muted)", marginTop: 4, fontSize: 11.5 }}>
+            Searches real traffic and agents. Red-team runs, Simulate calls and test identities are left out.
+          </div>
         </div>
       )}
     </>

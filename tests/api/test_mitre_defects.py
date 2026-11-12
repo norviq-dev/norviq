@@ -69,12 +69,13 @@ class _StubSession:
         if "pg_advisory_xact_lock" in sql:
             return _StubResult([(1,)])
         # _blocked_by_rule_class filters WHERE decision IN (block/escalate) and now selects
-        # (rule_id, agent_class, framework, count) — matched by its decision filter, which the
+        # (rule_id, agent_class, framework, count, agent_id) — matched by its decision filter, which the
         # sibling activity query never has.
+        sid = f"spiffe://norviq/ns/default/sa/{self._cls}"
         if "decision IN" in sql:
-            return _StubResult([(rid, self._cls, "", n) for (rid, dec, n) in self._rows if dec in ("block", "escalate")])
-        # _activity_by_rule → (rule_id, decision, agent_class, framework, count), no decision filter
-        return _StubResult([(rid, dec, self._cls, "", n) for (rid, dec, n) in self._rows])
+            return _StubResult([(rid, self._cls, "", n, sid) for (rid, dec, n) in self._rows if dec in ("block", "escalate")])
+        # _activity_by_rule → (rule_id, decision, agent_class, framework, count, agent_id), no decision filter
+        return _StubResult([(rid, dec, self._cls, "", n, sid) for (rid, dec, n) in self._rows])
 
     async def scalar(self, *a, **k):
         return self.scalar_return

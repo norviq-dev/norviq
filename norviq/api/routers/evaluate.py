@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from norviq.api.audit_hub import audit_record
-from norviq.api.auth import bind_caller_identity, get_current_user
+from norviq.api.auth import bind_caller_identity, bind_framework, get_current_user
 from norviq.config import settings
 from norviq.engine.capability import Verb, classify_tool
 from norviq.engine.evaluator import OPAEvaluator
@@ -266,6 +266,9 @@ class EvaluateRequest(BaseModel):
     #
     # The SDK's own ToolCallEvent has always defaulted this to "" (sdk/core/events.py); the HTTP
     # boundary was the only place that disagreed.
+    #
+    # A synthetic value is honoured only from an operator credential; see auth.bind_framework, applied
+    # in the handler below.
     framework: str = ""
     # Optional MCP protocol context (server id, transport, pin status, Gate-A scan severity). Absent
     # for every non-MCP caller, so this is additive: an existing sidecar/SDK body is unchanged and
@@ -336,11 +339,16 @@ async def evaluate_tool_call(
     # All three steps live in auth.bind_caller_identity, shared with the standalone engine so the two
     # PEPs cannot bind a caller differently.
     identity = bind_caller_identity(user, payload.agent_identity)
+    # The synthetic-traffic tag is bound to the caller the same way. A synthetic `framework` makes the
+    # engine write no per-identity state for the call and takes its row out of every real-traffic
+    # view, so only an operator credential may set it (auth.may_tag_synthetic). From anyone else it is
+    # recorded as real traffic, and the tag they sent is kept on the audit row as `claimed_framework`.
+    framework, claimed_framework = bind_framework(user, payload.framework)
     # A malformed agent_identity (e.g. missing the required spiffe_id) is a client error — return
     # 422, not a raw 500 from the downstream model validation.
     try:
         event = ToolCallEvent.model_validate(
-            {**payload.model_dump(exclude={"trust_score"}), "agent_identity": identity}
+            {**payload.model_dump(exclude={"trust_score"}), "agent_identity": identity, "framework": framework}
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=f"invalid agent_identity / tool call: {exc.errors()}") from exc
@@ -422,6 +430,10 @@ async def evaluate_tool_call(
         # so it can never collide with masked_params or the verb-observation fields below.
         if event.mcp:
             audit_payload = {**(audit_payload or {}), "mcp": event.mcp}
+        # The synthetic tag this caller sent and was not allowed to use (see bind_framework). Kept so
+        # the record still says what the caller claimed; the row itself counts as real traffic.
+        if claimed_framework:
+            audit_payload = {**(audit_payload or {}), "claimed_framework": claimed_framework}
         name_verb, _ = classify_tool(event.tool_name)
         if name_verb is Verb.UNKNOWN:
             param_verb, param_risk = classify_tool(event.tool_name, event.tool_params)
@@ -438,7 +450,7 @@ async def evaluate_tool_call(
     # Fan the decision out to live /ws/audit subscribers (in-process, non-blocking).
     hub = getattr(request.app.state, "audit_hub", None)
     if hub is not None:
-        hub.publish(audit_record(event, decision))
+        hub.publish(audit_record(event, decision, claimed_framework=claimed_framework))
     record_path_phase("api", "route_fanout", (perf_counter() - _t) * 1000.0)
     response = EvaluateResponse(
         decision=decision.decision, rule_id=decision.rule_id, trust_score=decision.trust_score,

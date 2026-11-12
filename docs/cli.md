@@ -350,7 +350,8 @@ above that, 422.
 an exact match (`norviq/api/routers/audit.py::list_audit_records`). `-t sql` matches `execute_sql`.
 
 **`audit list` and `audit stats` count different populations.** `/audit/stats` and `/audit/top-blocked`
-always exclude red-team traffic (`framework == "redteam"`) and synthetic/probe identities so the
+always exclude synthetic frameworks (`redteam`, `attack-graph`, `probe`, …; `SYNTHETIC_FRAMEWORKS` in
+`norviq/api/synthetic.py`) and synthetic/probe identities so the
 console's headline reconciles with its Compliance and MITRE views
 (`norviq/api/routers/audit.py::audit_stats`, `norviq/api/routers/audit.py::top_blocked_tools`).
 `/audit/records` only does so when `exclude_synthetic=true` — and the CLI never sends it
@@ -383,9 +384,14 @@ defaults it to `""` (`norviq/api/routers/evaluate.py::EvaluateRequest.framework`
 enforcement points send are `sidecar` (`norviq/sidecar/proxy.py::SidecarProxy._process_request`),
 `sidecar-http` (`norviq/sidecar/http_fallback.py::create_http_fallback.evaluate`), `mcp`
 (`norviq/mcp/firewall.py::McpFirewall._evaluate`) and `redteam`
-(`norviq/redteam/simulator.py::_request_payload`); the SDK adapters supply their own. Only the exact
-string `redteam` drives the stats/top-blocked exclusion above — a misspelled value is counted as real
-traffic.
+(`norviq/redteam/simulator.py::_request_payload`); the SDK adapters supply their own. The console's
+Attack Graph Simulate sends `attack-graph`. Only the exact strings in `SYNTHETIC_FRAMEWORKS`
+(`norviq/api/synthetic.py`) drive the stats/top-blocked exclusion above; matching ignores case and
+surrounding whitespace, and any other value, a misspelling included, is counted as real traffic. A
+synthetic value is honoured only from an operator credential (role `admin` or `viewer`, not bound to an
+agent identity; `norviq/api/auth.py::may_tag_synthetic`), so run `redteam` with an admin token or an
+operator API key. From a `service` credential the call is recorded as real traffic with `framework`
+empty, and the JSON carries the tag it sent as `claimed_framework`.
 
 ### `norviq agent` — roster and trust
 
@@ -586,9 +592,11 @@ Two behaviors worth knowing before you run this against a shared cluster. Every 
 console's suite, so a full run is 34 calls. Each decision lands in the audit log tagged
 `framework: redteam`, which `audit list` will show you and `audit stats` will not (see
 [`norviq audit`](#norviq-audit--decision-history)). And every call carries the same SPIFFE id,
-`spiffe://norviq/ns/<namespace>/sa/<agent>`, which is the key the engine's rate limiter counts
-(`norviq/engine/evaluator.py::OPAEvaluator._is_rate_limited`). Pointed at a real class, the suite
-shares that class's window with its live traffic. A block whose rule is the throttle
+`spiffe://norviq/ns/<namespace>/sa/<agent>`. The engine's rate limiter counts a `redteam` call in a
+window of its own for that id (`norviq/engine/evaluator.py::OPAEvaluator._rate_limit_key`), at the
+same ceiling, so a run does not use up the window of an agent whose SVID it shares. That holds only
+while the tag is honoured: run it with an operator credential (see above), or the calls are real
+traffic and count against the agent's own window. A block whose rule is the throttle
 (`rate_limit_exceeded`) or an engine fault (`evaluator_timeout`, `evaluator_error`, …) is reported
 as `FAIL` even when the attack expects a block, because no policy blocked it. The rule is
 `norviq/api/redteam_efficacy.py::attack_passed`, which the console's rows and its "Suite pass-rate"

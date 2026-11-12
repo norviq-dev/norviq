@@ -25,6 +25,7 @@ import structlog
 # The baseline compiler owns the CONTROLS-region format, so the engine asks it whether a namespace's
 # saved controls settle every control of the chart's baseline rather than parsing that format twice.
 from norviq.api import baseline as baseline_lib
+from norviq.api.synthetic import is_synthetic_framework
 from norviq.config import settings
 from norviq.engine.latency import (
     PHASE_CACHE, PHASE_CANDIDATES, PHASE_OPA, PHASE_OPA_WAIT, PHASE_PERSIST, PHASE_POSTURE,
@@ -431,12 +432,13 @@ class InvalidSpiffeIdentity(ValueError):
 
 
 def _is_synthetic_framework(framework: str) -> bool:
-    """True for traffic the product generated about itself (red-team simulation, probes).
+    """True for a call the product fabricated about itself (red-team run, Attack Graph Simulate, probe).
 
-    Kept next to its only caller rather than imported from api.synthetic: the engine must not depend on
-    the API layer, and this is the framework half of that classifier, which is the stable half.
+    Delegates to the shared classifier in norviq/api/synthetic.py. This used to keep its own copy of the
+    framework set, and the copy drifted from the API's: the engine knew four tags, the real-traffic
+    filters knew one, and Simulate's "attack-graph" was in neither.
     """
-    return str(framework or "").strip().lower() in {"redteam", "red-team", "policy-tester", "probe"}
+    return is_synthetic_framework(framework)
 
 
 class OPAEvaluator:
@@ -540,7 +542,10 @@ class OPAEvaluator:
             with timer.phase(PHASE_POSTURE):
                 posture = await self._resolve_posture(event.agent_identity.namespace)
             with timer.phase(PHASE_TRUST_FETCH):
-                trust = await self._trust(event.agent_identity.spiffe_id)
+                trust = await self._trust(
+                    event.agent_identity.spiffe_id,
+                    seed=not _is_synthetic_framework(getattr(event, "framework", "")),
+                )
             cache_tool = self._cache_tool_key(event)
             ns = event.agent_identity.namespace
             agent_class = event.agent_identity.agent_class
@@ -806,6 +811,9 @@ class OPAEvaluator:
             # Not a registry identity: the admin routes refuse it, so a row for it could never be frozen,
             # lifted or deleted, only listed. The block itself is logged (NRVQ-ENG-2006) and audited.
             return
+        if _is_synthetic_framework(getattr(event, "framework", "")):
+            # A fabricated call registers nothing, on this path as on the happy one (`_persist_behavior`).
+            return
         try:
             from norviq.engine.trust import TrustResult
 
@@ -885,11 +893,23 @@ class OPAEvaluator:
         counter increments exactly once per allowed non-exempt call."""
         if (base_decision.decision == "allow"
                 and not self._is_rate_limit_exempt(event.tool_name)
-                and await self._is_rate_limited(event.agent_identity.spiffe_id, posture["rate_limit"])):
+                and await self._is_rate_limited(self._rate_limit_key(event), posture["rate_limit"])):
             return self._apply_posture(
                 await self._rate_limit_decision(event, start, posture["rate_limit"]), posture, event.event_id
             )
         return None
+
+    @staticmethod
+    def _rate_limit_key(event: ToolCallEvent) -> str:
+        """The window a call counts against. A real call counts against its SPIFFE id. A fabricated one
+        (`_is_synthetic_framework`) counts against its own `synthetic:` window for that id: a red-team run
+        or a Simulate uses the real agent's SVID, and sharing its window throttled the agent's live
+        traffic for calls it never made. It is still limited, at the same ceiling. A SPIFFE id starts
+        with `spiffe://`, so the prefixed key cannot be any agent's."""
+        spiffe = event.agent_identity.spiffe_id
+        if _is_synthetic_framework(getattr(event, "framework", "")):
+            return f"synthetic:{spiffe}"
+        return spiffe
 
     async def _resolve_posture(self, namespace: str) -> dict:
         """Resolve a namespace's effective posture from the Redis mirror, per-field fallback
@@ -1068,18 +1088,25 @@ class OPAEvaluator:
                                                "reason": decision.reason or "Blocked (attribution unavailable)"})
         return decision
 
-    async def _trust(self, spiffe_id: str) -> TrustScore:
+    async def _trust(self, spiffe_id: str, *, seed: bool = True) -> TrustScore:
         """Return trust score from cache, initializing when absent.
 
         Fronted by the per-pod trust-score L1 to skip the Redis GET on warm calls. This is the STORED
         score only (a status/display value that the per-call `TrustCalculator.calculate` recomputes
         fresh); serving it slightly stale never relaxes enforcement, and the freeze/cap kill-switch is
-        read fresh inside the calculator regardless."""
+        read fresh inside the calculator regardless.
+
+        ``seed=False`` reads without initializing: a fabricated call (`_is_synthetic_framework`) gets
+        the default score for an unknown SVID but writes no ``trust:*`` key. The Agents roster lists
+        every ``trust:*`` key, so seeding one listed a red-team run's made-up ``sa/<class>`` SVID as
+        an agent even though `_persist_behavior` registered nothing."""
         cached = self._trust_score_cache.get(spiffe_id)
         if cached is not _MISS:
             return cached
         trust = await self._cache.get_trust(spiffe_id)
         if trust is None:
+            if not seed:
+                return TrustScore()
             trust = TrustScore()
             await self._cache.set_trust(spiffe_id, trust)
         self._trust_score_cache.set(spiffe_id, trust)
@@ -1125,7 +1152,10 @@ class OPAEvaluator:
             timestamp=datetime.now(timezone.utc),
         )
         return await self._trust_calculator.calculate(
-            trust_input, trust_threshold=trust_threshold, prefetched_flags=prefetched_flags
+            trust_input, trust_threshold=trust_threshold, prefetched_flags=prefetched_flags,
+            # `trustcalc:{spiffe}` is the breakdown the Agents roster shows for that agent. A fabricated
+            # call under a real SVID overwrote it with the breakdown of a call the agent never made.
+            persist=not _is_synthetic_framework(getattr(event, "framework", "")),
         )
 
     def _apply_trust_overrides(self, decision: PolicyDecision, trust_result: TrustResult, event_id: str) -> PolicyDecision:
@@ -1829,7 +1859,22 @@ class OPAEvaluator:
         return " ".join(raw.split()).strip().rstrip(";").strip().lower()
 
     async def _persist_behavior(self, event: ToolCallEvent, decision: PolicyDecision, trust_result: TrustResult) -> None:
-        """Persist trust state, enforced outcome history, and profile evolution."""
+        """Persist trust state, enforced outcome history, and profile evolution.
+
+        A FABRICATED call (red-team run, Attack Graph Simulate, probe: `_is_synthetic_framework`) writes
+        no per-identity state at all: no trust cache, no registry row, no graph node, no history, no
+        profile. Its SVID cannot be trusted to mean anything. The red-team suite sends
+        `sa/<agent_class>`, and Simulate does the same, so where the workload's service account is
+        named anything else (the usual `sa/default`) the call arrived as an identity no workload uses.
+        Registering it listed a phantom agent at the default HIGH trust and drew its attack tools into
+        the Asset and Attack graphs as real edges. Where the SVID IS the real one, the same writes
+        would move a real agent's trust and graph on attacks that never happened. The audit record is
+        still written by the caller, tagged with the framework, which is where it is meant to be seen.
+        """
+        if _is_synthetic_framework(getattr(event, "framework", "")):
+            await self._post_decision(event, decision)
+            self._queue_audit(decision)
+            return
         self._queue_background(self._safe_set_trust(event.agent_identity.spiffe_id, trust_result))
         self._queue_background(self._safe_register_agent(event, trust_result, decision))
         await self._post_decision(event, decision)
@@ -1936,11 +1981,10 @@ class OPAEvaluator:
                     # count was never incremented by anything, so its column could not move off 0 and
                     # its amber/red thresholds were unreachable.
                     #
-                    # SYNTHETIC TRAFFIC IS EXCLUDED. The red-team simulator builds its events with the
-                    # REAL agent's SVID (redteam.py _build_event), so one admin "Run suite" click wrote
-                    # ~26-34 fabricated violations onto every governed agent in the namespace and put
-                    # the whole fleet in the red band for attacks that never happened. Same framework
-                    # marker the audit view already uses to separate simulated from real.
+                    # SYNTHETIC TRAFFIC IS EXCLUDED. A fabricated call never reaches this writer now
+                    # (`_persist_behavior` and `_register_fail_closed` return first), so this is a second
+                    # guard, kept for any future direct caller: one admin "Run suite" click used to write
+                    # ~26-34 fabricated violations per targeted identity.
                     violation=(
                         str(getattr(decision, "decision", "")) in ("block", "escalate")
                         and not _is_synthetic_framework(getattr(event, "framework", ""))
@@ -1956,9 +2000,11 @@ class OPAEvaluator:
         """Persist enforced decision for rolling trust-history features.
 
         SYNTHETIC TRAFFIC IS EXCLUDED, for the same reason `_safe_register_agent` excludes it — and
-        that function is the one directly above this one. The red-team simulator builds its events with
-        the REAL agent's SVID, so one admin "Run suite" click writes the whole attack corpus onto every
-        governed agent in the namespace.
+        that function is the one directly above this one. A red-team run's SVID is `sa/<agent_class>`,
+        which IS a real agent's SVID wherever the service account is named after the class, so one
+        admin "Run suite" click wrote the whole attack corpus onto that agent's history.
+        (`_persist_behavior` now returns before queueing this for a fabricated call; the check here
+        stays as a second guard.)
 
         The earlier fix stopped that reaching the console's violation counter and stopped there. This
         writer, queued on the very next line of `_persist_behavior`, kept recording them — so the

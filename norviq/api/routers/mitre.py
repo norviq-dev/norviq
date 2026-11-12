@@ -26,7 +26,7 @@ from norviq.api.db.models import AuditLogEntry, IntentDraft, MitreCoverageSnapsh
 from norviq.api.db.session import get_session
 from norviq.api.framework_mapping import FRAMEWORK_FILES, load_mapping
 from norviq.api.retention import draft_expiry, enforce_draft_cap
-from norviq.api.synthetic import is_synthetic_identity  # the ONE shared classifier (do not fork)
+from norviq.api.synthetic import audit_row_is_non_real, is_non_real_traffic, is_synthetic_identity  # the ONE shared classifier (do not fork)
 from norviq.api.threat_intent import generate_remediation_rego, remediation_generatable_rules
 
 log = structlog.get_logger()
@@ -80,8 +80,8 @@ async def _activity_by_rule(
     deliberate difference of UNIT, and the Compliance surface labels its number accordingly
     ("blocked or escalated") rather than presenting it as the same quantity."""
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS.get(range_token, 24))
-    # Group by agent_class + framework too, so the Python-side classifier can drop synthetic identities
-    # (it is not expressible in SQL) and red-team events before aggregating.
+    # Group by agent_class + framework + agent_id too, so the shared classifier can drop synthetic
+    # identities (class or SVID) and fabricated calls before aggregating, and the excluded count is exact.
     stmt = (
         select(
             AuditLogEntry.rule_id,
@@ -89,9 +89,11 @@ async def _activity_by_rule(
             AuditLogEntry.agent_class,
             AuditLogEntry.framework,
             func.count(AuditLogEntry.id),
+            AuditLogEntry.agent_id,
         )
         .where(AuditLogEntry.timestamp_utc >= since)
-        .group_by(AuditLogEntry.rule_id, AuditLogEntry.decision, AuditLogEntry.agent_class, AuditLogEntry.framework)
+        .group_by(AuditLogEntry.rule_id, AuditLogEntry.decision, AuditLogEntry.agent_class, AuditLogEntry.framework,
+                  AuditLogEntry.agent_id)
     )
     if namespace:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
@@ -99,9 +101,9 @@ async def _activity_by_rule(
     degraded = False
     excluded = 0
     try:
-        for rid, decision, cls, framework, count in (await session.execute(stmt)).all():
+        for rid, decision, cls, framework, count, agent_id in (await session.execute(stmt)).all():
             n = int(count)
-            if str(framework or "") == "redteam" or is_synthetic_identity(str(cls or "")):
+            if is_non_real_traffic(framework, cls, agent_id):
                 excluded += n
                 continue
             entry = by_rule.setdefault(str(rid), {"observed": 0, "blocked": 0})
@@ -137,18 +139,19 @@ async def _blocked_by_rule_class(session: AsyncSession, namespace: str | None, r
             AuditLogEntry.agent_class,
             AuditLogEntry.framework,
             func.count(AuditLogEntry.id),
+            AuditLogEntry.agent_id,
         )
         .where(AuditLogEntry.timestamp_utc >= since, AuditLogEntry.decision.in_(("block", "escalate")))
-        .group_by(AuditLogEntry.rule_id, AuditLogEntry.agent_class, AuditLogEntry.framework)
+        .group_by(AuditLogEntry.rule_id, AuditLogEntry.agent_class, AuditLogEntry.framework, AuditLogEntry.agent_id)
     )
     if namespace:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
     out: dict[str, dict[str, int]] = {}
     try:
-        for rid, cls, framework, count in (await session.execute(stmt)).all():
+        for rid, cls, framework, count, agent_id in (await session.execute(stmt)).all():
             cls = str(cls or "")
-            # never list a probe/test class or a red-team efficacy run as an "affected" class
-            if not cls or str(framework or "") == "redteam" or is_synthetic_identity(cls):
+            # never list a probe/test identity or a fabricated call (red-team, Simulate) as an "affected" class
+            if not cls or is_non_real_traffic(framework, cls, agent_id):
                 continue
             out.setdefault(str(rid), {})[cls] = out.setdefault(str(rid), {}).get(cls, 0) + int(count)
     except Exception as exc:  # noqa: BLE001
@@ -400,6 +403,8 @@ async def _top_active_classes(session: AsyncSession, namespace: str | None, rang
     stmt = (
         select(AuditLogEntry.agent_class, func.count(AuditLogEntry.id))
         .where(AuditLogEntry.timestamp_utc >= since)
+        # Ranked by REAL activity: a red-team run or a Simulate under a real class name is not activity.
+        .where(~audit_row_is_non_real(AuditLogEntry))
         .group_by(AuditLogEntry.agent_class)
     )
     if namespace:

@@ -15,6 +15,7 @@ import { TrustBadge, trustCategory } from "../components/common/TrustBadge";
 import { useApi } from "../hooks/useApi";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { fmtDateTime, fmtTime } from "../lib/format";
+import { isSyntheticFramework } from "../lib/syntheticTraffic";
 import { TIME_RANGES, useApp, type TimeRange } from "../store/AppContext";
 import { getToken } from "../auth/session";
 
@@ -33,10 +34,14 @@ type AuditRecord = {
   latency_ms?: number;
   tool_params?: Record<string, unknown> | null; // request args captured with the decision (may be absent)
   framework?: string; // decision source (sidecar / sidecar-http / sdk / redteam / mcp / ...)
-  // Server's verdict on the real-traffic-only exclusion (red-team framework OR synthetic/probe class).
-  // Computed API-side by the one shared classifier so the live tail applies exactly the predicate
-  // `exclude_synthetic` applies to fetched rows, without forking the class-prefix list into TypeScript.
+  // Server's verdict on the real-traffic-only exclusion (a synthetic framework OR a synthetic/probe
+  // identity). Computed API-side by the one shared classifier, on both the live payload and fetched
+  // rows, so the console never forks the class-prefix list into TypeScript.
   non_real?: boolean;
+  // A synthetic source tag (redteam, probe, ...) the caller sent but is not allowed to
+  // use: only operator credentials may mark traffic synthetic. The row is real traffic, and this keeps
+  // what the caller claimed. Null on every other row.
+  claimed_framework?: string | null;
   // MCP provenance, present only on decisions that arrived over the Model Context Protocol. With
   // several MCP integrations wired to one agent, "which server served this tool?" is the first thing
   // an operator needs, and the tool name alone does not answer it.
@@ -87,7 +92,7 @@ type DecisionFilter = (typeof DEC)[number];
  * (norviq/api/routers/audit.py — `AuditLogEntry.framework == framework`, exact match). The filter
  * type in `api/client.ts` never declared it, so the red-team evidence deep-link
  * `/audit?rule=<id>&framework=redteam` lost the half that scopes it to red-team traffic — and since
- * `exclude_synthetic` defaults ON and the server's exclusion IS `framework == "redteam"`, the rows
+ * `exclude_synthetic` defaults ON and the server's exclusion drops `framework == "redteam"`, the rows
  * the link exists to show were the only rows guaranteed to be hidden.
  *
  * `fetchAuditRecords` serialises whatever keys it is handed, so widening the type here puts the param
@@ -187,12 +192,12 @@ export function AuditLog() {
   // Real-traffic-only (default ON) hides red-team + synthetic/probe rows so this log's population matches the
   // Overview headline (which counts real traffic only). Toggle OFF to see the full ledger incl. test/eval rows.
   //
-  // OFF when the link that opened this page asked for red-team rows. The server's real-traffic
-  // exclusion is literally `framework == "redteam"` (norviq/api/synthetic.py), so leaving it on makes
-  // `framework=redteam` self-cancelling: the operator lands on "No matching records" and concludes
-  // the attack left no audit trail, or — worse, when unrelated production traffic shares the rule_id —
-  // reads that production row as the red-team evidence they followed the link for.
-  const [realOnly, setRealOnly] = useState(() => searchParams.get("framework") !== "redteam");
+  // OFF when the link that opened this page asked for a synthetic source (red-team, Simulate, probe).
+  // The server's real-traffic exclusion drops every such framework (norviq/api/synthetic.py), so leaving
+  // it on makes `framework=redteam` self-cancelling: the operator lands on "No matching records" and
+  // concludes the attack left no audit trail, or — worse, when unrelated production traffic shares the
+  // rule_id — reads that production row as the red-team evidence they followed the link for.
+  const [realOnly, setRealOnly] = useState(() => !isSyntheticFramework(searchParams.get("framework")));
 
   // The /audit route stays MOUNTED across query-string changes (React Router doesn't remount it),
   // so a SECOND deep-link fired while already on the page — e.g. the Header Inbox's
@@ -220,7 +225,7 @@ export function AuditLog() {
       setFramework(cur.framework);
       // Same reasoning as the mount-time seed: a second red-team deep-link fired while already on
       // /audit must not be cancelled by a filter the operator never saw applied.
-      if (cur.framework === "redteam") setRealOnly(false);
+      if (isSyntheticFramework(cur.framework)) setRealOnly(false);
     }
     // Namespace deep-link (Asset Graph inspector) applies on mount too — switch the global scope to the agent's ns.
     if (cur.namespace && cur.namespace !== prev.namespace) setNamespace(cur.namespace);
@@ -276,9 +281,9 @@ export function AuditLog() {
    * range, decision, tool, agent, rule, source, Real-traffic-only — left the previously fetched rows
    * merged into the tail, and nothing downstream could remove them:
    *
-   *   * `non_real` is the SERVER's real-traffic verdict, and only the WEBSOCKET payload carries it
-   *     (norviq/api/audit_hub.py). `/audit/records` `_to_dict` does not emit it, so every polled row
-   *     has `non_real === undefined` and the `realOnly && r.non_real` guard below is inert for them.
+   *   * `non_real` is the SERVER's real-traffic verdict. Only the WEBSOCKET payload used to carry it
+   *     (norviq/api/audit_hub.py); `/audit/records` did not, so every polled row had
+   *     `non_real === undefined` and the `realOnly && r.non_real` guard below was inert for them.
    *     A red-team probe fetched with Real-traffic-only OFF therefore stayed on screen after it was
    *     switched back ON — displayed as live governed traffic under a toggle reading "✓ Real traffic
    *     only", above a count of 0. That is the "N of 0" shape this file already calls out as not
@@ -287,7 +292,7 @@ export function AuditLog() {
    *     left reads as this namespace's traffic — exactly what `offScope` suppresses for the page.
    *
    * The predicate is deliberately NOT re-derived here. `non_real` is
-   * `framework == "redteam" OR is_synthetic_identity(agent_class, spiffe_id)`, and mirroring that
+   * `is_non_real_traffic(framework, agent_class, spiffe_id)`, and mirroring that
    * class-prefix list into TypeScript is the drift audit_hub.py's own comment exists to prevent —
    * one concept, two definitions. Instead, drop the fetched tail whenever the filter identity
    * changes: the poll below re-runs immediately against the new filters, and the SERVER (which does
@@ -444,10 +449,11 @@ export function AuditLog() {
   // nowhere on the page. That is the reading an operator takes as "the attack left no audit trail".
   const hasFilter = Boolean(debouncedTool || debouncedAgent || rule || framework || decision !== "all");
   const noResults = !loading && rows.length === 0;
-  // The one combination that is guaranteed to return nothing: the server's real-traffic exclusion IS
-  // `framework == "redteam"`, so the two filters cancel. Reachable by toggling Real-traffic-only back
-  // on after arriving from a red-team link.
-  const selfCancelling = framework === "redteam" && realOnly;
+  // The one combination that is guaranteed to return nothing: the server's real-traffic exclusion drops
+  // every synthetic framework, so the two filters cancel. Reachable by toggling Real-traffic-only back
+  // on after arriving from a red-team link. It used to test `=== "redteam"` only, while the server
+  // drops Simulate ("attack-graph") and probe rows too.
+  const selfCancelling = isSyntheticFramework(framework) && realOnly;
 
   useEffect(() => {
     setPage(0);
@@ -476,7 +482,31 @@ export function AuditLog() {
     } },
     { key: "agent_class", title: "Agent Class" },
     // Decision source so sidecar-enforced calls are distinguishable from API/console-originated ones.
-    { key: "framework", title: "Source", render: (v) => <span className="mono muted">{(v as string) || "—"}</span> },
+    // Rows the server classes as not real traffic (fabricated calls, test identities) carry a marker, so
+    // with "Real traffic only" off a Simulate or Policy Tester call does not read as a real one.
+    {
+      key: "framework",
+      title: "Source",
+      render: (v, r) => (
+        <span className="mono muted">
+          {(v as string) || "—"}
+          {r.non_real && (
+            <span data-testid="audit-synthetic-marker" title="Synthetic: not counted as real traffic" style={{ marginLeft: 6 }}>
+              · synthetic
+            </span>
+          )}
+          {r.claimed_framework && (
+            <span
+              data-testid="audit-claimed-framework"
+              title="The caller tagged this call as synthetic, but its credential may not run synthetic traffic, so it is counted as real traffic."
+              style={{ marginLeft: 6 }}
+            >
+              · claimed {r.claimed_framework}, counted as real
+            </span>
+          )}
+        </span>
+      )
+    },
     {
       key: "trust_score",
       title: "Trust",
@@ -563,9 +593,9 @@ export function AuditLog() {
             }}
           >
             <strong style={{ color: "var(--escalate)" }}>These two filters cannot both hold.</strong> “Real
-            traffic only” hides every row whose source is <span className="mono">redteam</span>, which is
-            exactly what this view is filtered to. An empty table here is the filters cancelling, not an
-            absence of red-team evidence — switch Real traffic only off to see it.
+            traffic only” hides every row whose source is synthetic, and <span className="mono">{framework}</span> is
+            a synthetic source, which is exactly what this view is filtered to. An empty table here is the filters
+            cancelling, not an absence of evidence — switch Real traffic only off to see it.
           </div>
         )}
 

@@ -37,7 +37,7 @@ from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.system_health import non_policy_rule_for  # one resolver: 'did a POLICY decide this?'
-from norviq.api.synthetic import is_synthetic_identity  # the ONE shared classifier (do not fork)
+from norviq.api.synthetic import is_non_real_row  # the ONE shared classifier (do not fork)
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 
 log = structlog.get_logger()
@@ -195,9 +195,7 @@ async def policy_compliance(
         # Same real-traffic population as the Overview and Compliance. A red-team probe that trips a
         # control is not a customer workload about to break, and counting it would overstate the blast
         # radius of enforcing — the one number this endpoint exists to get right.
-        if str(getattr(row, "framework", "") or "") == "redteam" or is_synthetic_identity(
-            str(getattr(row, "agent_class", "") or "")
-        ):
+        if is_non_real_row(row):
             # Count only what the exclusion actually SUPPRESSED — a synthetic row that would have
             # landed in a control. It used to increment on every excluded row, so a 30d window read
             # "scanned 5930, excluded 21338": 78% of the window apparently withheld, when almost none

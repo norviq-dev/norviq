@@ -486,8 +486,10 @@ What the proxy adds is a second gate, at a deliberately different cost
 `resources/read` and server-initiated `sampling/createMessage` are in Gate B's scope because their
 results land in the model's context exactly like a tool result (`mcp_govern_resources` /
 `mcp_govern_sampling`, both default `true` — `norviq/config.py:217,209`). Gate A never runs on the
-call path: the per-call Gate-A cost is one dict lookup against a catalog built at discovery, which is
-the entire reason the two are separated rather than re-derived per call.
+call path: the per-call Gate-A cost is a few in-memory lookups (the catalog built at discovery, plus
+the server decision and the tool's pin as the proxy's refresh last loaded them), which is the entire
+reason the two are separated rather than re-derived per call. A Block, Revoke or Approve therefore
+reaches calls as well as listings, within one refresh (`mcp_pin_refresh_s`, 30 s by default).
 
 **Gate A is a heuristic and evadable by construction; Gate B is the deterministic backstop.** Read a
 clean Gate A as "nothing matched the patterns we have", never as "this server is honest".
@@ -534,8 +536,9 @@ the pins up per server into one triage word — `drift` > `quarantined` > `flagg
 The proxy publishes its Gate-A state to Rego as `input.mcp` — `server`, `transport`, `pin_status`,
 `scan_severity`, `definition_seen`, the schema-conformance facts, and the plane the decision is on,
 which the evaluator lifts to `input.direction` (`_build_input`,
-`norviq/engine/evaluator.py:978-984`). Every value was computed at discovery and cached, so reading it
-costs a dict lookup. That is what makes "escalate on drift for the payments class but block it
+`norviq/engine/evaluator.py:978-984`). Every value was computed at discovery and cached, except that
+`pin_status` is re-read from the in-memory pin store on each call, so reading it costs a dict lookup.
+That is what makes "escalate on drift for the payments class but block it
 elsewhere" expressible at all, instead of leaving drift to the proxy's one hard-coded action.
 
 Three things to be honest about here:

@@ -293,6 +293,10 @@ describe("McpServers", () => {
 
     // The risk is not the deletion — it is that re-pinning under `tofu` adopts the drift on sight.
     expect(screen.getByTestId("mcp-forget-consequence")).toHaveTextContent(/auto-approved on sight/i);
+    // And under `strict` a running proxy refuses calls to the forgotten tools until they are approved.
+    expect(screen.getByTestId("mcp-forget-consequence")).toHaveTextContent(
+      /strict, calls to its tools are refused until you approve them again/i
+    );
     // Forgetting a server does not touch policies. In a Monitor namespace they log instead of blocking, so the
     // dialog makes no claim about enforcement.
     expect(screen.getByText(/Policies are unchanged\./)).toBeInTheDocument();
@@ -732,14 +736,22 @@ describe("the server registry", () => {
   });
 
   it("gates blocking on typing the server name and names what the agent loses", async () => {
-    // Blocking is enforced at DISCOVERY, so the agent loses the tools outright rather than seeing
-    // them refused. That is a bigger consequence than a revoke and is stated as one.
+    // Blocking withholds the tools at discovery AND refuses calls to them, so an agent that listed
+    // them before the block loses them too. The dialog has to say both, and that a running proxy
+    // only applies it on its next refresh.
     renderPage();
     const user = userEvent.setup();
     await user.click((await screen.findAllByText("runbooks"))[0]);
     await user.click(await screen.findByTestId("mcp-block-open"));
 
     expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/withheld from/i);
+    expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/calls to them are refused/i);
+    expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/listed them before the block/i);
+    // Not only calls and listings: the server is not usable at all, in either direction.
+    expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/every other request to it is refused/i);
+    expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/every request it sends the agent/i);
+    expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/next registry refresh \(30 s by default\)/i);
+    expect(screen.getByTestId("mcp-block-consequence")).not.toHaveTextContent(/not at call time/i);
     expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/loses these 1 tool/i);
     expect(screen.getByTestId("mcp-block-submit")).toBeDisabled();
 

@@ -593,11 +593,20 @@ def _build_path(
     else:
         status, verdict = "unsimulated", "No end-to-end traffic yet — simulate to confirm reachability."
 
+    # The workload identity the chain starts at, so Simulate can evaluate as it rather than as a
+    # stand-in it would have to invent. A multi-class identity's sub-node carries it in `spiffe_id`; a
+    # single-class agent node IS keyed by it (namespace-qualified in a multi-namespace union).
+    spiffe_id: str | None = None
+    if src_kind == "agent":
+        raw_id = str(src_node["props"].get("spiffe_id") or node_ids[0].split("::", 1)[-1])
+        spiffe_id = raw_id if raw_id.startswith("spiffe://") else None
+
     return ThreatPath(
         # The chokepoint is part of the id. Without it, sibling tools reaching the same data (execute_sql
         # and delete_record -> postgresql/users) produced one id, the dedupe below kept whichever was
         # least blocked, and the other kill-chain vanished from the list and from every coverage total.
         id=_short_id(ns, node_ids[0], chokepoint_id, node_ids[-1], str(len(node_ids))),
+        spiffe_id=spiffe_id,
         sev=sev,
         src=src_node["name"],
         tgt=tgt_node["name"],

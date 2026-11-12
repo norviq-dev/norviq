@@ -215,12 +215,16 @@ class FakeSession:
         # rows positionally in Python — yield one grouped tuple PER seeded row (count 1 each) so the router does
         # its own redteam/synthetic exclusion, exactly as it does against Postgres.
         if "GROUP BY" in sql and "audit_log.framework" in sql:
+            # Cut to the number of columns the query selects, so the double matches whichever shape the
+            # router asks for (agent_id, the SVID half of the synthetic classifier, is selected last).
+            width = len(stmt.selected_columns)
             return SimpleNamespace(all=lambda: [
                 (
                     r.tool_name, r.decision, getattr(r, "agent_class", ""), getattr(r, "framework", ""),
                     getattr(r, "rule_id", ""), 1, getattr(r, "latency_ms", 0.0),
                     1 if getattr(r, "latency_ms", None) is not None else 0,
-                )
+                    getattr(r, "agent_id", ""),
+                )[:width]
                 for r in self.rows
             ])
         if "GROUP BY" in sql:
@@ -675,6 +679,42 @@ def test_audit_stats_excludes_redteam_and_synthetic() -> None:
         assert stats["total"] == 1, f"redteam/synthetic leaked into total: {stats}"
         assert stats["blocked"] == 1
         assert [t["tool_name"] for t in stats["top_tools"]] == ["tool.real"], stats["top_tools"]
+    finally:
+        client.close()
+
+
+def test_every_synthetic_source_is_left_out_of_the_overview_and_marked_in_the_audit_log() -> None:
+    """The Overview counted only `framework == "redteam"` as fabricated. An Attack Graph Simulate
+    (`attack-graph`) or a hand probe (`probe`) under a real class counted as real traffic, and so did a
+    Policy Tester session, which keeps the real class and marks itself only in its SVID. One real row
+    and four synthetic ones: the KPIs must count one, and a fetched row must say which it is."""
+    def _row(tool: str, cls: str, framework: str, sa: str | None = None) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=uuid4(), event_id=uuid4(), tool_name=tool, decision="block",
+            agent_id=f"spiffe://example/ns/default/sa/{sa or cls}", agent_class=cls, framework=framework,
+            namespace="default", rule_id="deny", reason="test", trust_score=0.5, latency_ms=12.3,
+            timestamp_utc=datetime.now(timezone.utc), payload={"ok": True},
+        )
+
+    rows = [
+        _row("tool.real", "customer-support", "sidecar"),
+        _row("tool.sim", "customer-support", "attack-graph"),
+        _row("tool.probe", "customer-support", "probe"),
+        _row("tool.rt", "customer-support", "Red-Team "),
+        _row("tool.tester", "customer-support", "", sa="policy-tester-k3x9"),
+    ]
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        stats = client.get("/api/v1/audit/stats", headers=_auth_headers()).json()
+        assert stats["total"] == 1, f"synthetic traffic counted as real: {stats}"
+        assert [t["tool_name"] for t in stats["top_tools"]] == ["tool.real"], stats["top_tools"]
+        top = client.get("/api/v1/audit/top-blocked", headers=_auth_headers()).json()
+        assert [t["tool_name"] for t in top] == ["tool.real"], top
+        records = client.get("/api/v1/audit/records", headers=_auth_headers()).json()
+        assert {r["tool_name"]: r["non_real"] for r in records} == {
+            "tool.real": False, "tool.sim": True, "tool.probe": True, "tool.rt": True, "tool.tester": True,
+        }
     finally:
         client.close()
 

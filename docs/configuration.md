@@ -422,7 +422,8 @@ Read-only. Everything is off by default — a single-cluster install renders **z
 resources and behaves exactly as a standalone install.
 
 **Spoke side** (`fleet.enabled: false`): runs an in-process relay that pushes agent/audit rollups
-to the hub. Key fields: `fleet.clusterId`/`clusterName`/`region`, `fleet.apiUrl` (hub base URL),
+to the hub. The rollups carry real agents and real traffic only: test identities and red-team,
+Simulate and probe calls are left out, as on the spoke's own Overview (`norviq/fleet_relay.py`). Key fields: `fleet.clusterId`/`clusterName`/`region`, `fleet.apiUrl` (hub base URL),
 `fleet.relayIntervalSeconds` (`60`), `fleet.pullIntervalSeconds` (`60`, how often the spoke
 pulls/verifies/applies the signed policy bundle), `fleet.staleAfterSeconds` (`180`, hub-side
 heartbeat-staleness threshold), `fleet.residency` (`false`, keep raw audit in-cluster —

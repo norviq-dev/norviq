@@ -29,7 +29,7 @@ from norviq.api.db.session import get_session
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 from norviq.engine.policy_loader import stored_priority
 from norviq.api.routers.mitre import _activity_by_rule
-from norviq.api.synthetic import is_synthetic_identity
+from norviq.api.synthetic import is_non_real_traffic
 from norviq.api.threat_intent import parse_allow_names
 
 log = structlog.get_logger()
@@ -150,17 +150,19 @@ async def _agent_class_policies(
     # filter drop red-team rows; without it these efficacy bars counted the red-team probes the rest of the
     # dashboard excludes, overstating a class's real enforcement (the recurring metric-dilution bug class).
     since = datetime.now(timezone.utc) - timedelta(days=30)
+    # `agent_id` is grouped too: the Policy Tester runs under a real class and marks itself only in its SVID.
     stmt = select(AuditLogEntry.agent_class, AuditLogEntry.decision, AuditLogEntry.rule_id,
-                  AuditLogEntry.framework, func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
+                  AuditLogEntry.framework, func.count(AuditLogEntry.id),
+                  AuditLogEntry.agent_id).where(AuditLogEntry.timestamp_utc >= since)
     if namespace is not None:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
     stmt = stmt.group_by(AuditLogEntry.agent_class, AuditLogEntry.decision, AuditLogEntry.rule_id,
-                         AuditLogEntry.framework)
+                         AuditLogEntry.framework, AuditLogEntry.agent_id)
     eff: dict[str, dict[str, int]] = {}
     degraded = False
     try:
-        for cls, decision, rule_id, framework, n in (await session.execute(stmt)).all():
-            if str(framework or "") == "redteam" or is_synthetic_identity(str(cls or "")):
+        for cls, decision, rule_id, framework, n, agent_id in (await session.execute(stmt)).all():
+            if is_non_real_traffic(framework, cls, agent_id):
                 continue  # efficacy bars attest REAL enforcement — never red-team/synthetic traffic
             d = eff.setdefault(str(cls), {"observed": 0, "blocked": 0, "would_block": 0})
             d["observed"] += int(n)

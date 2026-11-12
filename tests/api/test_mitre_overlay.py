@@ -30,8 +30,9 @@ class _Session:
 
     async def execute(self, _stmt):
         sql = str(_stmt)
-        if "framework" in sql:  # _activity_by_rule → (rule_id, decision, agent_class, framework, count)
-            shaped = [(rid, dec, self._cls, "", n) for (rid, dec, n) in self._rows]
+        if "framework" in sql:  # _activity_by_rule → (rule_id, decision, agent_class, framework, count, agent_id)
+            sid = f"spiffe://norviq/ns/default/sa/{self._cls}"
+            shaped = [(rid, dec, self._cls, "", n, sid) for (rid, dec, n) in self._rows]
         else:  # _blocked_by_rule_class → (rule_id, agent_class, count) for block/escalate only
             shaped = [(rid, self._cls, n) for (rid, dec, n) in self._rows if dec in ("block", "escalate")]
         return _Result(shaped)

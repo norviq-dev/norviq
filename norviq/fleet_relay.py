@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 
 from norviq.api.db.models import AgentRegistryEntry, AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # the ONE shared classifier
 from norviq.bearer import redact_credentials
 from norviq.config import settings
 from norviq.fleet.oidc_cc import ClientCredentialsToken
@@ -114,7 +115,11 @@ class FleetRelayForwarder:
         return {"agents": len(agents), "audit": len(audit)}
 
     async def _aggregate(self) -> tuple[list[dict], list[dict]]:
-        """Read agent_registry rows + aggregate audit_log into hourly decision counters."""
+        """Read agent_registry rows + aggregate audit_log into hourly decision counters.
+
+        Real agents and real traffic only, by the shared classifier the spoke's own Overview and Agents
+        roster use. The rollup sent test identities and red-team / Simulate / probe calls, so the hub's
+        fleet view counted what every spoke view leaves out."""
         provider = self._session_factory()
         session = await provider.__anext__()
         try:
@@ -122,13 +127,15 @@ class FleetRelayForwarder:
                 "spiffe_id": e.spiffe_id, "namespace": e.namespace, "agent_class": e.agent_class,
                 "trust_score": e.trust_score, "trust_category": e.trust_category,
                 "last_seen": e.last_seen.isoformat() if e.last_seen else None,
-            } for e in (await session.execute(select(AgentRegistryEntry))).scalars().all()]
+            } for e in (await session.execute(select(AgentRegistryEntry))).scalars().all()
+                if not is_synthetic_identity(e.agent_class, e.spiffe_id)]
 
             bucket = func.date_trunc("hour", AuditLogEntry.timestamp_utc).label("bucket_ts")
             since = datetime.now(timezone.utc) - timedelta(hours=_AUDIT_WINDOW_HOURS)
             stmt = (
                 select(AuditLogEntry.namespace, bucket, AuditLogEntry.decision, func.count(AuditLogEntry.id).label("count"))
                 .where(AuditLogEntry.timestamp_utc >= since)
+                .where(~audit_row_is_non_real(AuditLogEntry))
                 .group_by(AuditLogEntry.namespace, bucket, AuditLogEntry.decision)
             )
             audit = [{
