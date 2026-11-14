@@ -297,3 +297,70 @@ async def test_the_re_created_pin_is_reported_so_the_console_can_approve_it(monk
     assert fw.catalog_report_due() == fw.observed_catalog()
     assert store._pending, "nothing for flush() to send"               # noqa: SLF001
 
+
+# ── the next listing ──────────────────────────────────────────────────────────────────────────────
+#
+# Forget says the next tools/list re-pins whatever the server serves. Locally it did: the load dropped
+# the pin and `check` re-created it as first sight. But the report is keyed on a fingerprint of
+# (tool, digest), and a server that serves exactly what it served before the Forget has the same
+# fingerprint, so the report was skipped as already sent. The control plane never got the pin back,
+# and the console showed the server with no pins until the proxy restarted. A server whose definitions
+# had changed in between was re-pinned, because its fingerprint had changed with them.
+
+async def _forgotten_and_relisted(monkeypatch, mode: str, definition: dict):
+    api = _FakeClient([[], []])
+    store = await _store(monkeypatch, None, api)
+    fw = _firewall(PinRegistry(store=store, mode=mode))
+    await _list_definition(fw, 1, SEARCH)
+    await store.flush(fw.catalog_report_due())
+    assert len(api.posts) == 1
+
+    await store.load()                                                 # the Forget arrives
+    assert store.get(pin_id("kb", "search_kb")) is None
+
+    listed = await _list_definition(fw, 2, definition)
+    return api, store, fw, listed
+
+
+async def test_tofu_re_pins_a_forgotten_server_on_its_next_listing_and_reports_it(monkeypatch):
+    api, store, fw, listed = await _forgotten_and_relisted(monkeypatch, "tofu", SEARCH)
+
+    assert [t["name"] for t in listed] == ["search_kb"]
+    assert _status(fw) == "first_seen"
+    assert store.get(pin_id("kb", "search_kb")).approved is True
+
+    catalog = fw.catalog_report_due()
+    assert catalog is not None, "the re-pin of an unchanged definition was never reported"
+    await store.flush(catalog)
+    assert len(api.posts) == 2
+    assert api.posts[1]["tools"][0]["digest"] == definition_digest(SEARCH)
+    assert fw.catalog_report_due() is None                             # and only once
+
+
+async def test_strict_holds_a_forgotten_server_on_its_next_listing_and_reports_it(monkeypatch):
+    api, store, fw, listed = await _forgotten_and_relisted(monkeypatch, "strict", SEARCH)
+
+    assert listed == []                                                # withheld until approved
+    assert _status(fw) == PIN_QUARANTINED
+    assert store.get(pin_id("kb", "search_kb")).approved is False
+    assert (await _call(fw, 3)).forward is None
+
+    catalog = fw.catalog_report_due()
+    assert catalog is not None, "the console would have no row to approve"
+    await store.flush(catalog)
+    assert [t["tool_name"] for t in api.posts[1]["tools"]] == ["search_kb"]
+
+
+async def test_a_definition_changed_before_the_forget_reaches_the_proxy_is_drift(monkeypatch):
+    """Until the load drops it the proxy still holds the approved pin, so a changed definition is
+    drift and is withheld, not taken as the first sight the Forget made room for."""
+    api = _FakeClient([[]])
+    store = await _store(monkeypatch, None, api)
+    fw = _firewall(PinRegistry(store=store, mode="tofu"))
+    await _list_definition(fw, 1, SEARCH)
+    await store.flush(fw.catalog_report_due())
+
+    assert await _list_definition(fw, 2, CHANGED) == []
+    assert _status(fw) == "drift"
+    assert store.get(pin_id("kb", "search_kb")).digest == definition_digest(SEARCH)
+    assert (await _call(fw, 3)).forward is None

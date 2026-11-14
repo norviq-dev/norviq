@@ -2283,6 +2283,13 @@ class McpFirewall:
                 self._skeletons.setdefault(folded, name)
 
             verdict = self._pins.check(self._server_id, tool, scan_severity=severity)
+            if verdict.created:
+                # A pin created here is one the control plane does not hold. After a Forget the
+                # server usually serves what it served before, so the catalog fingerprint is the one
+                # already reported and the report was skipped: the pin was re-created in this process
+                # and never written back, and the console showed the server with no pins until the
+                # proxy restarted. The verdict is unchanged; only the report is made due.
+                self.stats.pop("_reported_fingerprint", None)
             action = self._action_for(severity, verdict.status)
             scan_action = self._action_for(severity, PIN_OK)
             # A DEFINITION THIS PASS COULD NOT READ IS WITHHELD, not sanitised. `sanitize` replaces
