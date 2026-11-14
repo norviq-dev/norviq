@@ -204,6 +204,9 @@ class PinVerdict:
     status: str
     record: ToolPin
     previous_canonical: str = ""
+    # True when this check CREATED the pin (first sight, including after a Forget). The caller must
+    # report it: the control plane has no row for it, even when the catalog looks unchanged.
+    created: bool = False
 
 
 class PinRegistry:
@@ -234,7 +237,7 @@ class PinRegistry:
         if existing is None:
             record = self._first_sight(server_id, name, digest, canonical, scan_severity)
             return PinVerdict(status=PIN_FIRST_SEEN if record.approved else PIN_QUARANTINED,
-                              record=record)
+                              record=record, created=True)
 
         if existing.digest == digest:
             status = PIN_OK if existing.approved else PIN_QUARANTINED
