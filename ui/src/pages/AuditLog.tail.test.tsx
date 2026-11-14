@@ -349,3 +349,136 @@ describe("the SOCKET half of the same leak", () => {
     expect(screen.getAllByText("search_kb").length).toBeGreaterThan(0);
   });
 });
+
+describe("the live tail and the fetched page are one ledger", () => {
+  it("renders a decision once when the fetch catches up with the frame that streamed it", async () => {
+    // Observed on a live 0.2.7 cluster while recording the chatbot under attack: switching to Block
+    // showed the newest blocks twice, and only a fresh page load cleared it. The tail deduped against
+    // the fetched rows by `id`, but the two feeds do not share one: the websocket frame's `id` IS the
+    // decision's event_id (audit_hub.py), while /audit/records returns the DB row UUID as `id` and the
+    // event_id as its own field (routers/audit.py). The same decision never matched itself.
+    OpenWS.instances = [];
+    vi.stubGlobal("WebSocket", OpenWS as unknown as typeof WebSocket);
+    const EVENT_ID = "62ff54f4-0000-4000-8000-000000000001";
+    const now = new Date().toISOString();
+    let caughtUp = false;
+    server.use(
+      http.get("/api/v1/audit/records", () =>
+        HttpResponse.json(
+          caughtUp
+            ? [
+                {
+                  id: "086e7795-0000-4000-8000-000000000002", // row UUID — not the event id
+                  event_id: EVENT_ID,
+                  timestamp: now,
+                  tool_name: "transfer_funds",
+                  decision: "block",
+                  rule_id: "deny_transfers",
+                  agent_class: "ops",
+                  agent_id: "spiffe://norviq/ns/default/sa/support",
+                  namespace: "default",
+                  framework: "sidecar",
+                  trust_score: 0.2,
+                  latency_ms: 4
+                }
+              ]
+            : []
+        )
+      )
+    );
+    renderPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    // The decision streams in first, exactly as audit_hub.py frames it: `id` is the event id, no
+    // separate `event_id` field.
+    await act(async () => {
+      latestWS().send(
+        JSON.stringify({
+          id: EVENT_ID,
+          timestamp: now,
+          tool_name: "transfer_funds",
+          decision: "block",
+          rule_id: "deny_transfers",
+          agent_class: "ops",
+          agent_id: "spiffe://norviq/ns/default/sa/support",
+          namespace: "default",
+          framework: "sidecar",
+          trust_score: 0.2,
+          latency_ms: 4,
+          non_real: false
+        })
+      );
+    });
+    expect(screen.getAllByText("transfer_funds")).toHaveLength(1);
+
+    // The operator filters to Block; the page's own fetch now returns the same decision.
+    caughtUp = true;
+    fireEvent.click(screen.getByRole("button", { name: "Block" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    // FAIL-ON-BUG: pre-fix the decision rendered twice — once from the tail, once from the fetch —
+    // under "Showing 2 of 2". A doubled row on an audit surface reads as a doubled event.
+    expect(screen.getAllByText("transfer_funds")).toHaveLength(1);
+    expect(screen.getByText(/Showing 1 of 1 record\b/)).toBeInTheDocument();
+  });
+
+  it("does not drop a fetched row on a later page because its decision is still in the tail", async () => {
+    // The tail renders only on page 0. Once tail and page share a key, deduping against every streamed
+    // row rather than the rendered ones would remove this decision from page 2 — the only place it is
+    // on screen — because a frame for it is still held in the socket's message buffer.
+    OpenWS.instances = [];
+    vi.stubGlobal("WebSocket", OpenWS as unknown as typeof WebSocket);
+    const EVENT_ID = "62ff54f4-0000-4000-8000-000000000003";
+    const now = new Date().toISOString();
+    const row = (n: number) => ({
+      id: `row-${n}`,
+      event_id: `evt-${n}`,
+      timestamp: now,
+      tool_name: "get_customer",
+      decision: "allow",
+      agent_class: "ops",
+      namespace: "default",
+      framework: "sidecar"
+    });
+    const firstPage = Array.from({ length: 50 }, (_, n) => row(n));
+    const target = { ...row(50), id: "row-target", event_id: EVENT_ID, tool_name: "transfer_funds", decision: "block" };
+    server.use(
+      http.get("/api/v1/audit/records", ({ request }) => {
+        const url = new URL(request.url);
+        if (Number(url.searchParams.get("limit")) >= 500) return HttpResponse.json([...firstPage, target]);
+        return HttpResponse.json(Number(url.searchParams.get("offset")) >= 50 ? [target] : firstPage);
+      })
+    );
+    renderPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    await act(async () => {
+      latestWS().send(
+        JSON.stringify({
+          id: EVENT_ID,
+          timestamp: now,
+          tool_name: "transfer_funds",
+          decision: "block",
+          agent_class: "ops",
+          namespace: "default",
+          framework: "sidecar",
+          non_real: false
+        })
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    // Anti-vacuous: we are on page 2, where the fetch returned exactly the target row.
+    expect(screen.queryAllByText("get_customer")).toHaveLength(0);
+    expect(screen.getAllByText("transfer_funds")).toHaveLength(1);
+  });
+});

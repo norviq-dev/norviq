@@ -21,6 +21,9 @@ import { getToken } from "../auth/session";
 
 type AuditRecord = {
   id?: string;
+  // The decision's own id. /audit/records sends it beside the DB row UUID in `id`; the websocket frame
+  // has no such field because its `id` already IS the event id (audit_hub.py). See `decisionKey`.
+  event_id?: string;
   timestamp: string;
   tool_name: string;
   decision: "allow" | "block" | "escalate" | "audit";
@@ -58,6 +61,17 @@ type AuditRecord = {
   } | null;
   _live?: boolean;
 };
+
+// Identity of the DECISION a row records, for deduping the live tail against the fetched page.
+//
+// It used to be `id`, which the two feeds do not share: a websocket frame's `id` is the event id, a
+// fetched record's `id` is its DB row UUID with the event id in `event_id`. So the same decision never
+// matched itself, and once the page's own fetch caught up with the tail it rendered twice — "Showing 2
+// of 2" for one block, cleared only by a reload. A doubled row on an audit surface reads as a doubled
+// event. `id` remains the fallback only for a record that carries no `event_id`.
+function decisionKey(r: AuditRecord): string | undefined {
+  return r.event_id ?? r.id;
+}
 
 // E2(b): parse namespace + agent_class out of a SPIFFE id (spiffe://norviq/ns/<ns>/sa/<class>).
 // Defensive — returns {} when the id is absent or not in the expected shape.
@@ -346,7 +360,7 @@ export function AuditLog() {
     const seen = new Set<string>();
     const out: AuditRecord[] = [];
     for (const m of merged) {
-      const id = m.id ?? `${m.timestamp}-${m.tool_name}`;
+      const id = decisionKey(m) ?? `${m.timestamp}-${m.tool_name}`;
       if (seen.has(id)) continue;
       seen.add(id);
       out.push({ ...m, _live: true });
@@ -363,7 +377,6 @@ export function AuditLog() {
     // "Showing 6 of 0 records" — 6 live rows over a server count of 0. In an audit tool that is not a
     // cosmetic slip: someone filtering to Block during an incident sees rows and reasonably reads them as
     // blocks. Always exactly six, because `streamed` is capped at slice(0, 6).
-    const liveIds = new Set(streamed.map((r) => r.id).filter(Boolean));
     const needle = debouncedTool.trim().toLowerCase();
     const agentNeedle = debouncedAgent.trim().toLowerCase();
     const ruleNeedle = rule.trim().toLowerCase();
@@ -404,7 +417,13 @@ export function AuditLog() {
       if (framework && r.framework !== framework) return false;
       return true;
     });
-    return [...(page === 0 ? live : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
+    // Dedupe against the tail rows actually RENDERED, not all of `streamed`. While the keys never
+    // matched (see `decisionKey`) the difference was invisible; now that they do, keying off `streamed`
+    // would drop a fetched row whose decision the tail filtered out — or, on any page but the first,
+    // where no tail is shown, drop it from the only place it appears.
+    const shown = page === 0 ? live : [];
+    const liveIds = new Set(shown.map(decisionKey).filter(Boolean));
+    return [...shown, ...(base.data ?? []).filter((r) => !liveIds.has(decisionKey(r)))];
   }, [streamed, base.data, page, realOnly, decision, debouncedTool, debouncedAgent, rule, framework, selectedNamespace]);
 
   const serverCount = totalRecords.data?.length ?? 0;
