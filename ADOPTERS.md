@@ -1,7 +1,8 @@
 # Adopters
 
 Organizations that **currently and actively run Norviq** in an environment that matters to them —
-production, staging with real agents, or a security evaluation that reached a decision.
+production, staging with real agents, or a security evaluation that ended in a decision to adopt it
+or to keep evaluating it. An evaluation that decided against Norviq is not listed.
 
 That follows the [CNCF TOC's definition of an adopter](https://github.com/cncf/toc/blob/main/FAQ.md#what-is-the-definition-of-an-adopter)
 ("currently and actively, successfully leverages that project"); the three settings are Norviq's own. Stars, forks, blog mentions and
@@ -17,8 +18,8 @@ what it cost you. A contact who can confirm the entry is helpful; it is not requ
 - **Type**: CNCF End-User Member, End-User Organization, Service Provider, Project or Consultancy,
   as the [CNCF project template](https://github.com/cncf/project-template/blob/main/ADOPTERS.md)
   defines them.
-- **Adoption Level**: Production, Staging or Evaluation (a security evaluation that reached a
-  decision), as defined above. These levels are Norviq's own; the CNCF template uses Production,
+- **Adoption Level**: Production, Staging or Evaluation (a security evaluation that decided to
+  adopt Norviq or to keep evaluating it), as defined above. These levels are Norviq's own; the CNCF template uses Production,
   Dev/Test, Trialing and Evaluating.
 
 | Organization | Type | Adoption Level | Description | Since | Contact |
