@@ -109,7 +109,7 @@ spec:
 
         # ---------------------------------------------------------------- MCP firewalls
         # Three sidecars, one per upstream server, each running the EXISTING engine image -- no new
-        # build. Verified in engine-0.2.7: `python -c "import norviq.mcp.http"` succeeds and
+        # build. Verified in engine-0.2.8: `python -c "import norviq.mcp.http"` succeeds and
         # `python -m norviq.mcp --help` prints usage.
         #
         # Why one per server rather than a single multiplexing proxy: --server-id keys the definition
@@ -131,7 +131,7 @@ spec:
         - name: mcp-fw-kb
           # Tag, not digest, so the operator can substitute a rebuilt engine without editing a hash.
           # Pin it to a digest if you want this pod to be reproducible across a tag re-push.
-          image: ghcr.io/norviq-dev/norviq-engine:engine-0.2.7
+          image: ghcr.io/norviq-dev/norviq-engine:engine-0.2.8
           imagePullPolicy: IfNotPresent
           # `command` AND `args`, not args alone. The engine image declares no ENTRYPOINT -- only
           # CMD ["python","-m","norviq.sidecar"] -- so `args` by itself would replace CMD and happen
@@ -194,7 +194,7 @@ spec:
               mountPath: /tmp
 
         - name: mcp-fw-crm
-          image: ghcr.io/norviq-dev/norviq-engine:engine-0.2.7
+          image: ghcr.io/norviq-dev/norviq-engine:engine-0.2.8
           imagePullPolicy: IfNotPresent
           command: ["python", "-m", "norviq.mcp"]     # see mcp-fw-kb for why command AND args
           args:
@@ -240,7 +240,7 @@ spec:
               mountPath: /tmp
 
         - name: mcp-fw-ops
-          image: ghcr.io/norviq-dev/norviq-engine:engine-0.2.7
+          image: ghcr.io/norviq-dev/norviq-engine:engine-0.2.8
           imagePullPolicy: IfNotPresent
           command: ["python", "-m", "norviq.mcp"]     # see mcp-fw-kb for why command AND args
           args:
