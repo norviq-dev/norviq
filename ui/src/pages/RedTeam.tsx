@@ -289,6 +289,21 @@ const RedTeam = () => {
                 {(eff.excluded_synthetic ?? 0) > 0 && (
                   <div className="panel-sub">{eff.excluded_synthetic} synthetic rows excluded</div>
                 )}
+                {/*
+                  Rows moved out of the denominator are counted here under their reason, never left to
+                  be inferred from a total that silently shrank. Both are per-row too ("not enabled
+                  here", "enforced at the MCP proxy") with the reason in the row's tooltip.
+                */}
+                {(eff.proxy_enforced ?? 0) > 0 && (
+                  <div className="panel-sub" data-testid="redteam-proxy-enforced" title={PROXY_ENFORCED_REASON}>
+                    {eff.proxy_enforced} enforced at the MCP proxy, not scored
+                  </div>
+                )}
+                {(eff.sector_not_enabled ?? 0) > 0 && (
+                  <div className="panel-sub" data-testid="redteam-not-enabled" title={NOT_ENABLED_REASON}>
+                    {eff.sector_not_enabled} not enabled here, not scored
+                  </div>
+                )}
               </div>
             </div>
             {overall.got_through > 0 && (
@@ -450,7 +465,7 @@ const RedTeam = () => {
                         <td style={{ ...tdStyle, whiteSpace: "nowrap" }}>
                           {/* Same `outcomeOf` as the filter, and the server counted the scorecard from
                               the same verdict — the label, the filter and the number cannot drift. */}
-                          <OutcomeLabel outcome={outcomeOf(r)} />
+                          <OutcomeLabel outcome={outcomeOf(r)} reason={r.outcome_reason} />
                         </td>
                         <td style={tdStyle}>
                           <Link
@@ -547,7 +562,12 @@ function gotThrough(r: Pick<RedteamResult, "outcome" | "passed" | "applicable">)
 const outcomeStyle: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 4 };
 const mutedOutcome: React.CSSProperties = { ...outcomeStyle, color: "var(--text-muted)" };
 
-function OutcomeLabel({ outcome }: { outcome: RedteamOutcome }) {
+const NOT_ENABLED_REASON =
+  "These attacks target a sector pack or an MCP server allowlist that is not configured for this namespace — not a policy gap.";
+const PROXY_ENFORCED_REASON =
+  "These attacks target an MCP vector the proxy decides before any policy is consulted (Gate A refuses a quarantined tool from its own pin store), so no engine decision can catch or miss them.";
+
+function OutcomeLabel({ outcome, reason }: { outcome: RedteamOutcome; reason?: string }) {
   switch (outcome) {
     case "caught":
       return <span style={{ ...outcomeStyle, color: ACCENT }}><CheckCircle2 size={14} /> caught</span>;
@@ -566,11 +586,19 @@ function OutcomeLabel({ outcome }: { outcome: RedteamOutcome }) {
         </span>
       );
     case "not_enabled":
-      // A conditional attack whose enforcing rule isn't loaded — a sector pack, or the opt-in MCP
-      // integration guardrail. Out of scope, not a real miss.
+      // A conditional attack whose control isn't configured — a sector pack, or an MCP server
+      // allowlist. Out of scope, not a real miss.
       return (
-        <span style={mutedOutcome} title="This attack targets a sector pack or an opt-in guardrail that is not enabled for this namespace — not a policy gap.">
+        <span style={mutedOutcome} data-testid="redteam-row-not-enabled" title="This attack targets a sector pack or an MCP server allowlist that is not configured for this namespace — not a policy gap.">
           — not enabled here
+        </span>
+      );
+    case "proxy_enforced":
+      // Decided by the MCP proxy before /evaluate, so the engine's decision on the forged call says
+      // nothing about whether it is stopped. Muted like the other unscored reasons, never red.
+      return (
+        <span style={mutedOutcome} data-testid="redteam-row-proxy-enforced" title={reason ?? PROXY_ENFORCED_REASON}>
+          — enforced at the MCP proxy, not scored
         </span>
       );
     case "non_enforcement":

@@ -899,10 +899,26 @@ tool it says nothing about falls through to your baseline. Pair it with a deny-b
 against a name nobody has seen before.
 
 `norviq redteam run --agent <class> --namespace <ns>` exercises three MCP identity attacks
-(`MCP-01`–`MCP-03`, `norviq/redteam/attacks.py:113-115`). `MCP-01` is the one
+(`MCP-01`–`MCP-03`, `norviq/redteam/attacks.py`). `MCP-01` is the one
 `mcp_unapproved_write_server` blocks; `MCP-02` and `MCP-03` forge `input.mcp` fields and exist to
 *measure* the residual described under Trust level in §5 — they are not expected to be closed by a
 rule.
+
+The console's suite (Red Team page, `POST /api/v1/redteam/suite`) scores them differently, because
+they probe different controls:
+
+- `MCP-01` and `MCP-02` probe a server allowlist, so they are scored only where the namespace has one
+  (this guardrail, or a registry whose rendered `registered_servers` names a server). Elsewhere they
+  read "not enabled here", because an empty registry is inert. Where they are scored, `MCP-02` reads
+  "got through" by design.
+- `MCP-03` probes the quarantine, and the policy rule above — `mcp_tool_not_approved`, the same in
+  this template and the strict preset — reads the `pin_status` it forges, so no rule can catch it
+  anywhere. The quarantine is Gate A's (§4), which refuses the call before policy is consulted. Its row
+  reads "enforced at the MCP proxy, not scored" on every namespace and is counted under that reason on
+  the scorecard, never in the denominator ([Compliance §2.4](compliance.md#24-sector_not_enabled-and-inapplicable-attacks)).
+
+`norviq redteam run` applies none of this: it prints each attack's raw pass or fail, so an attack the
+console sets aside still reads FAIL there whenever the engine allowed it.
 
 ---
 

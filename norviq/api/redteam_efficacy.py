@@ -23,7 +23,7 @@ from norviq.api.framework_mapping import techniques_for_rule
 from norviq.api.routers.system_health import non_policy_rule_for  # a fault or a throttle is not a detection
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.redteam.attacks import get_attack_by_id
-from norviq.redteam.vectors import VECTORS_BY_ID, EVALUATE_REACHABLE, coverage_denominators
+from norviq.redteam.vectors import VECTORS_BY_ID, EVALUATE_REACHABLE, coverage_denominators, proxy_enforced
 
 # The ATLAS bucket for a block-expected attack whose rule no technique lists. It names the condition
 # instead of posing as a technique, and it sorts after every AML.T id.
@@ -103,7 +103,7 @@ def with_current_mapping(results: list[dict[str, Any]] | None) -> list[dict[str,
 # its denominators come from the catalog and are stored on the run on purpose (`_vector_coverage`).
 ROW_COUNTED_FIELDS = (
     "overall", "by_technique", "by_owasp", "by_vector", "non_enforcement", "sector_not_enabled",
-    "excluded_synthetic",
+    "proxy_enforced", "excluded_synthetic",
 )
 
 
@@ -193,9 +193,14 @@ def row_outcome(r: dict[str, Any]) -> str:
     """The ONE per-row verdict, served on every result row and the only input to `compute_efficacy`.
 
     caught | would_block | got_through for a row the roll-up scores, otherwise the reason it is not
-    scored: synthetic (a probe identity), non_enforcement (the attack does not expect a block) or
-    not_enabled (its sector pack / opt-in guardrail is not loaded here). The tests run in that order,
-    so a row carries exactly one of the six.
+    scored: synthetic (a probe identity), non_enforcement (the attack does not expect a block),
+    proxy_enforced (its vector is decided by the MCP proxy before any policy is consulted, so no
+    engine decision can catch or miss it) or not_enabled (its sector pack / MCP server allowlist is
+    not configured here). The tests run in that order, so a row carries exactly one of the seven.
+
+    proxy_enforced is tested before not_enabled because it is the truer reason: "not enabled here"
+    tells the operator that configuring something would make the row count, and for a proxy-enforced
+    row nothing in the namespace's policy would.
 
     The console used to re-derive this per row as `!passed && applicable !== false`, which disagrees
     with the roll-up in both directions. A throttled or faulted block has `passed` true (actual block
@@ -209,6 +214,8 @@ def row_outcome(r: dict[str, Any]) -> str:
         return "synthetic"
     if r.get("expected") != "block":
         return "non_enforcement"
+    if proxy_enforced(r.get("mcp_vector")):
+        return "proxy_enforced"
     # A sector attack whose enforcing rule isn't loaded (pack not enabled) is out of scope for THIS
     # deployment — it must not deflate proven-blocking, exactly like an un-enabled coverage category.
     if r.get("applicable") is False:
@@ -246,6 +253,18 @@ def pass_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def outcome_reason(r: dict[str, Any], outcome: str) -> str | None:
+    """Why a row the roll-up does not score is set aside, where the catalogue states it.
+
+    Only a proxy-enforced row has a per-row reason today: its vector's catalogued `reason`, the same
+    text the catalogue requires before a vector can be left unscored. The other unscored outcomes
+    have one fixed meaning each and the console labels them itself."""
+    if outcome == "proxy_enforced":
+        v = VECTORS_BY_ID.get(str(r.get("mcp_vector") or ""))
+        return v.reason if v is not None else None
+    return None
+
+
 def with_outcomes(results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """Copies of `results`, each annotated with its `row_outcome` and its current `passed`, to serve.
 
@@ -254,10 +273,15 @@ def with_outcomes(results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     re-derived for the same reason: a row written while it was `actual == expected` says a throttled
     block passed, beside an `outcome` of got_through.
     """
-    return [
-        {**r, "passed": attack_passed(r.get("expected"), r.get("actual"), r.get("rule_id")), "outcome": row_outcome(r)}
-        for r in results or []
-    ]
+    out = []
+    for r in results or []:
+        outcome = row_outcome(r)
+        row = {**r, "passed": attack_passed(r.get("expected"), r.get("actual"), r.get("rule_id")), "outcome": outcome}
+        reason = outcome_reason(r, outcome)
+        if reason:
+            row["outcome_reason"] = reason
+        out.append(row)
+    return out
 
 
 def _finalize(bucket: dict[str, Any]) -> dict[str, Any]:
@@ -307,6 +331,8 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
       expected a block and no policy gave one. ``_row_outcome`` has the full rule.
     - Rows whose expected decision is not ``block`` (runtime/intent-only control cases) are tallied under
       ``non_enforcement`` and never counted as a miss.
+    - Rows on a proxy-enforced vector are tallied under ``proxy_enforced``: counted, never scored, and
+      not credited to ``by_vector`` either, since the suite exercised nothing it can adjudicate there.
 
     Every bucket is a count of `row_outcome` over the rows — the same verdict each served row carries —
     so a table filtered on a row's `outcome` cannot disagree with the number above it.
@@ -317,6 +343,7 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
     by_vector: dict[str, dict[str, Any]] = {}
     non_enforcement = 0
     sector_not_enabled = 0  # sector-pack attacks whose pack isn't enabled — out of scope, NOT a miss
+    proxy_enforced_rows = 0  # attacks on a vector the MCP proxy decides before any policy — NOT a miss
     excluded_synthetic = 0
 
     for r in results:
@@ -326,6 +353,9 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         if outcome == "non_enforcement":
             non_enforcement += 1
+            continue
+        if outcome == "proxy_enforced":
+            proxy_enforced_rows += 1
             continue
         if outcome == "not_enabled":
             sector_not_enabled += 1
@@ -369,5 +399,6 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
         "vector_coverage": _vector_coverage(set(by_vector)),
         "non_enforcement": non_enforcement,
         "sector_not_enabled": sector_not_enabled,
+        "proxy_enforced": proxy_enforced_rows,
         "excluded_synthetic": excluded_synthetic,
     }

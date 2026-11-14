@@ -526,12 +526,19 @@ export async function revokeApiKey(id: string): Promise<ApiKey> {
 
 /**
  * The server's verdict on one result row: `row_outcome` in norviq/api/redteam_efficacy.py, the same
- * function the scorecard's caught / would_block / got_through buckets are counted from. The last three
+ * function the scorecard's caught / would_block / got_through buckets are counted from. The last four
  * are the reasons a row is NOT scored. Read this, never `passed`. `passed` is `attack_passed` in the
  * same file — the expected decision, made by a policy — so a throttled or faulted block no longer
  * passes, but a monitored detection still fails it and is a would_block, not a got-through.
  */
-export type RedteamOutcome = "caught" | "would_block" | "got_through" | "not_enabled" | "non_enforcement" | "synthetic";
+export type RedteamOutcome =
+  | "caught"
+  | "would_block"
+  | "got_through"
+  | "not_enabled"
+  | "proxy_enforced"
+  | "non_enforcement"
+  | "synthetic";
 
 export type RedteamResult = {
   attack_id: string;
@@ -543,8 +550,8 @@ export type RedteamResult = {
   actual: string;
   rule_id: string;
   passed: boolean;
-  // false = a CONDITIONAL attack whose enforcing rule isn't loaded for this namespace — a sector pack,
-  // or the opt-in MCP integration guardrail. Out of scope, NOT a real miss: excluded from
+  // false = a CONDITIONAL attack whose control isn't configured for this namespace — a sector pack, or
+  // an MCP server allowlist. Out of scope, NOT a real miss: excluded from
   // proven-blocking and rendered as "not enabled here" rather than a red "got through". The server
   // folds this into `outcome` ("not_enabled"); anything reading a row goes through `outcomeOf()` in
   // RedTeam.tsx.
@@ -552,6 +559,9 @@ export type RedteamResult = {
   // Computed on read by the API, so rows of runs stored before the field existed carry it too. Optional
   // only for an API older than the console.
   outcome?: RedteamOutcome;
+  // Why an unscored row is set aside, where the server states one. Today only `proxy_enforced` rows
+  // carry it: the catalogued reason their MCP vector is decided by the proxy before any policy.
+  outcome_reason?: string;
   latency_ms?: number;
   error?: string;
 };
@@ -610,6 +620,9 @@ export type RedteamEfficacy = {
   non_enforcement: number;
   // Returned by the API since sector packs landed; the type had drifted and never listed it.
   sector_not_enabled?: number;
+  // Rows on an MCP vector the proxy decides before any policy (MCP-03). Absent on a run stored before
+  // the outcome existed whose rows were since pruned.
+  proxy_enforced?: number;
   excluded_synthetic: number;
 };
 export type RedteamRunResult = RedteamResult & {

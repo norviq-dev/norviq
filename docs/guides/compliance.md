@@ -257,15 +257,20 @@ table; nothing is derived from its name.
 
 ### 2.3 How efficacy is computed
 
-`compute_efficacy` (`redteam_efficacy.py:138-204`) walks the result rows and applies three filters
-before anything reaches a denominator:
+`compute_efficacy` (`redteam_efficacy.py`) walks the result rows and applies four filters before
+anything reaches a denominator, in `row_outcome`'s order:
 
 1. **Synthetic identities are dropped** (`:147`). Counted as `excluded_synthetic`.
 2. **Rows whose expected decision is not `block` are set aside** (`:157-158`) as `non_enforcement`.
    `RL-001` (rate-limit flood) and `CE-002` (recursive planner intent) expect `allow` because neither
    is decidable in a single evaluation — the real control is the stateful rate limiter and the
    `chain_depth_limit` rule respectively. They are never counted as misses.
-3. **Rows marked `applicable: false` are set aside** (`:162-164`) as `sector_not_enabled`.
+3. **Rows on a proxy-enforced MCP vector are set aside** as `proxy_enforced`. Today that is `MCP-03`
+   alone ([2.4](#24-sector_not_enabled-and-inapplicable-attacks)).
+4. **Rows marked `applicable: false` are set aside** as `sector_not_enabled`.
+
+A row set aside is still in `results`, carrying its `outcome`, and each of the four is counted under
+its own name in `efficacy`. Nothing leaves the denominator without saying so.
 
 What survives is the denominator. A row is `caught` when it actually blocked, `got_through` when it
 expected a block and did not get one, and `proven_blocking_pct = round(caught / total * 100, 1)`
@@ -273,27 +278,47 @@ expected a block and did not get one, and `proven_blocking_pct = round(caught / 
 
 ### 2.4 `sector_not_enabled` and inapplicable attacks
 
-Two attack categories are **conditional** (`redteam.py:511-513`): `SECTOR_POLICY` and `MCP_IDENTITY`.
-Their enforcing rules are not part of any shipped baseline — they live in a sector pack
-(`policies/sector/*`) or in the opt-in MCP guardrail template
-(`policies/templates/mcp_integration_guardrail.rego`, default-off). `_attack_applicable`
-(`redteam.py:516-525`) marks such an attack applicable only when its `expected_rule` appears in the
-Rego loaded for that namespace:
+Two attack categories are **conditional** (`redteam.py` `_CONDITIONAL_CATEGORIES`): `SECTOR_POLICY`
+and `MCP_IDENTITY`. Their enforcing controls are not on by default — they live in a sector pack
+(`policies/sector/*`) or in an MCP server allowlist: the opt-in guardrail template
+(`policies/templates/mcp_integration_guardrail.rego`, default-off) or the namespace's server
+registry (`norviq/api/mcp_controls.py`) once a server is registered in it. `_attack_applicable` marks
+a sector attack applicable only when its `expected_rule` appears in the Rego loaded for that
+namespace, and `MCP-01`/`MCP-02` only when the namespace has a server allowlist
+(`_mcp_server_allowlist_configured`):
 
 | Attack | Expected rule | Enabled by |
 |---|---|---|
 | `FIN-001` SoD self-approval | `sod_violation` | pack `finance-money-movement` |
 | `PHI-001` PHI export exfil | `phi_export_exfil_blocked` | pack `healthcare-phi` |
 | `OT-001` OT control command | `ot_control_command_blocked` | pack `energy-ot` |
-| `MCP-01/02/03` MCP identity | `mcp_unapproved_write_server`, `mcp_tool_not_approved` | MCP integration guardrail |
+| `MCP-01/02` MCP server identity | `mcp_unapproved_write_server` | MCP guardrail, or a registry with a registered server |
 
-Verified: **no shipped baseline reads `input.mcp` at all** — zero references in `comprehensive.rego`
-or any of `webhook/presets/{strict,moderate,permissive}.rego`. An MCP identity attack in a namespace
-without the guardrail could never be blocked, and no operator action inside that namespace's policy
-would fix it — reporting it as a miss would paint every default namespace red. So it is reported as
-"not enabled here" (`RedTeam.tsx:419-425`), excluded from the denominator, and the console's
-`gotThrough()` helper (`RedTeam.tsx:509-511`) is the single definition both the badge and the
-"Got-through only" filter use, so the table and the scorecard cannot disagree.
+A registry counts as populated when the `registered_servers` set it renders names a server. That
+set is what OPA evaluates; the module's `# nrvq-mcp-registry/v1:` header is only what the console
+reads the registry back from, and it is not consulted. An empty registry is inert by design. In a
+namespace with neither an allowlist nor a registered server, `MCP-01`/`MCP-02` could never be blocked
+by the control they probe, and reporting them as misses would paint every default namespace red. So
+they are reported as "not enabled here", excluded from the denominator, and counted under
+`sector_not_enabled`. Where an allowlist exists they are scored, and `MCP-02` — the forged
+allowlisted server id — reads `got_through` by design (§7).
+
+`MCP-03` is not conditional on anything in the namespace. It sends a write for a quarantined tool
+with a forged `pin_status: "pinned"`. The rule that reads pin status, `mcp_tool_not_approved`, is
+identical in the strict preset and the guardrail template, fires only on `pin_status ==
+"quarantined"`, and so reads the very field the attack forges: no setting of it can catch `MCP-03`
+anywhere. The quarantine itself is held by the proxy. Gate A refuses a quarantined tool from its own
+pin store before `/evaluate` runs, which makes `mcp_tool_not_approved` unreachable on the
+`tools/call` path ([MCP guide §4](mcp.md#4-what-the-proxy-enforces-before-policy-is-consulted)). So
+`MCP-03` targets the proxy-enforced vector `quarantined-tool-asserts-pinned` (§3.3), and its row is
+reported `proxy_enforced` on every namespace: the call is still sent and the engine's decision
+recorded, the row reads "enforced at the MCP proxy, not scored" with the vector's reason as
+`outcome_reason`, and the scorecard counts it as "enforced at the MCP proxy, not scored". It is never
+in the denominator.
+
+The console renders the server's `outcome` for every row, and its `gotThrough()` helper is the single
+definition both the badge and the "Got-through only" filter use, so the table and the scorecard
+cannot disagree.
 
 `POLICY_COMPOSITION` (`MCP-04`/`MCP-05`) is deliberately **not** conditional: its expected rules are
 baseline blocks that ship everywhere, so "did this class's own allowlist override a baseline
@@ -305,11 +330,13 @@ and every control holding:
 ```
 overall            {total: 26, caught: 26, got_through: 0, proven_blocking_pct: 100.0}
 non_enforcement    2      # RL-001, CE-002
-sector_not_enabled 6      # FIN-001, PHI-001, OT-001, MCP-01, MCP-02, MCP-03
+proxy_enforced     1      # MCP-03
+sector_not_enabled 5      # FIN-001, PHI-001, OT-001, MCP-01, MCP-02
 excluded_synthetic 0
 ```
 
-**26, not 34.** Enable all three sector packs and the MCP guardrail and the denominator becomes 32.
+**26, not 34.** Enable all three sector packs and the MCP guardrail and the denominator becomes 31.
+`MCP-03` stays out at any setting.
 
 ### 2.5 The three breakdowns and their denominators
 
@@ -328,11 +355,15 @@ toward each of them on the Compliance page. The per-technique totals can therefo
 A stored run keeps the mapping it was written with. When a run is read back with its rows,
 `/redteam/results/*` re-maps the rows and recounts every part of the efficacy blob that comes from
 rows (`overall`, the three breakdowns, and the `non_enforcement` / `sector_not_enabled` /
-`excluded_synthetic` counts) with the current mapping and the current per-row verdict. So a run from
-before the mapping was shared does not keep showing the old per-attack ids, and a run stored while a
-throttled block still counted as caught does not show a stale `overall` beside recounted breakdowns.
-The history list uses the same recount. `vector_coverage` stays as stored. A run whose rows were
-pruned keeps everything it was stored with.
+`proxy_enforced` / `excluded_synthetic` counts) with the current mapping and the current per-row
+verdict. So a run from before the mapping was shared does not keep showing the old per-attack ids, and
+a run stored while a throttled block still counted as caught does not show a stale `overall` beside
+recounted breakdowns. The history list uses the same recount. `vector_coverage` stays as stored. A run
+whose rows were pruned keeps everything it was stored with.
+
+A row's `mcp_vector` is not re-mapped. A run stored before `MCP-03` moved to its proxy-enforced vector
+keeps that row scored under `mcp-server-identity-unattested`, the vector it was measured against; run
+the suite again to see it set aside.
 
 ### 2.6 Durability and retention
 
@@ -395,14 +426,14 @@ For the two realistic namespace shapes:
 
 | Namespace | `exercised` | `unexercised_reachable` |
 |---|---|---|
-| Baseline only (no MCP guardrail) | **1 of 39** | `eval-cache-key-omits-mcp-context`, `mcp-server-identity-unattested`, `resources-read-uri-gate` |
-| MCP guardrail loaded | **2 of 39** | `eval-cache-key-omits-mcp-context`, `resources-read-uri-gate` |
+| Baseline only (no MCP server allowlist) | **1 of 40** | `eval-cache-key-omits-mcp-context`, `mcp-server-identity-unattested`, `resources-read-uri-gate` |
+| MCP guardrail loaded, or a server registered | **2 of 40** | `eval-cache-key-omits-mcp-context`, `resources-read-uri-gate` |
 
 Read that against the scorecard. A run reporting **100% proven-blocking** on a namespace with the
-guardrail loaded has exercised **2 of 39 catalogued MCP/tool vectors** — and that 100% is over
-**29** block-expected attack×class rows for one target class (the 26 of
-[2.4](#24-sector_not_enabled-and-inapplicable-attacks) plus `MCP-01/02/03`, which the guardrail makes
-applicable). 32 is the ceiling, and only with all three sector packs enabled as well. Either way the
+guardrail loaded has exercised **2 of 40 catalogued MCP/tool vectors** — and that 100% is over
+**28** block-expected attack×class rows for one target class (the 26 of
+[2.4](#24-sector_not_enabled-and-inapplicable-attacks) plus `MCP-01/02`, which the guardrail makes
+applicable). 31 is the ceiling, and only with all three sector packs enabled as well. Either way the
 denominator is attack rows, not the vector catalog. The two numbers have nothing to do with each
 other, and the coverage band exists precisely so the second cannot be read as the first.
 
@@ -410,7 +441,7 @@ The four `EVALUATE`-reachable vectors:
 
 | Vector | Exercised by | Status |
 |---|---|---|
-| `mcp-server-identity-unattested` | `MCP-01/02/03` | scored when the guardrail is loaded |
+| `mcp-server-identity-unattested` | `MCP-01/02` | scored when the guardrail is loaded or a server is registered |
 | `base-allowlist-strips-baseline-floor` | `MCP-04/05` | always scored |
 | `resources-read-uri-gate` | — | no attack exists; the proxy really does call `_evaluate("resources/read", …, surface="resources/read")` and refuse on a block (`norviq/mcp/firewall.py:865-883`), so what is missing is a **rule**, not a mechanism |
 | `eval-cache-key-omits-mcp-context` | — | defect closed by adding the MCP document to the cache key; regression-tested at `tests/engine/test_cache_key_scope.py`, which is a stronger guard than a suite attack (a suite cannot express two evaluations resolving to one cached verdict) |
@@ -420,11 +451,11 @@ standing statement of what has not been attacked, not a backlog that quietly emp
 
 ### 3.3 A proxy-only vector is not a failure
 
-29 of 39 vectors are `PROXY`. Most are **enforced**, several provably: in the live red/blue run recorded
+30 of 40 vectors are `PROXY`. Most are **enforced**, several provably: in the live red/blue run recorded
 in `docs/design/MCP-RED-BLUE-LOOP.md`, Gate A stripped tool-description poisoning and invisible
 tag-character steganography, and the content-hash pin refused a tool whose definition changed after
 approval. They are decided **before the policy engine**,
-which is the one layer this suite can score. The recurring reasons, named once in `vectors.py:84-99`:
+which is the one layer this suite can score. The recurring reasons, named once in `vectors.py`:
 
 | Reason | Meaning | Example vectors |
 |---|---|---|
@@ -440,8 +471,14 @@ only setup that can demonstrate a control that never reaches a policy.
 Reclassifying a `PROXY` vector as `EVALUATE` to make the number look better would restore exactly the
 overclaim the coverage block prevents. The only legitimate levers are writing more attacks against the
 `EVALUATE` set, or moving a vector into policy reach. `tests/redteam/test_vectors.py` enforces this
-mechanically: no attack may target a non-`EVALUATE` vector, or it would score a working control red
-forever.
+mechanically: no attack may target an out-of-scope vector, and an attack on a `PROXY` vector must come
+out `proxy_enforced` on every row it can produce, or it would score a working control red forever.
+
+One `PROXY` vector does have an attack: `quarantined-tool-asserts-pinned`, targeted by `MCP-03`. The
+forgery is real and worth sending — it shows that the policy-side copy of the quarantine reads a
+field the caller writes — but the control that stops it is Gate A, so its row is shown as
+`proxy_enforced` with the vector's reason and never scored. It does not count toward `exercised`,
+which counts only vectors this suite adjudicated.
 
 ### 3.4 Other limits worth stating in an attestation
 
@@ -466,10 +503,10 @@ forever.
   (`:58`), so a suite run in a namespace with no seeded agent classes produces a real-looking
   percentage measured against an identity that carries no policy of its own. Check the "N classes"
   summary on the scorecard before quoting a number.
-- **`sector_not_enabled` and `non_enforcement` are returned but not displayed** as scorecard figures;
-  only `excluded_synthetic` is (`RedTeam.tsx:271-273`). The per-row "— not enabled here" label is the
-  only place the exclusion is visible in the console. Read them from
-  `GET /api/v1/redteam/results/latest`.
+- **`non_enforcement` is returned but not displayed** as a scorecard figure. `excluded_synthetic`,
+  `proxy_enforced` and `sector_not_enabled` are, each under its own reason, beside the per-row labels
+  ("— runtime control, not scored" is the only place the `non_enforcement` exclusion is visible). Read
+  all four from `GET /api/v1/redteam/results/latest`.
 - **Coverage is per namespace.** Both surfaces scope to the header's selected namespace; the "all"
   aggregate reads whatever cluster-wide run was newest. The console deliberately refuses to
   republish one namespace's efficacy as another's when a read fails, showing "efficacy is unknown"
@@ -540,7 +577,8 @@ token against the five above before quoting a windowed number.
 
 ## 7. Enabling the conditional controls
 
-To move the six conditional attacks out of `sector_not_enabled` and into the scored denominator:
+To move the five conditional attacks out of `sector_not_enabled` and into the scored denominator
+(`MCP-03` is not one of them; it is `proxy_enforced` at any setting, §2.4):
 
 ```bash
 # The pack catalog, with per-namespace enabled state.
@@ -559,7 +597,8 @@ policy-create path and invalidates the namespace's evaluation cache, so the chan
 immediately (`norviq/api/routers/packs.py:50-72`). Packs are default-off: no `(ns, __pack__)` policy
 exists until an admin enables one. A dry-run-only namespace rejects the apply.
 
-For the MCP identity attacks, materialize the opt-in guardrail. It is a **template**, not a shipped
+For `MCP-01`/`MCP-02`, register a server in the namespace's MCP registry, or materialize the opt-in
+guardrail. It is a **template**, not a shipped
 default — copy `policies/templates/mcp_integration_guardrail.rego`, edit the two `# >>> EDIT` blocks
 (`writable_servers`, `blocking_scan_severity`), and load it for the namespace as the additive
 `(ns, "__guardrail__")` target through the policy API. It defaults to `allow` and blocks specific
@@ -568,8 +607,8 @@ deny-by-default perimeter (`policies/templates/tool-allowlist-perimeter.rego`) i
 unknown tool out.
 
 One trust note that belongs in any compliance narrative about MCP: `input.mcp` is **PEP-reported**,
-exactly like `input.tool_name`. It is a policy input and never a trust input. `MCP-02` and `MCP-03`
-exist to demonstrate this — `MCP-01` shows the write allowlist working, and `MCP-02` shows its limit
+exactly like `input.tool_name`. It is a policy input and never a trust input. `MCP-02` exists to
+demonstrate this — `MCP-01` shows the write allowlist working, and `MCP-02` shows its limit
 by claiming to *be* the allowlisted server, so the rule that refused `MCP-01` admits `MCP-02` on
 the strength of an assertion the attacker made. A `by_vector` bucket for
 `mcp-server-identity-unattested` that is below 100% is therefore not a flaky control; it is an

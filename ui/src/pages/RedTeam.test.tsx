@@ -459,6 +459,35 @@ it("the got-through filter lists exactly the scorecard's got-through rows — th
   expect(shown.map((r) => within(r).getByText(/^[A-Z]+-\d+$/).textContent)).toEqual(["PI-001", "DL-001"]);
 });
 
+it("an attack moved out of the denominator is shown with its reason, on its row and on the scorecard", async () => {
+  // MCP-03 forges the pin status of a quarantined tool. The proxy refuses that call from its own pin
+  // store before any policy runs, so the server reports the row `proxy_enforced` and leaves it out of
+  // every bucket. Out of the score must never mean out of sight.
+  const reason = "the quarantine is read from the proxy's pin store at Gate A";
+  const base = verdictRun();
+  serveMcp({
+    ...base,
+    results: [
+      ...base.results,
+      servedRow("MCP-03", { category: "mcp_identity", actual: "allow", rule_id: "default_allow", passed: false,
+        mcp_vector: "quarantined-tool-asserts-pinned", outcome: "proxy_enforced", outcome_reason: reason })
+    ],
+    efficacy: { ...base.efficacy, proxy_enforced: 1 }
+  });
+  const label = await screen.findByTestId("redteam-row-proxy-enforced");
+  expect(rowFor("MCP-03")).toContainElement(label);
+  expect(label).toHaveTextContent(/enforced at the MCP proxy, not scored/);
+  expect(label).toHaveAttribute("title", reason);
+  expect(within(rowFor("MCP-03")).queryByTestId("redteam-row-failed")).toBeNull();
+
+  expect(screen.getByTestId("redteam-proxy-enforced")).toHaveTextContent("1 enforced at the MCP proxy, not scored");
+  expect(screen.getByTestId("redteam-not-enabled")).toHaveTextContent("1 not enabled here, not scored");
+  // The got-through count is still the scored one, and the filter does not list the proxy row.
+  expect(Number(screen.getByTestId("redteam-gotthrough").textContent?.replace(/\D/g, ""))).toBe(2);
+  fireEvent.click(within(screen.getByTestId("redteam-failed-filter")).getByRole("checkbox"));
+  expect(screen.queryByTestId("redteam-row-proxy-enforced")).toBeNull();
+});
+
 it("a row stored without `outcome` falls back to the old verdict — an inapplicable miss stays out of the filter", async () => {
   // Rows from runs written before the field existed carry no `outcome`; the page then falls back to
   // `!passed && applicable !== false`. That branch had no test: making it always return "got_through"

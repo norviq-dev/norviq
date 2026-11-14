@@ -230,6 +230,20 @@ VECTORS: tuple[McpVector, ...] = (
               "base policies compose highest-priority-wins (evaluator.py `_resolve_precedence`) with the "
               "namespace baseline at priority 1, so this is decided entirely inside the engine on an "
               "ordinary call — plain tool_params, no MCP context, reachable in any namespace"),
+    # Minted for MCP-03, which had been filed under `mcp-server-identity-unattested` and scored as an
+    # engine miss on every namespace whose policy carried `mcp_tool_not_approved` (the strict preset,
+    # which is the default baseline, and the guardrail template). That rule reads `input.mcp.pin_status`, the
+    # field the attack forges, so no setting of it can catch the forgery anywhere. It does not need
+    # to: the quarantine a call is refused on is the proxy's own pin store, not the call's claim about
+    # itself. The server-id half of the forgery stays EVALUATE (MCP-01/02), because there the policy
+    # allowlist is the only control.
+    McpVector("quarantined-tool-asserts-pinned", _I,
+              "a quarantined tool's call asserts pin_status \"pinned\"", _PROXY,
+              "the quarantine is read from the proxy's pin store at Gate A, which refuses the call "
+              "(`entry.call_denied`, firewall.py `_gate_b_decide`) before any /evaluate exists; the "
+              "pin_status a policy sees is the proxy's mirror of that verdict, so "
+              "`mcp_tool_not_approved` is unreachable on the tools/call path and cannot see a forged "
+              "\"pinned\" — scoring the engine would report red for a control that is working"),
 )
 
 
@@ -254,6 +268,17 @@ VECTORS_BY_ID: dict[str, McpVector] = {v.id: v for v in VECTORS}
 EVALUATE_REACHABLE: frozenset[str] = frozenset(
     v.id for v in VECTORS if v.reachability is Reachability.EVALUATE
 )
+
+
+def proxy_enforced(vector_id: str | None) -> bool:
+    """Whether a row on this vector is decided by the proxy, so the suite must not score it.
+
+    An attack may target a PROXY vector only so that its row is SHOWN: the forgery is still sent, the
+    engine's decision recorded, and the row reported as enforced at the proxy instead of being left
+    out of the run. An unknown or empty id is not proxy-enforced, so a row this cannot place stays
+    scored."""
+    v = VECTORS_BY_ID.get(vector_id or "")
+    return v is not None and v.reachability is Reachability.PROXY
 
 
 def coverage_denominators() -> dict[str, int]:
