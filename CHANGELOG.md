@@ -516,11 +516,33 @@ Full notes: https://github.com/norviq-dev/norviq/releases/tag/v0.2.1
 
 ## [0.2.0] — 2026-08-11 — MCP action firewall, Visual Policy Builder, and Campaign 2 — chart not published
 
-- The MCP action-firewall and Visual Policy Builder work, plus the security
-- findings from Campaign 2 (a browser-driven red/blue campaign against a live
-- AKS cluster).
-- Enforcement fixes:
-- the MCP answer plane compared the decision string by hand, so monitor
+The MCP action-firewall and Visual Policy Builder work, plus the security findings from Campaign 2
+(a browser-driven red/blue campaign against a live AKS cluster).
+
+Enforcement fixes:
+
+- The MCP answer plane compared the decision string by hand, so monitor mode interrupted traffic there
+  and a softened engine fault came back to the customer as "Norviq policy refused". There were no
+  answer-plane tests at all.
+- The attack graph filed `audit` under "no policy", the least alarming bucket, so under the all-monitor
+  shipped default a control that fired on a dangerous call read as "nothing evaluated this".
+- A rate-limit throttle was scored as a policy detection on three surfaces, making
+  proven_blocking_pct rise as coverage got worse.
+- A destructive tool escaped by rename, homoglyph, or a space in its name; all are now matched as whole
+  tokens over the raw and confusable-folded name.
+- The base64 false-positive curve was traced to one reused pattern list and closed.
+- The sidecar's token and mTLS private key were literal values in the pod spec, readable by anyone
+  holding the built-in `view` role. They are now secretKeyRef.
+- Injected pods hard-stop at day 30 with nothing renewing; /system-health now warns before the cliff.
+
+Known issues at release:
+
+- C2-013 (destination-keyed egress control) shipped as a compiler plus precedence wiring; the endpoint
+  and console were not built.
+- C2-025: a preset upgrade does not reach a namespace whose controls are already materialised, so
+  control-content fixes need a re-materialise.
+- SEED-04: chain_depth_limit reports depth on 1 of 5 SDK adapters.
+- BUG-005: an ISO-8601 date reads as an SSN. Ships on monitor, so it records rather than drops traffic.
 
 ## [0.1.10] — 2026-07-30 — performance release
 
