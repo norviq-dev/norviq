@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from norviq.api import mcp_controls
 from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import AgentRegistryEntry, RedTeamRun
 from norviq.api.db.session import get_session
@@ -31,8 +33,9 @@ from norviq.api.redteam_efficacy import (
 )
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.config import settings
+from norviq.engine.empty_literals import EMPTY_OBJECT, EMPTY_SET
 from norviq.redteam.attacks import ATTACKS, AttackCategory, attack_request, get_attack_by_id
-from norviq.redteam.vectors import vector_title
+from norviq.redteam.vectors import proxy_enforced, vector_title
 from norviq.sdk.core.events import ToolCallEvent
 
 log = structlog.get_logger()
@@ -196,12 +199,14 @@ async def run_suite(
             # A sector-pack attack is only APPLICABLE when its enforcing rule is actually loaded for this
             # namespace (i.e. the operator enabled that pack). Same "rule present" test the coverage metric uses,
             # so a baseline-only namespace isn't scored against controls it never opted into.
-            ns_rego = _loaded_rego(request, target_namespace)
+            modules = _loaded_modules(request, target_namespace)
+            ns_rego = "".join(rego for _, rego in modules)
+            mcp_allowlist = _mcp_server_allowlist_configured(modules)
             results = []
             for agent_class in targets:
                 for attack in ATTACKS:
                     event = _build_event(attack, agent_class, target_namespace)
-                    applicable = _attack_applicable(attack, ns_rego)
+                    applicable = _attack_applicable(attack, ns_rego, mcp_allowlist=mcp_allowlist)
                     try:
                         decision = await request.app.state.evaluator.evaluate(event)
                         _emit_redteam_audit(request, event, decision)
@@ -551,50 +556,112 @@ def _mapping_fields(attack: Any) -> dict[str, Any]:
     }
 
 
-def _loaded_rego(request: Request, namespace: str) -> str:
-    """The concatenated rego actually loaded for a namespace (+ the cluster baseline) — used to tell whether
-    a sector pack is enabled (its rules present). Mirrors the coverage route's loader read."""
+def _loaded_modules(request: Request, namespace: str) -> list[tuple[str, str]]:
+    """(scope, rego) for every module loaded for a namespace (+ the cluster baseline). Their
+    concatenation is what tells whether a sector pack is enabled (its rules present). Mirrors the
+    coverage route's loader read."""
     loader = getattr(request.app.state, "loader", None)
     if loader is None:
-        return ""
-    blob = ""
+        return []
+    modules = []
     for key, entry in loader._policies.items():
-        ns = key.split(":", 1)[0]
+        ns, _, scope = key.partition(":")
         if ns in (namespace, "__cluster__"):
-            blob += str(entry.get("rego", ""))
-    return blob
+            modules.append((scope, str(entry.get("rego", ""))))
+    return modules
 
 
 # Categories whose enforcing rule is CONDITIONAL on an operator having loaded something — a sector
-# pack, or the opt-in MCP integration guardrail. Verified: no shipped baseline reads `input.mcp` at all
-# (strict/moderate/permissive/comprehensive, zero references), so an MCP attack in a namespace without
-# the guardrail can never be blocked and would score got_through forever, with no operator action that
-# fixes it. That is not a miss, it is a control that was never installed — and reporting it as a miss
-# would paint every default namespace red on the day this ships.
+# pack, or an MCP server allowlist. An attack whose control was never configured is out of scope for
+# the namespace, not a miss: it would score got_through forever with no operator action that fixes it,
+# and reporting it as a miss paints every default namespace red.
 _CONDITIONAL_CATEGORIES = frozenset(
     {AttackCategory.SECTOR_POLICY, AttackCategory.MCP_IDENTITY}
 )
 
+# The rules that make a namespace's MCP SERVER ALLOWLIST: the opt-in guardrail template
+# (`policies/templates/mcp_integration_guardrail.rego`), the cookbook's version of it, and the
+# generated `__mcp__` registry module (`norviq/api/mcp_controls.py`).
+_MCP_ALLOWLIST_RULES = (mcp_controls.RULE_UNREGISTERED, mcp_controls.RULE_UNAPPROVED_WRITE)
 
-def _attack_applicable(attack: Any, ns_rego: str) -> bool:
-    """An unconditional attack always applies. A conditional one (sector pack, MCP guardrail) applies only
-    when its enforcing rule is loaded for the namespace — otherwise it's out of scope, not a real miss.
+# The registry module's server set as the engine runs it. Read from the rendered rego, not from the
+# module's `# nrvq-mcp-registry/v1:` header: the header is what the console reads the registry back
+# from, the literal is what OPA evaluates, and a hand edit can make them disagree.
+_REGISTERED_SERVERS_RE = re.compile(r"^registered_servers\s*:?=\s*(.*?)\s*$", re.MULTILINE)
+# What an EMPTY set renders as: the generator's typed form, and the bare forms a hand edit or a module
+# written by 0.2.5 and earlier carries.
+_EMPTY_SERVER_SETS = frozenset({EMPTY_OBJECT, EMPTY_SET, "{}", "set()"})
+
+
+def _registry_populated(rego: str) -> bool | None:
+    """Whether a `__mcp__` module's `registered_servers` names a server; None when it has no such line.
+
+    Anything but a recognised empty set counts as populated, so a literal this cannot read is scored
+    rather than taken for an inert registry."""
+    m = _REGISTERED_SERVERS_RE.search(rego or "")
+    if m is None:
+        return None
+    return m.group(1) not in _EMPTY_SERVER_SETS
+
+
+def _mcp_server_allowlist_configured(modules: list[tuple[str, str]]) -> bool:
+    """Whether the namespace has an MCP server allowlist for MCP-01/02 to probe.
+
+    MCP-01 and MCP-02 forge `input.mcp.server` and ask whether a policy keyed on the server id
+    survives the forgery, so they are only a question where such a policy exists. Their applicability
+    used to be "the attack's expected rule name appears somewhere in the loaded rego", and the `__mcp__`
+    registry module carries both rule names on every namespace it is generated for. With an EMPTY
+    registry it is inert by design (`_registry_populated` in the module; see the docstring of
+    `mcp_controls`), so a namespace whose registry nobody had filled scored MCP-01 and MCP-02 as
+    got_through against a control that cannot say anything yet.
+
+    So they count where an operator configured a server allowlist: a registry whose rendered
+    `registered_servers` names at least one server, or any other module carrying an allowlist rule. A
+    registry module with no `registered_servers` line (hand-edited) is judged by its rule names, which
+    counts it — when this cannot tell, it scores the attacks rather than hiding a possible miss.
+
+    MCP-03 is not decided here. It targets a proxy-enforced vector and is reported as such whatever is
+    loaded (`row_outcome`), because the quarantine it forges past is not a policy control.
+    """
+    for scope, rego in modules:
+        if scope == mcp_controls.SCOPE:
+            populated = _registry_populated(rego)
+            if populated is not None:
+                if populated:
+                    return True
+                continue
+        if any(rule in rego for rule in _MCP_ALLOWLIST_RULES):
+            return True
+    return False
+
+
+def _attack_applicable(attack: Any, ns_rego: str, *, mcp_allowlist: bool = False) -> bool:
+    """An unconditional attack always applies. A conditional one applies only when its control is
+    configured for the namespace — otherwise it's out of scope, not a real miss. A sector attack
+    applies when its pack's rule is loaded; an MCP identity attack on an engine-scored vector when the
+    namespace has an MCP server allowlist (`_mcp_server_allowlist_configured`).
+
+    An attack on a proxy-enforced vector (MCP-03) is not conditional on anything in the namespace: its
+    control is the proxy's, not a policy an operator loads, so "not enabled here" would be the wrong
+    reason. It applies, and `row_outcome` reports it as `proxy_enforced`, unscored.
 
     POLICY_COMPOSITION is deliberately NOT conditional: its expected rules are baseline blocks that ship
     everywhere, so the question it asks — did this class's own policy override the baseline? — is always
     a fair one to ask."""
     if attack.category not in _CONDITIONAL_CATEGORIES:
         return True
+    if attack.category is AttackCategory.MCP_IDENTITY:
+        return mcp_allowlist or proxy_enforced(getattr(attack, "mcp_vector", ""))
     return bool(attack.expected_rule and attack.expected_rule in ns_rego)
 
 
 def _result_row(attack: Any, agent_class: str, namespace: str, actual: str, rule_id: str, latency_ms: float, applicable: bool = True) -> dict[str, Any]:
     """Build one successful suite row (carries the evaluated identity + the ATLAS/OWASP map).
 
-    ``applicable``=False marks a SECTOR_POLICY attack whose enforcing rule is not loaded for this namespace
-    (the sector pack was never enabled). Such a row is NOT a real "got through" — the operator never opted
-    into that control — so compute_efficacy excludes it from the proven-blocking denominator and the UI
-    labels it "pack not enabled" instead of a red miss."""
+    ``applicable``=False marks a conditional attack whose control is not configured for this namespace (a
+    sector pack never enabled, or no MCP server allowlist). Such a row is NOT a real "got through" — the
+    operator never opted into that control — so compute_efficacy excludes it from the proven-blocking
+    denominator and the UI labels it "not enabled here" instead of a red miss."""
     return {
         "attack_id": attack.id,
         "attack_name": attack.name,

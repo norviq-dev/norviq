@@ -310,6 +310,7 @@ def _mixed_run():
         _mcp_row("MCP-01", "block", "mcp-server-identity-unattested"),
         {**_mcp_row("MCP-02", "audit", "mcp-server-identity-unattested"),
          "rule_id": "monitor_would_block:mcp_server_not_allowlisted"},
+        _mcp_row("MCP-03", "allow", "quarantined-tool-asserts-pinned"),
     ]
 
 
@@ -334,12 +335,13 @@ def test_every_bucket_is_a_count_of_row_outcome():
     for b in eff["by_vector"]:
         got = counts(lambda r, v=b["vector_id"]: r.get("mcp_vector") == v)
         assert {o: b[o] for o in SCORED_OUTCOMES} == got, b
-    # The three reasons a row is not scored are counts of the same verdict.
+    # The four reasons a row is not scored are counts of the same verdict.
     assert eff["excluded_synthetic"] == outcomes.count("synthetic") == 1
     assert eff["non_enforcement"] == outcomes.count("non_enforcement") == 1
     assert eff["sector_not_enabled"] == outcomes.count("not_enabled") == 1
+    assert eff["proxy_enforced"] == outcomes.count("proxy_enforced") == 1
     # Not vacuous: the mix really does hold every verdict, and every breakdown has buckets to check.
-    assert set(outcomes) == {*SCORED_OUTCOMES, "synthetic", "non_enforcement", "not_enabled"}
+    assert set(outcomes) == {*SCORED_OUTCOMES, "synthetic", "non_enforcement", "not_enabled", "proxy_enforced"}
     assert eff["by_technique"] and eff["by_owasp"] and eff["by_vector"]
 
 
@@ -371,6 +373,16 @@ def test_rows_the_roll_up_does_not_score_say_why():
     throttled_allow = _row("RL-001", "billing", "block", expected="allow", rule_id="rate_limit_exceeded")
     assert row_outcome(throttled_allow) == "non_enforcement"
     assert row_outcome({**_row("FIN-001", "billing", "allow"), "applicable": False}) == "not_enabled"
+    # A row on a proxy-enforced vector says so, ahead of not_enabled: nothing a namespace enables would
+    # make it count. A synthetic identity and a non-block expectation still come first.
+    proxy = {**_row("MCP-03", "billing", "allow"), "mcp_vector": "quarantined-tool-asserts-pinned"}
+    assert row_outcome(proxy) == "proxy_enforced"
+    assert row_outcome({**proxy, "applicable": False}) == "proxy_enforced"
+    assert row_outcome({**proxy, "agent_class": "scorer"}) == "synthetic"
+    assert row_outcome({**proxy, "expected": "allow"}) == "non_enforcement"
+    # An engine-scored vector, and one the catalogue does not know, stay scored.
+    assert row_outcome({**proxy, "mcp_vector": "mcp-server-identity-unattested"}) == "got_through"
+    assert row_outcome({**proxy, "mcp_vector": "no-such-vector"}) == "got_through"
     # An errored evaluation (the suite's `_error_row`) is a miss, as it always was.
     errored = {**_row("X", "billing", "block"), "actual": "error", "rule_id": "", "passed": False}
     assert row_outcome(errored) == "got_through"

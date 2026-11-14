@@ -71,14 +71,16 @@ def test_ids_are_unique_and_kebab() -> None:
 
 def test_catalog_matches_the_design_document() -> None:
     """The doc is the source of the taxonomy; drift between them means the denominator is wrong.
-    Exactly one id is expected to be absent from the doc — the composition vector minted here, which
-    had no identifier anywhere (see docs/design/MCP-RED-BLUE-LOOP.md Finding 1)."""
+    Exactly two ids are expected to be absent from the doc, both minted here because no identifier
+    existed anywhere: the composition vector (docs/design/MCP-RED-BLUE-LOOP.md Finding 1), and the
+    forged pin status of a quarantined tool, which the doc's `mcp-server-identity-unattested` row folds
+    into the server-id forgery although a different layer decides it (vectors.py, the MCP-03 note)."""
     from pathlib import Path
 
     doc = (Path(__file__).resolve().parents[2] / "docs/design/MCP-TOOL-ATTACK-SURFACE.md").read_text()
     doc_ids = set(re.findall(r"^\| `([a-z0-9-]+)`", doc, re.M))
     assert doc_ids - set(VECTORS_BY_ID) == set(), "the doc names a vector the catalog does not"
-    assert set(VECTORS_BY_ID) - doc_ids == {"base-allowlist-strips-baseline-floor"}
+    assert set(VECTORS_BY_ID) - doc_ids == {"base-allowlist-strips-baseline-floor", "quarantined-tool-asserts-pinned"}
 
 
 def test_coverage_denominators_partition_the_catalog() -> None:
@@ -105,14 +107,34 @@ def test_every_attack_vector_is_catalogued() -> None:
 def test_no_attack_targets_an_unmeasurable_vector() -> None:
     """The load-bearing one. An attack against a PROXY vector scores the wrong layer: the control is
     working, the engine never sees it, and the suite reports red forever with no operator action that
-    fixes it."""
+    fixes it. An out-of-scope vector cannot be targeted at all."""
     for attack in ATTACKS:
         vid = getattr(attack, "mcp_vector", "")
         if vid:
-            assert VECTORS_BY_ID[vid].reachability is Reachability.EVALUATE, (
-                f"{attack.id} targets {vid!r}, which is "
-                f"{VECTORS_BY_ID[vid].reachability.value} — it cannot be scored by this suite"
+            assert VECTORS_BY_ID[vid].reachability is not Reachability.OUT_OF_SCOPE, (
+                f"{attack.id} targets {vid!r}, which is out of scope for a per-call suite"
             )
+
+
+def test_an_attack_on_a_proxy_vector_is_shown_and_never_scored() -> None:
+    """The one way an attack may target a PROXY vector: every row it can produce — caught, missed,
+    monitored, whatever the engine said — comes out `proxy_enforced`, with the vector's reason, so it
+    is in the report and out of every denominator. Taken from the rows the suite really builds."""
+    from norviq.api.redteam_efficacy import compute_efficacy, with_outcomes
+    from norviq.api.routers.redteam import _result_row
+
+    on_proxy = [a for a in ATTACKS if a.mcp_vector and VECTORS_BY_ID[a.mcp_vector].reachability is Reachability.PROXY]
+    assert [a.id for a in on_proxy] == ["MCP-03"]  # not vacuous, and nothing joins it unnoticed
+    for attack in on_proxy:
+        rows = [_result_row(attack, "billing", "payments", actual, rule, 1.0)
+                for actual, rule in (("allow", "default_allow"), ("block", attack.expected_rule),
+                                     ("audit", attack.expected_rule))]
+        served = with_outcomes(rows)
+        assert {r["outcome"] for r in served} == {"proxy_enforced"}
+        assert all(r["outcome_reason"] == VECTORS_BY_ID[attack.mcp_vector].reason for r in served)
+        eff = compute_efficacy(rows)
+        assert eff["overall"]["total"] == 0 and eff["proxy_enforced"] == len(rows)
+        assert eff["by_vector"] == [] and eff["vector_coverage"]["exercised"] == 0
 
 
 def test_mcp_attack_params_are_unique_across_the_corpus() -> None:
