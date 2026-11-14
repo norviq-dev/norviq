@@ -225,9 +225,17 @@ function TrustHistory({
 
 const fmtScore = (v: unknown) => (v == null || Number.isNaN(Number(v)) ? "—" : Number(v).toFixed(2));
 
-// The trust fields a re-read of one agent replaces. violation_count is not among them: GET /agents/{id}
-// serves it from the 30 s snapshot, where it is always 0, while the list carries the registry's real count.
-const TRUST_FIELDS = ["score", "category", "signals", "dominant_signal", "recommendation", "frozen", "trust_cap", "controls"] as const;
+// The trust fields a re-read of one agent replaces. GET /agents/{id} builds them exactly as the list does
+// (registry row, warm snapshot over it, enforced freeze and cap), violation_count included.
+const TRUST_FIELDS = [
+  "score", "category", "violation_count", "signals", "dominant_signal", "recommendation", "frozen", "trust_cap", "controls"
+] as const;
+
+const trustPatch = (fresh: AgentTrust): Partial<AgentRow> => {
+  const patch: Partial<AgentRow> = {};
+  for (const k of TRUST_FIELDS) if (k in fresh) (patch as Record<string, unknown>)[k] = fresh[k];
+  return patch;
+};
 
 /** A score the trust store held at `cap` (the calculator stores round(min(computed, cap), 4)). */
 const heldByCap = (score: number | null | undefined, cap: number | null | undefined) =>
@@ -307,17 +315,39 @@ export function AgentMonitor() {
    *  console cannot know in advance (the old code painted 0.8 here, the value of the cap it had just set). */
   const reread = async (id: string, fallback: Partial<AgentRow>, done: string) => {
     try {
-      const fresh: AgentTrust = await fetchAgent(id);
-      const patch: Partial<AgentRow> = {};
-      for (const k of TRUST_FIELDS) if (k in fresh) (patch as Record<string, unknown>)[k] = fresh[k];
-      patchAgent(id, patch);
+      patchAgent(id, trustPatch(await fetchAgent(id)));
     } catch (e) {
       patchAgent(id, fallback);
       setActionNotice(`${done} Could not re-read its trust (${(e as Error).message || "request failed"}); Refresh to see it.`);
     }
   };
 
+  // Re-read the selected agent's trust when its panel opens. The list is fetched once and kept for 60 s, and an
+  // agent's signal breakdown lives only while its last call's snapshot is warm (about 30 s), so the panel used
+  // to show the list's copy: an empty Signal Breakdown and a stale score for an agent that had just been
+  // scored. The re-read is dropped if any trust action started or finished meanwhile (actionEpoch), so a read
+  // taken before a freeze landed can never paint the agent unfrozen after it. A failed re-read keeps the list's row.
+  const actionEpoch = useRef(0);
+  const patchRef = useRef(patchAgent);
+  patchRef.current = patchAgent;
+  useEffect(() => {
+    const id = selected?.spiffe_id;
+    if (!id) return;
+    const epoch = actionEpoch.current;
+    let current = true;
+    fetchAgent(id).then(
+      (fresh) => {
+        if (current && actionEpoch.current === epoch) patchRef.current(id, trustPatch(fresh));
+      },
+      () => undefined
+    );
+    return () => {
+      current = false;
+    };
+  }, [selected?.spiffe_id]);
+
   const run = async (action: () => Promise<void>, failure: string) => {
+    actionEpoch.current += 1;
     setActionError(null);
     setActionNotice(null);
     try {
@@ -326,6 +356,8 @@ export function AgentMonitor() {
       // Surface the failure instead of swallowing it (backend requires admin — apiSend throws on a 403 —
       // plus network/5xx). Without this the trust buttons look like dead controls.
       setActionError((e as Error).message || failure);
+    } finally {
+      actionEpoch.current += 1; // and a re-read started while the action was in flight
     }
   };
 
@@ -713,6 +745,12 @@ export function AgentMonitor() {
                     <span className="mono">{Number(value).toFixed(2)}</span>
                   </div>
                 ))}
+                {Object.keys(selected.signals ?? {}).length === 0 && (
+                  <div className="muted" style={{ fontSize: 12 }} data-testid="agent-signals-empty">
+                    No breakdown right now: it is kept only briefly after the agent&apos;s last call. Its next call
+                    brings it back.
+                  </div>
+                )}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
                 {/* Explicit way back to the full list — the detail renders below the table with no other exit. */}

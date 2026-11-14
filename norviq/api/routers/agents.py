@@ -242,32 +242,35 @@ async def _agents_from_registry(namespace: str) -> list[dict]:
     except Exception as exc:  # pragma: no cover
         log.error("nrvq.api.agents.registry_read_failed", error=str(exc), code="NRVQ-API-7032")
         return []
-    rows = []
-    for entry in entries:
-        agent_class = entry.agent_class or _class_from_spiffe(entry.spiffe_id)
-        rows.append(
-            {
-                "spiffe_id": entry.spiffe_id,
-                # The registry already stores ns/class/last_seen — surface them.
-                "namespace": entry.namespace or _namespace_from_spiffe(entry.spiffe_id),
-                "agent_class": agent_class,
-                "last_seen": entry.last_seen.isoformat() if entry.last_seen else None,
-                "score": entry.trust_score,
-                "category": entry.trust_category.lower(),
-                "violation_count": entry.violation_count,
-                "signals": {},
-                "dominant_signal": "",
-                "recommendation": "",
-                # Same synthetic flag on the cold-cache (registry) path so the list reconciles
-                # with the graph whether it is served hot (trust:*) or cold (agent_registry).
-                "synthetic": is_synthetic_identity(agent_class, entry.spiffe_id),
-                # The durable copy of the admin controls. _overlay_controls replaces both with the store's
-                # copy, or with null when the store cannot be read (the engine then blocks every call).
-                "frozen": bool(entry.frozen),
-                "trust_cap": entry.trust_cap,
-            }
-        )
-    return rows
+    return [_registry_row(entry) for entry in entries]
+
+
+def _registry_row(entry) -> dict:
+    """One ``agent_registry`` entry as an agent row, before the warm snapshot and the enforced controls are laid
+    over it. The ONE builder for both the list and the single-agent read, so a cold detail is the cold list row."""
+    agent_class = entry.agent_class or _class_from_spiffe(entry.spiffe_id)
+    return {
+        "spiffe_id": entry.spiffe_id,
+        # The registry already stores ns/class/last_seen — surface them.
+        "namespace": entry.namespace or _namespace_from_spiffe(entry.spiffe_id),
+        "agent_class": agent_class,
+        "last_seen": entry.last_seen.isoformat() if entry.last_seen else None,
+        "score": entry.trust_score,
+        "category": (entry.trust_category or _UNKNOWN).lower(),
+        # The registry is the source of truth for the count: the trust:<id> snapshot never carries one.
+        "violation_count": entry.violation_count,
+        # No live behavioral factors in the registry snapshot (they expire with the trust:<id> entry).
+        "signals": {},
+        "dominant_signal": "",
+        "recommendation": "",
+        # Same synthetic flag on the cold-cache (registry) path so the list reconciles
+        # with the graph whether it is served hot (trust:*) or cold (agent_registry).
+        "synthetic": is_synthetic_identity(agent_class, entry.spiffe_id),
+        # The durable copy of the admin controls. _overlay_controls replaces both with the store's
+        # copy, or with null when the store cannot be read (the engine then blocks every call).
+        "frozen": bool(entry.frozen),
+        "trust_cap": entry.trust_cap,
+    }
 
 
 async def _agent_from_registry(spiffe_id: str) -> dict | None:
@@ -295,21 +298,7 @@ async def _agent_from_registry(spiffe_id: str) -> dict | None:
     except Exception as exc:  # pragma: no cover
         log.error("nrvq.api.agent.registry_read_failed", spiffe_id=spiffe_id, error=str(exc), code="NRVQ-API-7033")
         return None
-    if entry is None:
-        return None
-    return {
-        "spiffe_id": entry.spiffe_id,
-        "score": entry.trust_score,
-        "category": (entry.trust_category or "unknown").lower(),
-        "violation_count": entry.violation_count,
-        # No live behavioral factors when served from the registry snapshot (the hot signals expired
-        # with the cache entry); the detail view shows the persisted score without the signal breakdown.
-        "signals": {},
-        "dominant_signal": "",
-        "recommendation": "",
-        "frozen": bool(entry.frozen),
-        "trust_cap": entry.trust_cap,
-    }
+    return None if entry is None else _registry_row(entry)
 
 
 # The admin freeze and trust cap, as the engine enforces them. The trust calculator reads
@@ -580,26 +569,22 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
     if scope_ns and _namespace_from_spiffe(spiffe_id) != scope_ns:
         raise HTTPException(status_code=404, detail="Agent not found")
     cache = request.app.state.cache
+    # The row list_agents serves for this agent, built the same way: the registry row (scope was enforced above,
+    # so reading it stays tenant-safe), the warm trust:<id> snapshot over its live trust fields (_merge_roster),
+    # then the enforced freeze and cap (_overlay_controls). This route used to serve the snapshot alone while it
+    # was warm, and the snapshot carries no violation count (_safe_set_trust writes none), so for 30 s after
+    # every call it said 0 violations for an agent the list showed with 97. With the snapshot expired it already
+    # fell back to the registry row, so a listed agent's detail never 404s.
+    registry = await _agent_from_registry(spiffe_id)
     trust = await cache.get_trust(spiffe_id)
-    if trust is None:
-        # Cold-cache parity with list_agents (which falls back to the persistent registry when the
-        # trust:* cache is cold): the hot entry has a TTL, so without this a listed agent's detail view
-        # 404s once its entry lapses. Scope was already enforced above, so this fallback stays tenant-safe.
-        fallback = await _agent_from_registry(spiffe_id)
-        if fallback is not None:
-            return (await _overlay_controls(cache, [fallback]))[0]
+    warm: list[dict] = []
+    if trust is not None:
+        details = await _trust_details(request, spiffe_id, trust.factors)
+        warm = [_agent_row(spiffe_id, trust, details, registry.get("last_seen") if registry else None)]
+    rows = _merge_roster([registry] if registry is not None else [], warm)
+    if not rows:
         raise HTTPException(status_code=404, detail="Agent not found")
-    details = await _trust_details(request, spiffe_id, trust.factors)
-    row = {
-        "spiffe_id": spiffe_id,
-        "score": trust.score,
-        "category": trust.category.lower(),
-        "violation_count": trust.violation_count,
-        "signals": details["signals"],
-        "dominant_signal": details["dominant_signal"],
-        "recommendation": details["recommendation"],
-    }
-    return (await _overlay_controls(cache, [row]))[0]
+    return (await _overlay_controls(cache, rows))[0]
 
 
 # The agent ids the product accepts — one rule, norviq/engine/identity.py::is_controllable_spiffe_id, shared
