@@ -16,6 +16,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/norviq-dev/norviq/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/docs-docs.norviq.dev-00a576)](https://docs.norviq.dev)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16675/badge)](https://www.bestpractices.dev/projects/16675)
 
 Norviq is a policy enforcement point (PEP) that sits between an agent's reasoning loop and the tools
 it can call. Every tool call is evaluated against OPA/Rego policy and then **allowed, blocked,

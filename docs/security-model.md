@@ -457,6 +457,13 @@ were missed:
   `release.yml` calling the in-repo reusable workflow `./.github/workflows/build.yml`, which has no
   upstream tag to move.
 
+## OpenSSF Best Practices
+
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16675/badge)](https://www.bestpractices.dev/projects/16675)
+
+Norviq meets the OpenSSF Best Practices criteria at the passing level. The entry lists each criterion
+with the evidence for it.
+
 ## Reporting a vulnerability
 
 Found a security issue? Do not open a public GitHub issue. Norviq's coordinated-disclosure process
