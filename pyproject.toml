@@ -56,11 +56,12 @@ dependencies = [
     "pydantic-settings>=2.0",
     "structlog>=23.0",
     "httpx>=0.24",
-    # 1.45.1 floor: CVE-2026-114603 in opentelemetry-api. sdk and the OTLP exporter move with it — they
-    # pin the api to their own version, so a floor on the api alone is unsatisfiable against older ones.
-    "opentelemetry-api>=1.45.1",
-    "opentelemetry-sdk>=1.45.1",
-    "opentelemetry-exporter-otlp>=1.45.1",
+    # 1.45.2 floor: CVE-2026-126360 in opentelemetry-api (1.45.1 closed CVE-2026-114603). sdk and the
+    # OTLP exporter move with it — they pin the api to their own version, so a floor on the api alone
+    # is unsatisfiable against older ones.
+    "opentelemetry-api>=1.45.2",
+    "opentelemetry-sdk>=1.45.2",
+    "opentelemetry-exporter-otlp>=1.45.2",
     "opentelemetry-exporter-prometheus>=0.41b0",
     "prometheus-client>=0.20",
     # The [hiredis] extra is a LATENCY dependency, not a nicety. redis-py falls back to a pure-Python
@@ -167,6 +168,7 @@ build-backend = "setuptools.build_meta"
 #   pillow   13.0.0   all 41 advisories open on 12.3.0   autogen-core, pdfplumber (crewai)
 #   filelock 4.2.1    all 12 advisories open on 3.30.2   huggingface-hub (crewai, via tokenizers)
 #   dnspython 2.9.0   CVE-2026-114605                    semantic-kernel -> aiortc -> aioice
+#             2.9.2   CVE-2026-128089 (published after the 2026-10-30 audit)
 #   oauthlib 4.0.0    CVE-2026-49264, -49265             crewai -> chromadb -> kubernetes
 #            4.0.1    CVE-2026-49272 (published 2026-11-05, after the audit below)
 # Found on 2026-10-30 by auditing EVERY package in this lock, not only the runtime export, against two
@@ -177,7 +179,7 @@ constraint-dependencies = [
     "litellm>=1.100.4",
     "pillow>=13.0.0",
     "filelock>=4.2.1",
-    "dnspython>=2.9.0",
+    "dnspython>=2.9.2",
     "oauthlib>=4.0.1",
 ]
 
