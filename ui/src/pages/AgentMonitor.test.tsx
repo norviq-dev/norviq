@@ -237,9 +237,13 @@ describe("AgentMonitor mounts", () => {
         sent.push(await request.json());
         return HttpResponse.json({ spiffe_id: fleet[0].spiffe_id, frozen: false, trust_cap: null });
       }),
-      // The re-read: the agent's trust as the API now reports it.
+      // The agent's trust as the API reports it: frozen until the lift, then the engine's own score.
       http.get(/\/api\/v1\/agents\/spiffe[^/]*frozen-bot$/, () =>
-        HttpResponse.json({ spiffe_id: fleet[0].spiffe_id, score: 0.455, category: "medium", frozen: false, trust_cap: null, violation_count: 0, signals: {}, dominant_signal: "", recommendation: "allow" })
+        HttpResponse.json(
+          sent.length === 0
+            ? fleet[0]
+            : { spiffe_id: fleet[0].spiffe_id, score: 0.455, category: "medium", frozen: false, trust_cap: null, violation_count: 0, signals: {}, dominant_signal: "", recommendation: "allow" }
+        )
       )
     );
     render(
@@ -379,7 +383,8 @@ describe("AgentMonitor trust controls", () => {
         puts.push(await request.json());
         return HttpResponse.json({ spiffe_id: healthy.spiffe_id, frozen: false, trust_cap: null });
       }),
-      http.get(/\/api\/v1\/agents\/spiffe[^/]*invoice-agent$/, () => HttpResponse.json({ ...healthy }))
+      // Capped until the lift, as the API would report it.
+      http.get(/\/api\/v1\/agents\/spiffe[^/]*invoice-agent$/, () => HttpResponse.json(puts.length === 0 ? capped : { ...healthy }))
     );
     await mount();
     expect(await screen.findByTestId("agent-trust-cap")).toHaveTextContent("capped at 0.80");
@@ -452,10 +457,15 @@ describe("AgentMonitor — trust state across the console", () => {
 
   it("Remove Cap says the score is not known yet when the API reports it unscored", async () => {
     const capped = { ...row, score: 0.3, category: "low", trust_cap: 0.3 };
+    let lifted = false;
     server.use(
-      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ spiffe_id: sid, frozen: false, trust_cap: null })),
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => {
+        lifted = true;
+        return HttpResponse.json({ spiffe_id: sid, frozen: false, trust_cap: null });
+      }),
+      // Capped until the lift; after it the score the cap held down is not known until the next call.
       http.get(/\/api\/v1\/agents\/spiffe[^/]*invoice-agent$/, () =>
-        HttpResponse.json({ ...row, score: null, category: "unscored", recommendation: "" })
+        HttpResponse.json(lifted ? { ...row, score: null, category: "unscored", recommendation: "" } : capped)
       )
     );
     await mount([capped]);
@@ -604,5 +614,88 @@ describe("AgentMonitor — an unreadable fleet must not render as an empty one",
     );
     await waitFor(() => expect(screen.getByText("Agent Monitor")).toBeInTheDocument());
     expect(screen.queryByText(/could not read agents/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The Agent Actions panel shows the agent's trust as GET /agents/{id} reports it now, not the list's copy.
+ *
+ * The list is fetched once and kept for 60 s; an agent's signal breakdown lives only while its last call's
+ * snapshot is warm. The panel rendered the list row, so an agent scored seconds ago showed "unscored" and an
+ * empty Signal Breakdown beside a detail endpoint that had both.
+ */
+describe("AgentMonitor — the panel re-reads the selected agent", () => {
+  const sid = "spiffe://norviq/ns/chatbot-prod/sa/default";
+  const listed = {
+    spiffe_id: sid, namespace: "chatbot-prod", agent_class: "default", last_seen: new Date().toISOString(),
+    score: null, category: "unscored", frozen: false, trust_cap: null, controls: "live",
+    violation_count: 97, signals: {}, dominant_signal: "", recommendation: ""
+  };
+  const live = {
+    ...listed, score: 0.61, category: "medium", recommendation: "monitor", dominant_signal: "tool_novelty",
+    signals: { violation_rate: 0.12, tool_novelty: 0.34, scope_drift: 0.27 }
+  };
+  const mount = async (detail: Parameters<typeof http.get>[1]) => {
+    server.use(
+      http.get("/api/v1/agents", () => HttpResponse.json([listed])),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/spiffe[^/]*sa%2Fdefault$/, detail)
+    );
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    fireEvent.click(await screen.findByText(sid));
+    await screen.findByText("Agent Actions");
+  };
+
+  it("shows the live signal breakdown and score when the list row has none", async () => {
+    await mount(() => HttpResponse.json(live));
+    expect(await screen.findByText("tool_novelty")).toBeInTheDocument();
+    expect(screen.getByText("scope_drift")).toBeInTheDocument();
+    expect(screen.getByText("0.34")).toBeInTheDocument();
+    expect(screen.getByText(/dominant: tool_novelty/)).toBeInTheDocument();
+    expect(screen.getAllByText("0.61").length).toBeGreaterThan(0);
+    expect(screen.queryByTestId("agent-trust-unscored")).toBeNull();
+    expect(screen.queryByTestId("agent-signals-empty")).toBeNull();
+  });
+
+  it("says why the breakdown is empty when the API has none either", async () => {
+    await mount(() => HttpResponse.json(listed));
+    expect(await screen.findByTestId("agent-signals-empty")).toHaveTextContent(/kept only briefly/);
+  });
+
+  it("a failed re-read keeps the list's row and raises nothing", async () => {
+    await mount(() => new HttpResponse("boom", { status: 500 }));
+    expect(await screen.findByTestId("agent-signals-empty")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-trust-unscored")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("agent-action-notice")).toBeNull();
+  });
+
+  it("a re-read taken before a freeze never paints the agent unfrozen after it", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    server.use(
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ spiffe_id: sid, frozen: true, trust_cap: null }))
+    );
+    // The panel's re-read is answered with the pre-freeze state, and only after the freeze has landed.
+    await mount(async () => {
+      await gate;
+      return HttpResponse.json(live);
+    });
+    fireEvent.click(await screen.findByText("Freeze Agent"));
+    fireEvent.click(await screen.findByTestId("agent-trust-confirm-submit"));
+    await screen.findByText("Unfreeze Agent");
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByText("Unfreeze Agent")).toBeInTheDocument();
+    expect(screen.queryByText("Freeze Agent")).toBeNull();
+    const frozenTile = screen.getByText("Frozen").closest(".panel") as HTMLElement;
+    expect(within(frozenTile).getByText("1")).toBeInTheDocument();
   });
 });
